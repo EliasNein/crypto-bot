@@ -1,0 +1,99 @@
+"""
+DCA (Dollar-Cost-Averaging) Strategie.
+
+Kauft in regelmäßigen Abständen einen festen Betrag eines Assets,
+unabhängig vom aktuellen Preis. Bewusst die einfachste sinnvolle
+Einstiegsstrategie (siehe Projekt-Recherche in trading-bot-projekt.md):
+keine Timing-Logik, kein Overfitting-Risiko, leicht nachvollziehbar.
+
+Risikomanagement (Notaus, Tageslimit, Portfolio-Stop-Loss) lebt in
+risk.py und wird hier nur eingebunden - siehe dort für Details.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, timezone
+
+from .binance_client import TradingClient
+from .config import Config
+from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord
+
+logger = logging.getLogger("dca_bot")
+
+
+class DCAStrategy:
+    def __init__(self, config: Config, client: TradingClient):
+        self._config = config
+        self._client = client
+        self._ledger = TradeLedger(config.state_file)
+        self._kill_switch = KillSwitch(config.kill_switch_file)
+        self._stop_loss = PortfolioStopLoss(
+            self._ledger, config.stop_loss_pct, config.stop_loss_state_file
+        )
+
+    def _within_daily_limit(self, amount: float) -> bool:
+        # Aus der persistenten Ledger-Datei berechnet statt In-Memory-Zähler,
+        # damit das Limit auch nach einem Neustart des Bots noch gilt.
+        spent_today = self._ledger.spent_on_day(self._config.symbol, date.today())
+        if spent_today + amount > self._config.max_daily_spend:
+            logger.warning(
+                "Tageslimit erreicht: %.2f von max. %.2f bereits ausgegeben. "
+                "Kauf über %.2f wird übersprungen.",
+                spent_today,
+                self._config.max_daily_spend,
+                amount,
+            )
+            return False
+        return True
+
+    def execute_once(self) -> None:
+        """Führt genau einen DCA-Kaufzyklus aus."""
+        self._kill_switch.check()
+
+        symbol = self._config.symbol
+        amount = self._config.quote_amount
+
+        if not self._within_daily_limit(amount):
+            return
+
+        price = self._client.get_current_price(symbol)
+        logger.info("Aktueller Preis für %s: %.2f", symbol, price)
+
+        if self._stop_loss.is_triggered(symbol, price):
+            return
+
+        # Erneute Prüfung unmittelbar vor der Orderplatzierung, damit ein
+        # Notaus, der während der Preisabfrage ausgelöst wurde, den Kauf
+        # noch verhindert statt erst im nächsten Zyklus zu greifen.
+        self._kill_switch.check()
+
+        order = self._client.place_market_buy(symbol, amount)
+
+        if order is not None:
+            # Echte Order: tatsächlich ausgeführte Menge/Betrag verwenden,
+            # falls die Börse abweichend vom angefragten Betrag gefüllt hat.
+            quantity = float(order.get("executedQty", amount / price))
+            quote_spent = float(order.get("cummulativeQuoteQty", amount))
+        else:
+            quantity = amount / price
+            quote_spent = amount
+
+        self._ledger.record(
+            TradeRecord(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                symbol=symbol,
+                quote_spent=quote_spent,
+                quantity=quantity,
+                price=price,
+                dry_run=not self._config.trading_enabled,
+            )
+        )
+
+        if order is not None:
+            logger.info(
+                "DCA-Kauf ausgeführt: %.2f %s zu Preis ~%.2f",
+                amount,
+                symbol,
+                price,
+            )
