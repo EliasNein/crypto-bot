@@ -1,0 +1,2 @@
+python-binance==1.0.19
+python-dotenv==1.0.1
