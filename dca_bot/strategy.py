@@ -17,6 +17,7 @@ from datetime import date, datetime, timezone
 
 from .binance_client import TradingClient
 from .config import Config
+from .notifier import send_notification
 from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord
 
 logger = logging.getLogger("dca_bot")
@@ -70,6 +71,24 @@ class DCAStrategy:
 
         order = self._client.place_market_buy(symbol, amount)
 
+        if order is None and self._config.trading_enabled:
+            # Echter Kaufversuch, der bei der Börse fehlgeschlagen ist
+            # (siehe vorherige Fehlermeldung aus binance_client.py) - das
+            # ist etwas anderes als ein Dry-Run und darf NICHT wie ein
+            # ausgeführter Trade ins Ledger, sonst verfälscht die
+            # geschätzte Menge Stop-Loss- und Tageslimit-Berechnung.
+            logger.error(
+                "Echter Kaufversuch für %s fehlgeschlagen (Preis ~%.2f) - "
+                "kein Ledger-Eintrag, Betrag zählt nicht gegen das Tageslimit.",
+                symbol,
+                price,
+            )
+            send_notification(
+                f"[FEHLER] Echter Kauf fehlgeschlagen für {symbol} "
+                f"(Preis ~{price:.2f}). Siehe Bot-Log für Details."
+            )
+            return
+
         if order is not None:
             # Echte Order: tatsächlich ausgeführte Menge/Betrag verwenden,
             # falls die Börse abweichend vom angefragten Betrag gefüllt hat.
@@ -96,4 +115,13 @@ class DCAStrategy:
                 amount,
                 symbol,
                 price,
+            )
+            send_notification(
+                f"[KAUF] Echter DCA-Kauf ausgeführt: {amount:.2f} {symbol} "
+                f"@ {price:.2f} (Menge: {quantity:.8f})"
+            )
+        else:
+            send_notification(
+                f"[DRY-RUN] Simulierter Kauf: {amount:.2f} {symbol} "
+                f"@ {price:.2f} (Menge: {quantity:.8f})"
             )

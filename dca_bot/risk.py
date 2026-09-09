@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .notifier import send_notification
+
 logger = logging.getLogger("dca_bot")
 
 
@@ -102,12 +104,19 @@ class TradeLedger:
 
     def spent_on_day(self, symbol: str, day: date) -> float:
         """Summe aller (auch simulierten) Käufe eines Symbols an einem Tag."""
-        return sum(
-            r["quote_spent"]
+        _, total_spent = self.day_summary(symbol, day)
+        return total_spent
+
+    def day_summary(self, symbol: str, day: date) -> tuple[int, float]:
+        """Anzahl und Gesamtausgaben aller (auch simulierten) Käufe eines
+        Symbols an einem Tag - Basis für die tägliche Zusammenfassung."""
+        matching = [
+            r
             for r in self._read()
             if r["symbol"] == symbol
             and datetime.fromisoformat(r["timestamp"]).date() == day
-        )
+        ]
+        return len(matching), sum(r["quote_spent"] for r in matching)
 
     def position(self, symbol: str) -> tuple[float, float]:
         """
@@ -217,5 +226,10 @@ class PortfolioStopLoss:
                 self._stop_loss_pct,
             )
             self._pause(symbol, total_spent, current_value, loss_pct)
+            send_notification(
+                f"[STOP-LOSS] {symbol}: {loss_pct:.1f}% Verlust (Limit "
+                f"{self._stop_loss_pct:.1f}%). Käufe pausiert bis manueller "
+                "Reset (python -m dca_bot.reset_stop_loss)."
+            )
             return True
         return False

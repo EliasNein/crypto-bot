@@ -37,6 +37,10 @@ class Config:
     state_file: str = "data/trade_ledger.json"  # Persistente Trade-Historie
     stop_loss_state_file: str = "data/stop_loss_paused.json"  # Existiert diese Datei, bleibt der Stop-Loss pausiert
 
+    # --- Benachrichtigungen (optional) ---
+    telegram_bot_token: str = ""  # Leer = Telegram-Benachrichtigungen deaktiviert
+    telegram_chat_id: str = ""
+
     # --- Logging ---
     log_file: str = "logs/dca_bot.log"
 
@@ -60,6 +64,8 @@ def load_config() -> Config:
     stop_loss_state_file = os.getenv(
         "DCA_BOT_STOP_LOSS_STATE_FILE", "data/stop_loss_paused.json"
     )
+    telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
     return Config(
         api_key=api_key,
@@ -69,4 +75,6 @@ def load_config() -> Config:
         stop_loss_pct=stop_loss_pct,
         state_file=state_file,
         stop_loss_state_file=stop_loss_state_file,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
     )

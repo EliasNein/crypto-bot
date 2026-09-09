@@ -110,6 +110,7 @@ Arbitrage, Market Making, Scalping als **erste** Strategien – zu kapital-/late
 - [ ] Erste einfache Strategie + Backtesting-Skript implementieren
 - [x] Risikomanagement-Logik definieren (Positionsgrößen, Stop-Loss, Tagesverlustlimit) – Notaus, persistentes Tageslimit und Portfolio-Stop-Loss in `dca_bot/risk.py` umgesetzt
 - [ ] Optionaler automatischer Reset des Portfolio-Stop-Loss (Erholungs-Schwelle + Cooldown-Zeit, z.B. "erst wieder aktiv, wenn Kurs X% über Trigger-Niveau UND mindestens Y Stunden seit Trigger vergangen"): bewusst noch **nicht** implementiert. Aktueller Default ist ein reiner manueller Reset (siehe `dca_bot/reset_stop_loss.py`), um Whipsaw-Effekte (wiederholtes Neu-Einsteigen bei kurzen Erholungen knapp über der Schwelle, gefolgt von erneutem Fall) zu vermeiden. Falls das zu unpraktisch wird, könnte diese Erweiterung optional (per Config-Flag) nachgerüstet werden.
+- [x] Monitoring & Benachrichtigungen (Telegram) – `dca_bot/notifier.py` sendet optional (nur wenn `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` gesetzt sind) bei jedem Kaufzyklus, Stop-Loss-Trigger, Notaus, unerwarteten Fehlern und einmal täglich als Zusammenfassung; Fehler beim Senden legen den Bot nie lahm (siehe README Abschnitt 7).
 
 ---
 
