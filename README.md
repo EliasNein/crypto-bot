@@ -38,6 +38,10 @@ DCA_BOT_KILL_SWITCH_FILE=STOP          # Existiert diese Datei -> Bot stoppt sof
 DCA_BOT_HALT=false                     # Alternative zur Datei: auf "true" setzen zum Stoppen
 DCA_BOT_STOP_LOSS_PCT=25.0             # Käufe pausieren ab X% Verlust ggü. Einsatz (0 = aus)
 DCA_BOT_STATE_FILE=data/trade_ledger.json
+
+# Telegram-Benachrichtigungen (optional, leer lassen zum Deaktivieren)
+TELEGRAM_BOT_TOKEN=dein_telegram_bot_token
+TELEGRAM_CHAT_ID=deine_telegram_chat_id
 ```
 
 **Wichtig:** `DCA_BOT_ENABLE_TRADING` bleibt zunächst auf `false`. In diesem Modus
@@ -66,6 +70,8 @@ trading-bot/
 │   ├── config.py         # Zentrale Konfiguration (liest .env)
 │   ├── binance_client.py # Wrapper um die Binance-API (Testnet)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
+│   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss
+│   ├── notifier.py       # Telegram-Benachrichtigungen (optional)
 │   └── main.py           # Einstiegspunkt / Ausführungsschleife
 ├── requirements.txt
 ├── .env.example
@@ -95,7 +101,29 @@ trading-bot/
 - **Fehlerbehandlung pro Zyklus**: Ein einzelner Fehler (z.B. API-Timeout)
   beendet nicht den ganzen Bot, sondern wird geloggt; der nächste Zyklus läuft normal weiter.
 
-## 7. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
+## 7. Telegram-Benachrichtigungen (optional)
+
+Wenn `TELEGRAM_BOT_TOKEN` und `TELEGRAM_CHAT_ID` gesetzt sind, schickt der Bot
+Nachrichten für:
+
+- jeden ausgeführten Kaufzyklus (`[KAUF]` für echte Orders, `[DRY-RUN]` für
+  simulierte, `[FEHLER]` wenn eine echte Order bei der Börse fehlschlägt),
+- ein Auslösen des Portfolio-Stop-Loss (`[STOP-LOSS]`),
+- ein Auslösen des Notaus (`[NOTAUS]`),
+- unerwartete Fehler im Kaufzyklus (`[FEHLER]`),
+- eine Tageszusammenfassung (`[TAGESZUSAMMENFASSUNG]`) einmal pro
+  abgeschlossenem Kalendertag mit Trade-Anzahl, Ausgaben und Stop-Loss-Status.
+
+Sind beide Variablen leer, bleibt Telegram komplett deaktiviert - das ist der
+Default. Ein Telegram-Ausfall oder ein falscher Token lässt den Bot niemals
+abstürzen, es wird nur geloggt (siehe `dca_bot/notifier.py`).
+
+Bot-Token bekommst du von [@BotFather](https://t.me/BotFather), deine Chat-ID
+z.B. über [@userinfobot](https://t.me/userinfobot) oder indem du deinem Bot
+eine Nachricht schickst und dann `https://api.telegram.org/bot<TOKEN>/getUpdates`
+im Browser aufrufst.
+
+## 8. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)
