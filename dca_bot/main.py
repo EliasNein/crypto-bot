@@ -60,7 +60,7 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("DCA-Bot startet")
-    logger.info("Symbol: %s | Betrag pro Kauf: %.2f | Intervall: %dh",
+    logger.info("Symbol: %s | Betrag pro Kauf: %.2f | Intervall: %.2fh",
                 config.symbol, config.quote_amount, config.interval_hours)
     logger.info("Trading aktiv (kein Dry-Run): %s", config.trading_enabled)
     if not config.trading_enabled:
@@ -90,7 +90,7 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Kaufzyklus.")
 
-            logger.info("Warte %d Stunden bis zum nächsten Zyklus ...",
+            logger.info("Warte %.2f Stunden bis zum nächsten Zyklus ...",
                         config.interval_hours)
             if _sleep_with_kill_switch_check(interval_seconds, kill_switch):
                 logger.warning("Notaus während Wartezeit ausgelöst - Bot wird gestoppt.")
