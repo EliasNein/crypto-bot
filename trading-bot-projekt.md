@@ -118,7 +118,49 @@ Arbitrage, Market Making, Scalping als **erste** Strategien – zu kapital-/late
   - **Zusatz-Analyse** (nur zur Einordnung, NICHT das Live-Verhalten): ein simulierter periodischer manueller Stop-Loss-Reset (`--simulate-reset-after-days`) zeigt, dass der fehlende Reset einen erheblichen Teil der 2023-Unterperformance erklärt (mit 14-Tage-Reset: ~+55% statt ~+13% ggü. Positionsgröße, durch einen zusätzlichen Wiedereinstieg am 19.10.2023). Im Bärenmarkt 2022 ändert der Reset dagegen nichts – kein neues Fehlsignal, da der Trend durchgehend negativ blieb.
   - **Beim Backtesting selbst ein Report-Bug gefunden und behoben** (kein Fehler in der Handelslogik): Eine am Ende eines Testzeitraums noch offene Position wurde nicht in `Anzahl Trades`/`Gesamt-PnL` gezählt, wodurch aktive Perioden fälschlich wie "keine Aktivität" wirkten (siehe 2021-Seitwärts-Ergebnis oben) und die Reset-Analyse zunächst wirkungslos erschien. Jetzt wird eine am Ende offene Position separat und unrealisiert ausgewiesen.
   - Live-Strategie mit Fake-Client-Tests verifiziert: Einstieg bei bestätigtem Signal, kein Doppel-Einstieg, Ausstieg per Signal-Umkehr (separat getestet, ohne Stop-Loss-Interferenz), Stop-Loss-Exit mit Latch und Blockade neuer Einstiege bis manueller Reset, Notaus-Isolation (`TREND_BOT_HALT` betrifft nicht DCA/Grid).
-  - Noch **kein** Live-Dry-Run gestartet – nur die Bausteine sind fertig, der Start ist ein separater nächster Schritt.
+  - Kurzer technischer Dry-Run-Check am 10.09.2026 auf dem Desktop erfolgreich: Start fehlerfrei, historische Tageskerzen korrekt geladen, EMA-Berechnung unabhängig gegengeprüft (EMA-20/EMA-50-Abstand 6,66 %, Richtung "up" bestätigt – deckungsgleich mit der Bot-Entscheidung), ein Dry-Run-Einstieg ausgelöst (kein echter Trade), sauber über den Notaus gestoppt. Kein tagelanger Dauerlauf gestartet, da ein echtes Signal auf Tageskerzen ohnehin mehrere Tage dauert.
+
+## 6a. Plan für Samstag (nach Abschluss des Laptop-DCA-Tests, 12.09.2026, 18:10 Uhr)
+
+Reihenfolge wichtig: Schritt 2 (Datei-Transfer) muss vor Schritt 3
+(Grid-Bot starten) passieren, sonst startet der Grid-Bot fälschlich mit
+leerem Zustand statt die bestehenden Positionen fortzusetzen. Schritte 1
+und 4 sind davon unabhängig und können in beliebiger Reihenfolge erfolgen.
+
+1. **DCA-Bot mit Telegram-Integration auf dem Laptop neu starten.**
+   Sicherstellen, dass alle Commits vom Desktop nach GitHub gepusht
+   wurden, dann auf dem Laptop `git pull` (bringt Telegram-Integration +
+   den Stop-Loss/Tageslimit-Prüfreihenfolge-Fix). In der Laptop-`.env`
+   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` ergänzen (Teil von `.gitignore`,
+   kommt nicht automatisch mit). Prüfen, dass `interval_hours` in
+   `config.py` auf dem regulären Wert (24) steht, nicht mehr auf einem
+   Test-Intervall. Starten mit `python -m dca_bot.main`.
+
+2. **Zustand vom Desktop auf den Laptop übertragen – manuell, NICHT über
+   Git.** Der Ordner `data/` steht in `.gitignore` und wird nicht
+   synchronisiert. Insbesondere `data/grid_positions.json` (6 offene
+   Grid-Positionen vom 10.09.2026, siehe oben) muss manuell kopiert
+   werden (z.B. USB-Stick oder Cloud-Speicher) – sonst startet der
+   Grid-Bot auf dem Laptop mit leerem Ledger statt die bestehenden
+   Positionen weiterzuverfolgen. Optional auch `data/trend_ledger.json`
+   (1 offene Dry-Run-Position aus dem Technik-Check vom 10.09.2026)
+   mitübertragen, falls dort Kontinuität gewünscht ist – nicht zwingend,
+   da es nur ein Testartefakt ohne echten Trade war.
+
+3. **Grid-Bot auf dem Laptop fortsetzen.** Nach dem Datei-Transfer aus
+   Schritt 2: `GRID_LOWER_LIMIT`/`GRID_UPPER_LIMIT`/`GRID_SPACING_PCT`/
+   `GRID_INTERVAL_MINUTES` in der Laptop-`.env` auf die eigentlichen
+   Ziel-Werte setzen (68000.0 / 88000.0 / 1.5 / 5) – **nicht** die auf dem
+   Desktop nur für den kurzen Beobachtungstest verwendete enge Spanne
+   (±0,5 %, 0,1 % Abstand, 2-Minuten-Intervall) übernehmen. Starten mit
+   `python -m dca_bot.main_grid` – die 6 übertragenen offenen Positionen
+   werden automatisch aus dem Ledger erkannt und weiterverfolgt.
+
+4. **Trend-Following-Bot auf dem Laptop starten.** Mit den Backtest-
+   Defaults (20/50 EMA, 1,0 % Filter, 10 % Stop-Loss), unverändert.
+   Starten mit `python -m dca_bot.main_trend` – lädt die EMA-Historie
+   beim Start automatisch aus echten historischen Kursdaten neu, dafür
+   ist kein manueller Datei-Transfer nötig.
 
 ---
 
