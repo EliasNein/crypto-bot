@@ -103,25 +103,50 @@ trading-bot/
 
 ## 7. Telegram-Benachrichtigungen (optional)
 
-Wenn `TELEGRAM_BOT_TOKEN` und `TELEGRAM_CHAT_ID` gesetzt sind, schickt der Bot
-Nachrichten für:
+Der Bot kann optional Ereignisse per Telegram-Nachricht melden. Ist nichts
+konfiguriert, bleibt Telegram komplett deaktiviert (Default) - der Bot läuft
+identisch weiter, es wird nur nichts verschickt.
 
-- jeden ausgeführten Kaufzyklus (`[KAUF]` für echte Orders, `[DRY-RUN]` für
-  simulierte, `[FEHLER]` wenn eine echte Order bei der Börse fehlschlägt),
-- ein Auslösen des Portfolio-Stop-Loss (`[STOP-LOSS]`),
-- ein Auslösen des Notaus (`[NOTAUS]`),
-- unerwartete Fehler im Kaufzyklus (`[FEHLER]`),
-- eine Tageszusammenfassung (`[TAGESZUSAMMENFASSUNG]`) einmal pro
-  abgeschlossenem Kalendertag mit Trade-Anzahl, Ausgaben und Stop-Loss-Status.
+### 7.1 Einrichtung
 
-Sind beide Variablen leer, bleibt Telegram komplett deaktiviert - das ist der
-Default. Ein Telegram-Ausfall oder ein falscher Token lässt den Bot niemals
-abstürzen, es wird nur geloggt (siehe `dca_bot/notifier.py`).
+1. **Bot erstellen:** Mit [@BotFather](https://t.me/BotFather) in Telegram
+   chatten, `/newbot` senden und den Anweisungen folgen (Name + Username
+   vergeben). Am Ende bekommst du einen **Bot-Token** (Format
+   `123456789:AAxx...`) - das ist `TELEGRAM_BOT_TOKEN`.
+2. **Chat mit deinem Bot starten:** Deinen neuen Bot in Telegram suchen und
+   ihm eine beliebige erste Nachricht schicken (z.B. "Hallo") - ohne diesen
+   Schritt darf der Bot dir laut Telegram-API nicht schreiben.
+3. **Chat-ID herausfinden**, eine der folgenden Optionen:
+   - Kurz [@userinfobot](https://t.me/userinfobot) anschreiben, er zeigt
+     deine eigene Chat-ID an, oder
+   - `https://api.telegram.org/bot<TOKEN>/getUpdates` im Browser aufrufen
+     (nachdem du deinem Bot wie in Schritt 2 geschrieben hast) und im JSON
+     nach `"chat":{"id": ...}` suchen.
+4. Beide Werte in `.env` eintragen:
+   ```
+   TELEGRAM_BOT_TOKEN=123456789:AAxx...
+   TELEGRAM_CHAT_ID=987654321
+   ```
+5. Neu starten - im Log erscheint dann `Telegram-Benachrichtigungen aktiv.`
 
-Bot-Token bekommst du von [@BotFather](https://t.me/BotFather), deine Chat-ID
-z.B. über [@userinfobot](https://t.me/userinfobot) oder indem du deinem Bot
-eine Nachricht schickst und dann `https://api.telegram.org/bot<TOKEN>/getUpdates`
-im Browser aufrufst.
+### 7.2 Welche Ereignisse gemeldet werden
+
+- **Käufe**: jeder ausgeführte Kaufzyklus - `[KAUF]` bei einer echten Order,
+  `[DRY-RUN]` bei einem simulierten Kauf, `[FEHLER]` wenn eine echte Order
+  bei der Börse fehlschlägt.
+- **Stop-Loss**: `[STOP-LOSS]`, wenn der Portfolio-Stop-Loss auslöst (siehe
+  Abschnitt 6) - nur einmal beim Auslösen, keine Wiederholung, solange er
+  pausiert bleibt.
+- **Notaus**: `[NOTAUS]`, sobald der Notaus-Mechanismus greift.
+- **Fehler**: `[FEHLER]` bei unerwarteten Fehlern im Kaufzyklus (z.B.
+  API-Timeout), zusätzlich zum Log-Eintrag.
+- **Tageszusammenfassung**: `[TAGESZUSAMMENFASSUNG]` einmal pro
+  abgeschlossenem Kalendertag mit Trade-Anzahl, Ausgaben und
+  Stop-Loss-Status.
+
+Ein Telegram-Ausfall, ein falscher Token oder ein Netzwerkfehler lässt den
+Bot niemals abstürzen oder einen Kaufzyklus abbrechen - jeder Fehler beim
+Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
 
 ## 8. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
