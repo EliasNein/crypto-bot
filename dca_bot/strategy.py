@@ -55,13 +55,19 @@ class DCAStrategy:
         symbol = self._config.symbol
         amount = self._config.quote_amount
 
-        if not self._within_daily_limit(amount):
-            return
-
+        # Stop-Loss bewusst VOR dem Tageslimit geprüft: Er soll in jedem
+        # Zyklus ausgewertet werden und pausieren/benachrichtigen können,
+        # auch wenn das Tageslimit an diesem Tag bereits ausgeschöpft ist.
+        # Andernfalls würde ein tagesübergreifend ausgeschöpftes Limit die
+        # Stop-Loss-Prüfung (und damit die Benachrichtigung) bis zum
+        # nächsten Tag verzögern, obwohl kein Kauf mehr stattfindet.
         price = self._client.get_current_price(symbol)
         logger.info("Aktueller Preis für %s: %.2f", symbol, price)
 
         if self._stop_loss.is_triggered(symbol, price):
+            return
+
+        if not self._within_daily_limit(amount):
             return
 
         # Erneute Prüfung unmittelbar vor der Orderplatzierung, damit ein
