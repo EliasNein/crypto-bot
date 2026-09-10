@@ -1,9 +1,18 @@
-# DCA-Bot (Binance Testnet)
+# Trading-Bots (Binance Testnet)
 
-Erster Baustein des Trading-Bot-Projekts: ein einfacher Dollar-Cost-Averaging-Bot,
-der in festen Intervallen einen festen Betrag eines Assets kauft. Läuft ausschließlich
-gegen die **Binance Testnet API** – es wird zu keinem Zeitpunkt echtes Geld bewegt,
-solange du keine echten API-Keys einträgst.
+Zwei komplett eigenständige Bots im selben Projekt, beide gegen die
+**Binance Testnet API** – es wird zu keinem Zeitpunkt echtes Geld bewegt,
+solange du keine echten API-Keys einträgst:
+
+- **DCA-Bot** (`dca_bot/main.py`): kauft in festen Intervallen einen festen
+  Betrag eines Assets (Dollar-Cost-Averaging).
+- **Grid-Trading-Bot** (`dca_bot/main_grid.py`, siehe Abschnitt 9): kauft an
+  festen Preisstufen innerhalb einer Preisspanne und verkauft jede Position
+  einzeln wieder, wenn der Preis eine Stufe höher steigt.
+
+Beide teilen sich nur die Binance-/Telegram-Zugangsdaten in der `.env` -
+Zustand (Trade-Historie, Notaus, Stop-Loss) ist für jeden Bot komplett
+getrennt, sie können unabhängig voneinander (auch gleichzeitig) laufen.
 
 ## 1. Voraussetzungen
 
@@ -67,12 +76,18 @@ Beenden mit `Strg+C`.
 ```
 trading-bot/
 ├── dca_bot/
-│   ├── config.py         # Zentrale Konfiguration (liest .env)
-│   ├── binance_client.py # Wrapper um die Binance-API (Testnet)
+│   ├── config.py         # Zentrale Konfiguration DCA-Bot (liest .env)
+│   ├── binance_client.py # Wrapper um die Binance-API (Testnet, Buy+Sell)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
-│   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss
-│   ├── notifier.py       # Telegram-Benachrichtigungen (optional)
-│   └── main.py           # Einstiegspunkt / Ausführungsschleife
+│   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss (DCA)
+│   ├── notifier.py       # Telegram-Benachrichtigungen (optional, geteilt)
+│   ├── main.py           # Einstiegspunkt DCA-Bot
+│   ├── grid_config.py    # Zentrale Konfiguration Grid-Bot (liest .env)
+│   ├── grid_risk.py      # Positions-Ledger, Trendbruch-Stop-Loss (Grid)
+│   ├── grid_strategy.py  # Grid-Kauf-/Verkaufslogik
+│   ├── main_grid.py      # Einstiegspunkt Grid-Bot
+│   ├── reset_stop_loss.py       # CLI: DCA-Stop-Loss-Pause zurücksetzen
+│   └── reset_grid_stop_loss.py  # CLI: Grid-Stop-Loss-Pause zurücksetzen
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -148,9 +163,85 @@ Ein Telegram-Ausfall, ein falscher Token oder ein Netzwerkfehler lässt den
 Bot niemals abstürzen oder einen Kaufzyklus abbrechen - jeder Fehler beim
 Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
 
-## 8. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
+## 9. Spot-Grid-Trading-Bot (zweiter, eigenständiger Bot)
+
+Kauft an festen Preisstufen ("Grid-Stufen") innerhalb einer konfigurierten
+Preisspanne und verkauft jede einzelne Position wieder, sobald der Preis auf
+die nächsthöhere Stufe steigt - Spot only, kein Hebel, kein
+Liquidationsrisiko. Siehe `trading-bot-projekt.md` Abschnitt 5 für die
+Recherche dazu: der Erwartungswert ist vor Gebühren akademisch mathematisch
+null, der Sinn dieser Strategie liegt in der einfachen, latenzunkritischen
+Umsetzung, nicht in überlegener Rendite. Haupt-Risiko ist ein Trendbruch.
+
+### 9.1 Konfiguration
+
+Zusätzlich zu den Binance-/Telegram-Zugangsdaten oben (werden mitgenutzt):
+
+```
+GRID_SYMBOL=BTCUSDT
+GRID_LOWER_LIMIT=70000.0      # Untere Grid-Grenze - AN AKTUELLEN MARKT ANPASSEN!
+GRID_UPPER_LIMIT=90000.0      # Obere Grid-Grenze - AN AKTUELLEN MARKT ANPASSEN!
+GRID_SPACING_PCT=1.5          # Abstand zwischen den Stufen in %
+GRID_AMOUNT_PER_LEVEL=15.0    # Betrag pro Stufe in Quote-Währung
+GRID_INTERVAL_MINUTES=5       # Wie oft der Preis geprüft wird
+GRID_BOT_ENABLE_TRADING=false
+GRID_KILL_SWITCH_FILE=STOP_GRID
+GRID_BOT_HALT=false
+GRID_STOP_LOSS_PCT=15.0
+GRID_STATE_FILE=data/grid_positions.json
+GRID_STOP_LOSS_STATE_FILE=data/grid_stop_loss_paused.json
+```
+
+**Wichtig:** `GRID_LOWER_LIMIT`/`GRID_UPPER_LIMIT` sind Platzhalter-Defaults -
+unbedingt vor dem Start an den aktuellen Marktpreis anpassen, sonst kauft
+(im Dry-Run: simuliert) der Bot ggf. weit weg vom echten Kurs.
+
+### 9.2 Starten
+
+```bash
+python -m dca_bot.main_grid
+```
+
+Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
+`logs/grid_bot.log`.
+
+### 9.3 Kernlogik
+
+- Die Grid-Stufen werden geometrisch berechnet (`level[i+1] = level[i] * (1 +
+  GRID_SPACING_PCT/100)`), nicht linear.
+- Pro Stufe kann höchstens eine Position gleichzeitig offen sein. Jede
+  Position merkt sich ihre Kaufstufe und ihr individuelles Verkaufsziel (die
+  nächsthöhere Stufe) - Verkäufe sind dadurch immer eindeutig einer
+  bestimmten Kaufstufe zugeordnet, nie "irgendeine" Position.
+- Käufe werden über eine Crossing-Erkennung ausgelöst (Vergleich mit dem
+  zuletzt beobachteten Preis), nicht durch einen einfachen Vergleich mit dem
+  aktuellen Preis - sonst würde ein Kaltstart mitten im Grid sofort jede
+  Stufe oberhalb des Startpreises gleichzeitig kaufen. Fällt der Preis in
+  einem Intervall durch mehrere Stufen auf einmal (z.B. bei einem Crash),
+  werden alle tatsächlich durchquerten Stufen gekauft.
+- Maximale Kapitalbindung ist durch das Design von selbst begrenzt: Anzahl
+  Grid-Stufen × `GRID_AMOUNT_PER_LEVEL` - kein zusätzliches Tageslimit nötig.
+
+### 9.4 Sicherheitsmechanismen (eigenständig vom DCA-Bot)
+
+- **Dry-Run per Default**, analog zum DCA-Bot.
+- **Notaus**: eigene Datei (`GRID_KILL_SWITCH_FILE`, Default `STOP_GRID`)
+  und eigene Env-Variable (`GRID_BOT_HALT`) - unabhängig vom DCA-Notaus.
+- **Trendbruch-Stop-Loss** (`GRID_STOP_LOSS_PCT`, Default 15%): Fällt der
+  Marktpreis mehr als X% unter `GRID_LOWER_LIMIT`, pausiert der Bot neue
+  Käufe. Bereits offene Positionen werden weiterhin normal verkauft, wenn
+  ihr Ziel erreicht wird (Verkäufe reduzieren Risiko, statt es zu erhöhen).
+  Latched wie der DCA-Stop-Loss: kein automatischer Reset, manuell mit
+  `python -m dca_bot.reset_grid_stop_loss` oder durch Löschen der Datei
+  unter `GRID_STOP_LOSS_STATE_FILE`.
+- **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
+  `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (mit realisiertem
+  Gewinn/Verlust dieser Position), `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`,
+  `[GRID-FEHLER]`.
+
+## 10. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)
 - [ ] Backtesting-Skript für die DCA-Logik auf historischen Daten
-- [ ] Danach: Grid-Trading- bzw. Mean-Reversion-Strategie als zweiter Baustein
+- [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 9)
