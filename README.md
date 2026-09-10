@@ -6,10 +6,10 @@ solange du keine echten API-Keys einträgst:
 
 - **DCA-Bot** (`dca_bot/main.py`): kauft in festen Intervallen einen festen
   Betrag eines Assets (Dollar-Cost-Averaging).
-- **Grid-Trading-Bot** (`dca_bot/main_grid.py`, siehe Abschnitt 9): kauft an
+- **Grid-Trading-Bot** (`dca_bot/main_grid.py`, siehe Abschnitt 8): kauft an
   festen Preisstufen innerhalb einer Preisspanne und verkauft jede Position
   einzeln wieder, wenn der Preis eine Stufe höher steigt.
-- **Trend-Following-Bot** (`dca_bot/main_trend.py`, siehe Abschnitt 10):
+- **Trend-Following-Bot** (`dca_bot/main_trend.py`, siehe Abschnitt 9):
   EMA-Crossover mit Trendstärke-Filter auf Tageskerzen, long-only, mit
   festem Stop-Loss pro Trade. Vor dem ersten Dry-Run per Backtest über
   mehrere historische Marktphasen validiert (siehe `trend_backtest.py`).
@@ -174,7 +174,7 @@ Ein Telegram-Ausfall, ein falscher Token oder ein Netzwerkfehler lässt den
 Bot niemals abstürzen oder einen Kaufzyklus abbrechen - jeder Fehler beim
 Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
 
-## 9. Spot-Grid-Trading-Bot (zweiter, eigenständiger Bot)
+## 8. Spot-Grid-Trading-Bot (zweiter, eigenständiger Bot)
 
 Kauft an festen Preisstufen ("Grid-Stufen") innerhalb einer konfigurierten
 Preisspanne und verkauft jede einzelne Position wieder, sobald der Preis auf
@@ -250,7 +250,7 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   Gewinn/Verlust dieser Position), `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`,
   `[GRID-FEHLER]`.
 
-## 10. Trend-Following-Bot (dritter, eigenständiger Bot)
+## 9. Trend-Following-Bot (dritter, eigenständiger Bot)
 
 EMA-Crossover-Strategie auf Tageskerzen mit Trendstärke-Filter, long-only
 (Spot, kein Shorting). Siehe `trading-bot-projekt.md` Abschnitt 5 für die
@@ -328,10 +328,10 @@ bei Null anfangen müssen.
   realisiertem Gewinn/Verlust und Ausstiegsgrund), `[TREND-STOP-LOSS]`,
   `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
 
-## 11. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
+## 10. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)
 - [ ] Backtesting-Skript für die DCA-Logik auf historischen Daten
-- [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 9)
-- [x] Trend-Following-Strategie (EMA-Crossover) als dritter, eigenständiger Bot, inkl. Backtest vor dem ersten Dry-Run (siehe Abschnitt 10)
+- [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 8)
+- [x] Trend-Following-Strategie (EMA-Crossover) als dritter, eigenständiger Bot, inkl. Backtest vor dem ersten Dry-Run (siehe Abschnitt 9)
