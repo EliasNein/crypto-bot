@@ -1,6 +1,6 @@
 # Trading-Bots (Binance Testnet)
 
-Zwei komplett eigenständige Bots im selben Projekt, beide gegen die
+Drei komplett eigenständige Bots im selben Projekt, alle gegen die
 **Binance Testnet API** – es wird zu keinem Zeitpunkt echtes Geld bewegt,
 solange du keine echten API-Keys einträgst:
 
@@ -9,8 +9,12 @@ solange du keine echten API-Keys einträgst:
 - **Grid-Trading-Bot** (`dca_bot/main_grid.py`, siehe Abschnitt 9): kauft an
   festen Preisstufen innerhalb einer Preisspanne und verkauft jede Position
   einzeln wieder, wenn der Preis eine Stufe höher steigt.
+- **Trend-Following-Bot** (`dca_bot/main_trend.py`, siehe Abschnitt 10):
+  EMA-Crossover mit Trendstärke-Filter auf Tageskerzen, long-only, mit
+  festem Stop-Loss pro Trade. Vor dem ersten Dry-Run per Backtest über
+  mehrere historische Marktphasen validiert (siehe `trend_backtest.py`).
 
-Beide teilen sich nur die Binance-/Telegram-Zugangsdaten in der `.env` -
+Alle drei teilen sich nur die Binance-/Telegram-Zugangsdaten in der `.env` -
 Zustand (Trade-Historie, Notaus, Stop-Loss) ist für jeden Bot komplett
 getrennt, sie können unabhängig voneinander (auch gleichzeitig) laufen.
 
@@ -86,8 +90,15 @@ trading-bot/
 │   ├── grid_risk.py      # Positions-Ledger, Trendbruch-Stop-Loss (Grid)
 │   ├── grid_strategy.py  # Grid-Kauf-/Verkaufslogik
 │   ├── main_grid.py      # Einstiegspunkt Grid-Bot
-│   ├── reset_stop_loss.py       # CLI: DCA-Stop-Loss-Pause zurücksetzen
-│   └── reset_grid_stop_loss.py  # CLI: Grid-Stop-Loss-Pause zurücksetzen
+│   ├── trend_config.py   # Zentrale Konfiguration Trend-Bot (liest .env)
+│   ├── trend_signals.py  # EMA-Crossover + Trendstärke-Filter (Backtest UND Live)
+│   ├── trend_risk.py     # Trade-Ledger, Stop-Loss-Latch (Trend)
+│   ├── trend_strategy.py # Trend-Following-Ein-/Ausstiegslogik
+│   ├── trend_backtest.py # Backtest über historische Marktphasen
+│   ├── main_trend.py     # Einstiegspunkt Trend-Bot
+│   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
+│   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
+│   └── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -239,9 +250,88 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   Gewinn/Verlust dieser Position), `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`,
   `[GRID-FEHLER]`.
 
-## 10. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
+## 10. Trend-Following-Bot (dritter, eigenständiger Bot)
+
+EMA-Crossover-Strategie auf Tageskerzen mit Trendstärke-Filter, long-only
+(Spot, kein Shorting). Siehe `trading-bot-projekt.md` Abschnitt 5 für die
+Recherche: Trend-Following ist die akademisch am besten belegte
+Alpha-Strategie (Liu & Tsyvinski, Gbadebo), Hauptrisiken sind Overfitting
+und Momentum-Crashes.
+
+**Vor dem ersten Dry-Run wurde die Strategie per Backtest über drei
+historische Marktphasen validiert** (`python -m dca_bot.trend_backtest`,
+Code in `trend_backtest.py`) - siehe trading-bot-projekt.md für die
+Ergebnisse und deren ehrliche Einordnung (schützt im Bärenmarkt, verpasst
+ohne periodischen manuellen Stop-Loss-Reset einen Teil der Rendite im
+Bullenmarkt).
+
+### 10.1 Konfiguration
+
+Zusätzlich zu den Binance-/Telegram-Zugangsdaten oben (werden mitgenutzt).
+Defaults entsprechen exakt den im Backtest getesteten Werten:
+
+```
+TREND_SYMBOL=BTCUSDT
+TREND_EMA_FAST_PERIOD=20      # Schneller EMA in Tagen
+TREND_EMA_SLOW_PERIOD=50      # Langsamer EMA in Tagen
+TREND_MIN_GAP_PCT=1.0         # Trendstärke-Filter: Mindestabstand der EMAs in %
+TREND_AMOUNT_PER_TRADE=15.0   # Positionsgröße pro Trade in Quote-Währung
+TREND_INTERVAL_HOURS=24       # Tageskerzen -> einmal täglich prüfen
+TREND_BOT_ENABLE_TRADING=false
+TREND_KILL_SWITCH_FILE=STOP_TREND
+TREND_STOP_LOSS_PCT=10.0      # Fixer Stop-Loss unterhalb des Einstiegspreises
+```
+
+### 10.2 Starten
+
+```bash
+python -m dca_bot.main_trend
+```
+
+Läuft komplett unabhängig von DCA- und Grid-Bot (auch parallel), eigenes
+Log unter `logs/trend_bot.log`. Lädt beim Start automatisch echte
+historische Tageskerzen (öffentliche Binance-API), damit die EMAs nicht
+bei Null anfangen müssen.
+
+### 10.3 Kernlogik
+
+- **Signal**: Ein EMA-Crossover allein reicht nicht - der Abstand zwischen
+  schnellem und langsamem EMA muss auf mindestens `TREND_MIN_GAP_PCT`
+  anwachsen, bevor das Signal als bestätigt gilt (Bestätigungslogik statt
+  ADX - einfacher und robuster zu verifizieren, siehe `trend_signals.py`).
+  Das filtert Whipsaws heraus, bei denen der Preis kurz nach dem Crossover
+  wieder zurückkreuzt.
+- **Ein-/Ausstieg**: Long bei bestätigtem Aufwärtssignal; Ausstieg bei
+  bestätigter Signal-Umkehr ODER Erreichen des Stop-Loss, je nachdem was
+  zuerst eintritt (Stop-Loss hat Priorität bei Gleichzeitigkeit). Kein
+  Shorting - bei bestätigtem Abwärtssignal ohne offene Position passiert
+  nichts.
+- **Dieselbe Entscheidungslogik** (`TrendSignalGenerator`, `decide_action`,
+  `is_stop_loss_hit` aus `trend_signals.py`) wird von Backtest UND
+  Live-Strategie importiert - keine doppelte Implementierung, die
+  unbemerkt auseinanderlaufen könnte.
+
+### 10.4 Sicherheitsmechanismen (eigenständig von DCA/Grid)
+
+- **Dry-Run per Default**, analog zu DCA/Grid.
+- **Notaus**: eigene Datei (`TREND_KILL_SWITCH_FILE`, Default `STOP_TREND`)
+  und eigene Env-Variable (`TREND_BOT_HALT`) - unabhängig von DCA/Grid.
+- **Fixer Stop-Loss pro Trade** (`TREND_STOP_LOSS_PCT`, Default 10%
+  unterhalb des Einstiegspreises): schließt die Position und pausiert
+  danach neue Einstiege. Latched wie bei DCA/Grid: kein automatischer
+  Reset, manuell mit `python -m dca_bot.reset_trend_stop_loss` oder durch
+  Löschen der Datei unter `TREND_STOP_LOSS_STATE_FILE`. Der Backtest zeigt
+  deutlich den Preis dafür - ohne periodischen manuellen Reset verpasst
+  die Strategie ggf. einen Großteil einer nachfolgenden Erholung.
+- **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
+  `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`, `[TREND-AUSSTIEG]` (mit
+  realisiertem Gewinn/Verlust und Ausstiegsgrund), `[TREND-STOP-LOSS]`,
+  `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
+
+## 11. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)
 - [ ] Backtesting-Skript für die DCA-Logik auf historischen Daten
 - [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 9)
+- [x] Trend-Following-Strategie (EMA-Crossover) als dritter, eigenständiger Bot, inkl. Backtest vor dem ersten Dry-Run (siehe Abschnitt 10)
