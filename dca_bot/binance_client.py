@@ -67,3 +67,29 @@ class TradingClient:
         except (BinanceAPIException, BinanceOrderException) as exc:
             logger.error("Fehler beim Platzieren der Order: %s", exc)
             return None
+
+    def place_market_sell(self, symbol: str, quantity: float) -> dict | None:
+        """
+        Platziert einen Market-Sell über eine exakte Menge des Base-Assets
+        (z.B. "verkaufe 0.0002 BTC") - z.B. zum Schließen einer einzelnen
+        Grid-Position. Gleiche Sicherheits-/Fehlerlogik wie place_market_buy:
+        Dry-Run-Schalter und niemals ein Absturz wegen eines API-Fehlers.
+        """
+        if not self._config.trading_enabled:
+            logger.info(
+                "[DRY-RUN] Würde Market-Sell platzieren: %s, Menge %.8f",
+                symbol,
+                quantity,
+            )
+            return None
+
+        try:
+            order = self._client.order_market_sell(
+                symbol=symbol,
+                quantity=quantity,
+            )
+            logger.info("Sell-Order erfolgreich platziert: %s", order)
+            return order
+        except (BinanceAPIException, BinanceOrderException) as exc:
+            logger.error("Fehler beim Platzieren der Sell-Order: %s", exc)
+            return None

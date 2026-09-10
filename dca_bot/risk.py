@@ -37,20 +37,21 @@ class KillSwitch:
     direkt im gleichen Terminal steuert.
     """
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, env_var_name: str = "DCA_BOT_HALT"):
         self._file_path = Path(file_path)
+        self._env_var_name = env_var_name
 
     def is_set(self) -> bool:
         if self._file_path.exists():
             return True
-        return os.getenv("DCA_BOT_HALT", "false").lower() == "true"
+        return os.getenv(self._env_var_name, "false").lower() == "true"
 
     def check(self) -> None:
         """Wirft BotHalted, falls der Notaus aktiv ist."""
         if self.is_set():
             raise BotHalted(
                 f"Notaus ausgelöst (Datei '{self._file_path}' vorhanden "
-                "oder DCA_BOT_HALT=true gesetzt)."
+                f"oder {self._env_var_name}=true gesetzt)."
             )
 
 
