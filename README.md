@@ -87,8 +87,10 @@ trading-bot/
 │   ├── notifier.py       # Telegram-Benachrichtigungen (optional, geteilt)
 │   ├── main.py           # Einstiegspunkt DCA-Bot
 │   ├── grid_config.py    # Zentrale Konfiguration Grid-Bot (liest .env)
+│   ├── grid_signals.py   # Crossing-/Sell-/Stop-Loss-Logik (Backtest UND Live)
 │   ├── grid_risk.py      # Positions-Ledger, Trendbruch-Stop-Loss (Grid)
 │   ├── grid_strategy.py  # Grid-Kauf-/Verkaufslogik
+│   ├── grid_backtest.py  # Backtest über historische Marktphasen
 │   ├── main_grid.py      # Einstiegspunkt Grid-Bot
 │   ├── trend_config.py   # Zentrale Konfiguration Trend-Bot (liest .env)
 │   ├── trend_signals.py  # EMA-Crossover + Trendstärke-Filter (Backtest UND Live)
@@ -184,7 +186,11 @@ Recherche dazu: der Erwartungswert ist vor Gebühren akademisch mathematisch
 null, der Sinn dieser Strategie liegt in der einfachen, latenzunkritischen
 Umsetzung, nicht in überlegener Rendite. Haupt-Risiko ist ein Trendbruch.
 
-### 9.1 Konfiguration
+**Backtest verfügbar** (`python -m dca_bot.grid_backtest`, Code in
+`grid_backtest.py`) - siehe Abschnitt 8.5 und `trading-bot-projekt.md` für
+die Ergebnisse und einen wichtigen Caveat zur Preisspanne.
+
+### 8.1 Konfiguration
 
 Zusätzlich zu den Binance-/Telegram-Zugangsdaten oben (werden mitgenutzt):
 
@@ -207,7 +213,7 @@ GRID_STOP_LOSS_STATE_FILE=data/grid_stop_loss_paused.json
 unbedingt vor dem Start an den aktuellen Marktpreis anpassen, sonst kauft
 (im Dry-Run: simuliert) der Bot ggf. weit weg vom echten Kurs.
 
-### 9.2 Starten
+### 8.2 Starten
 
 ```bash
 python -m dca_bot.main_grid
@@ -216,7 +222,7 @@ python -m dca_bot.main_grid
 Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
 `logs/grid_bot.log`.
 
-### 9.3 Kernlogik
+### 8.3 Kernlogik
 
 - Die Grid-Stufen werden geometrisch berechnet (`level[i+1] = level[i] * (1 +
   GRID_SPACING_PCT/100)`), nicht linear.
@@ -232,8 +238,14 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   werden alle tatsächlich durchquerten Stufen gekauft.
 - Maximale Kapitalbindung ist durch das Design von selbst begrenzt: Anzahl
   Grid-Stufen × `GRID_AMOUNT_PER_LEVEL` - kein zusätzliches Tageslimit nötig.
+- **Dieselbe Entscheidungslogik** (`compute_grid_levels`,
+  `find_triggered_buy_levels`, `is_sell_target_hit`,
+  `is_trend_break_stop_loss_hit` aus `grid_signals.py`) wird von Backtest
+  UND Live-Strategie importiert - keine doppelte Implementierung, die
+  unbemerkt auseinanderlaufen könnte (gleiches Prinzip wie beim
+  Trend-Bot, siehe Abschnitt 9.3).
 
-### 9.4 Sicherheitsmechanismen (eigenständig vom DCA-Bot)
+### 8.4 Sicherheitsmechanismen (eigenständig vom DCA-Bot)
 
 - **Dry-Run per Default**, analog zum DCA-Bot.
 - **Notaus**: eigene Datei (`GRID_KILL_SWITCH_FILE`, Default `STOP_GRID`)
@@ -250,6 +262,29 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   Gewinn/Verlust dieser Position), `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`,
   `[GRID-FEHLER]`.
 
+### 8.5 Backtest
+
+```bash
+python -m dca_bot.grid_backtest
+```
+
+Läuft über dieselben drei Referenz-Zeiträume wie der Trend-Backtest (2022
+Bärenmarkt, 2023 Erholung, 2021 Seitwärts/Konsolidierung), auf
+Stundenkerzen (Kompromiss - der Live-Bot prüft alle paar Minuten, aber
+Tageskerzen würden die meisten Grid-Durchquerungen unsichtbar machen).
+
+**Wichtiger Unterschied zu DCA/Trend:** `GRID_LOWER_LIMIT`/`GRID_UPPER_LIMIT`
+sind kein skaleninvarianter Wert, sondern ein absoluter Preisbereich,
+gekoppelt an das heutige Kursniveau. Gegen die historischen Testzeiträume
+(BTC damals deutlich niedriger) getestet, läge die unveränderte Live-Spanne
+sofort außerhalb des Kurses -> 0 Trades, sofortiger Trendbruch-Stop-Loss.
+Der Backtest zeigt deshalb standardmäßig zwei Ergebnisse pro Zeitraum: das
+literale (mit den unveränderten Live-Werten) und einen klar als "ANALYSE,
+NICHT Live-Verhalten" gekennzeichneten zweiten Lauf, bei dem die Spanne
+symmetrisch um den tatsächlichen Startpreis der jeweiligen Periode skaliert
+wird (gleiches Breiten-Verhältnis/Abstand wie live). Siehe
+`trading-bot-projekt.md` für die vollständigen Ergebnisse.
+
 ## 9. Trend-Following-Bot (dritter, eigenständiger Bot)
 
 EMA-Crossover-Strategie auf Tageskerzen mit Trendstärke-Filter, long-only
@@ -265,7 +300,7 @@ Ergebnisse und deren ehrliche Einordnung (schützt im Bärenmarkt, verpasst
 ohne periodischen manuellen Stop-Loss-Reset einen Teil der Rendite im
 Bullenmarkt).
 
-### 10.1 Konfiguration
+### 9.1 Konfiguration
 
 Zusätzlich zu den Binance-/Telegram-Zugangsdaten oben (werden mitgenutzt).
 Defaults entsprechen exakt den im Backtest getesteten Werten:
@@ -282,7 +317,7 @@ TREND_KILL_SWITCH_FILE=STOP_TREND
 TREND_STOP_LOSS_PCT=10.0      # Fixer Stop-Loss unterhalb des Einstiegspreises
 ```
 
-### 10.2 Starten
+### 9.2 Starten
 
 ```bash
 python -m dca_bot.main_trend
@@ -293,7 +328,7 @@ Log unter `logs/trend_bot.log`. Lädt beim Start automatisch echte
 historische Tageskerzen (öffentliche Binance-API), damit die EMAs nicht
 bei Null anfangen müssen.
 
-### 10.3 Kernlogik
+### 9.3 Kernlogik
 
 - **Signal**: Ein EMA-Crossover allein reicht nicht - der Abstand zwischen
   schnellem und langsamem EMA muss auf mindestens `TREND_MIN_GAP_PCT`
@@ -311,7 +346,7 @@ bei Null anfangen müssen.
   Live-Strategie importiert - keine doppelte Implementierung, die
   unbemerkt auseinanderlaufen könnte.
 
-### 10.4 Sicherheitsmechanismen (eigenständig von DCA/Grid)
+### 9.4 Sicherheitsmechanismen (eigenständig von DCA/Grid)
 
 - **Dry-Run per Default**, analog zu DCA/Grid.
 - **Notaus**: eigene Datei (`TREND_KILL_SWITCH_FILE`, Default `STOP_TREND`)
@@ -333,5 +368,5 @@ bei Null anfangen müssen.
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)
 - [ ] Backtesting-Skript für die DCA-Logik auf historischen Daten
-- [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 8)
+- [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 8), inkl. Backtesting-Skript (siehe Abschnitt 8.5)
 - [x] Trend-Following-Strategie (EMA-Crossover) als dritter, eigenständiger Bot, inkl. Backtest vor dem ersten Dry-Run (siehe Abschnitt 9)
