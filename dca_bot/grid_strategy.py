@@ -20,34 +20,11 @@ from datetime import datetime, timezone
 from .binance_client import TradingClient
 from .grid_config import GridConfig
 from .grid_risk import GridLedger, GridPosition, GridStopLoss
+from .grid_signals import compute_grid_levels, find_triggered_buy_levels, is_sell_target_hit
 from .notifier import send_notification
 from .risk import KillSwitch
 
 logger = logging.getLogger("grid_bot")
-
-
-def compute_grid_levels(lower_limit: float, upper_limit: float, spacing_pct: float) -> list[float]:
-    """
-    Berechnet die Grid-Preisstufen geometrisch (prozentualer statt fixer
-    Abstand): level[i+1] = level[i] * (1 + spacing_pct / 100), aufsteigend
-    von lower_limit bis upper_limit.
-    """
-    if lower_limit <= 0 or upper_limit <= lower_limit or spacing_pct <= 0:
-        raise ValueError(
-            "Ungültige Grid-Parameter: lower_limit muss > 0, upper_limit > "
-            "lower_limit und spacing_pct > 0 sein."
-        )
-
-    levels = [lower_limit]
-    while levels[-1] * (1 + spacing_pct / 100) <= upper_limit * 1.0001:
-        levels.append(levels[-1] * (1 + spacing_pct / 100))
-
-    if len(levels) < 2:
-        raise ValueError(
-            "Preisspanne zu eng für den gewählten Grid-Abstand - es muss "
-            "mindestens eine Kaufstufe und eine Ziel-Verkaufsstufe geben."
-        )
-    return levels
 
 
 class GridTradingStrategy:
@@ -81,7 +58,7 @@ class GridTradingStrategy:
         """Verkauft jede offene Position, deren individuelles Sell-Target
         erreicht ist - unabhängig vom Trendbruch-Stop-Loss."""
         for record in self._ledger.open_positions():
-            if price < record["target_sell_price"]:
+            if not is_sell_target_hit(price, record["target_sell_price"]):
                 continue
 
             order = self._client.place_market_sell(self._config.symbol, record["quantity"])
@@ -114,27 +91,14 @@ class GridTradingStrategy:
         tatsächlich durchquert hat (nicht: irgendeine Stufe irgendwo
         unterhalb des aktuellen Preises - siehe Crossing-Erkennung unten).
         """
-        if self._last_seen_price is None:
-            # Erster Zyklus: nur Referenzpreis setzen, noch nicht handeln.
-            # Sonst würde ein Kaltstart mitten im Grid sofort JEDE Stufe
-            # oberhalb des Startpreises gleichzeitig kaufen, nur weil sie
-            # zufällig über dem aktuellen Preis liegt - nicht weil der
-            # Preis tatsächlich gerade dort gefallen ist.
-            return
+        occupied_levels = {
+            r["level_index"] for r in self._ledger.open_positions()
+        }
+        triggered_levels = find_triggered_buy_levels(
+            self._levels, self._last_seen_price, price, occupied_levels
+        )
 
-        if price > self._last_seen_price:
-            return  # Preis ist gestiegen/gleich geblieben, kein Fall durch eine Stufe
-
-        for level_index, level_price in enumerate(self._levels[:-1]):
-            # Halb-offenes Intervall [price, last_seen_price): der alte
-            # Referenzpreis wurde im vorherigen Zyklus schon "gesehen"
-            # (oder war der Kaltstart-Referenzpunkt ohne Handel) und soll
-            # nicht erneut zählen; der neue, aktuelle Preis dagegen schon.
-            if level_price >= self._last_seen_price or level_price < price:
-                continue
-            if self._ledger.open_position_for_level(level_index) is not None:
-                continue
-
+        for level_index in triggered_levels:
             order = self._client.place_market_buy(self._config.symbol, self._config.amount_per_level)
 
             if order is None and self._config.trading_enabled:
