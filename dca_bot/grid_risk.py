@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .grid_signals import is_trend_break_stop_loss_hit
 from .notifier import send_notification
 
 logger = logging.getLogger("grid_bot")
@@ -191,30 +192,27 @@ class GridStopLoss:
             )
             return True
 
-        if self._stop_loss_pct <= 0:
+        if not is_trend_break_stop_loss_hit(self._lower_limit, self._stop_loss_pct, current_price):
             return False
 
         threshold = self._lower_limit * (1 - self._stop_loss_pct / 100)
-
-        if current_price < threshold:
-            logger.warning(
-                "GRID-TRENDBRUCH-STOP-LOSS ausgelöst für %s: Preis %.2f "
-                "unter Schwelle %.2f (Grid-Untergrenze %.2f, Puffer %.1f%%). "
-                "Neue Käufe pausiert, bis manuell zurückgesetzt - offene "
-                "Positionen werden weiterhin normal verkauft.",
-                symbol,
-                current_price,
-                threshold,
-                self._lower_limit,
-                self._stop_loss_pct,
-            )
-            self._pause(symbol, current_price, threshold)
-            send_notification(
-                f"[GRID-STOP-LOSS] {symbol}: Preis {current_price:.2f} unter "
-                f"Trendbruch-Schwelle {threshold:.2f} (Grid-Untergrenze "
-                f"{self._lower_limit:.2f}, Puffer {self._stop_loss_pct:.1f}%). "
-                "Neue Käufe pausiert bis manueller Reset "
-                "(python -m dca_bot.reset_grid_stop_loss)."
-            )
-            return True
-        return False
+        logger.warning(
+            "GRID-TRENDBRUCH-STOP-LOSS ausgelöst für %s: Preis %.2f "
+            "unter Schwelle %.2f (Grid-Untergrenze %.2f, Puffer %.1f%%). "
+            "Neue Käufe pausiert, bis manuell zurückgesetzt - offene "
+            "Positionen werden weiterhin normal verkauft.",
+            symbol,
+            current_price,
+            threshold,
+            self._lower_limit,
+            self._stop_loss_pct,
+        )
+        self._pause(symbol, current_price, threshold)
+        send_notification(
+            f"[GRID-STOP-LOSS] {symbol}: Preis {current_price:.2f} unter "
+            f"Trendbruch-Schwelle {threshold:.2f} (Grid-Untergrenze "
+            f"{self._lower_limit:.2f}, Puffer {self._stop_loss_pct:.1f}%). "
+            "Neue Käufe pausiert bis manueller Reset "
+            "(python -m dca_bot.reset_grid_stop_loss)."
+        )
+        return True
