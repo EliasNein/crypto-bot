@@ -1,0 +1,15 @@
+2026-09-09 17:56:59,629 [INFO] ============================================================
+2026-09-09 17:56:59,629 [INFO] DCA-Bot startet
+2026-09-09 17:56:59,629 [INFO] Symbol: BTCUSDT | Betrag pro Kauf: 15.00 | Intervall: 24.00h
+2026-09-09 17:56:59,630 [INFO] Trading aktiv (kein Dry-Run): True
+2026-09-09 17:56:59,630 [INFO] ============================================================
+2026-09-09 17:57:00,224 [INFO] Binance-Client initialisiert (testnet=True)
+2026-09-09 17:57:00,618 [INFO] Aktueller Preis für BTCUSDT: 78620.79
+2026-09-09 17:57:01,027 [INFO] Order erfolgreich platziert: {'symbol': 'BTCUSDT', 'orderId': 145093, 'orderListId': -1, 'clientOrderId': 'AiENb9Blh3ErOQ1O8TI1o6', 'transactTime': 1788969420889, 'price': '0.00000000', 'origQty': '0.00019000', 'executedQty': '0.00019000', 'origQuoteOrderQty': '15.00000000', 'cummulativeQuoteQty': '14.93795200', 'status': 'FILLED', 'timeInForce': 'GTC', 'type': 'MARKET', 'side': 'BUY', 'workingTime': 1788969420889, 'fills': [{'price': '78620.80000000', 'qty': '0.00019000', 'commission': '0.00000000', 'commissionAsset': 'BTC', 'tradeId': 32525}], 'selfTradePreventionMode': 'EXPIRE_MAKER'}
+2026-09-09 17:57:01,028 [INFO] DCA-Kauf ausgeführt: 15.00 BTCUSDT zu Preis ~78620.79
+2026-09-09 17:57:01,028 [INFO] Warte 24.00 Stunden bis zum nächsten Zyklus ...
+2026-09-10 17:57:13,107 [INFO] Aktueller Preis für BTCUSDT: 77209.97
+2026-09-10 17:57:13,412 [INFO] Order erfolgreich platziert: {'symbol': 'BTCUSDT', 'orderId': 492339, 'orderListId': -1, 'clientOrderId': 'wdeli7HrSelksvzJYsgOpR', 'transactTime': 1789055833238, 'price': '0.00000000', 'origQty': '0.00019000', 'executedQty': '0.00019000', 'origQuoteOrderQty': '15.00000000', 'cummulativeQuoteQty': '14.66989430', 'status': 'FILLED', 'timeInForce': 'GTC', 'type': 'MARKET', 'side': 'BUY', 'workingTime': 1789055833238, 'fills': [{'price': '77209.97000000', 'qty': '0.00019000', 'commission': '0.00000000', 'commissionAsset': 'BTC', 'tradeId': 94828}], 'selfTradePreventionMode': 'EXPIRE_MAKER'}
+2026-09-10 17:57:13,413 [INFO] DCA-Kauf ausgeführt: 15.00 BTCUSDT zu Preis ~77209.97
+2026-09-10 17:57:13,413 [INFO] Warte 24.00 Stunden bis zum nächsten Zyklus ...
+2026-09-11 16:54:38,502 [WARNING] Notaus während Wartezeit ausgelöst - Bot wird gestoppt.
