@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.log
+!docs/**/*.log
 logs/
 .venv/
 venv/
