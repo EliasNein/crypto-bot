@@ -37,6 +37,13 @@ class Config:
     state_file: str = "data/trade_ledger.json"  # Persistente Trade-Historie
     stop_loss_state_file: str = "data/stop_loss_paused.json"  # Existiert diese Datei, bleibt der Stop-Loss pausiert
 
+    # --- Kapital-Allocator (optional, siehe allocator.py) ---
+    # Leer = deaktiviert (Default): der Bot verhält sich dann exakt wie
+    # ohne Allocator, unverändertes Standardverhalten. Nur wenn explizit
+    # auf den gleichen Pfad wie ALLOCATOR_STATE_FILE gesetzt, skaliert der
+    # Bot den Betrag NEUER Käufe anhand der dort geschriebenen Zuteilung.
+    allocator_state_file: str = ""
+
     # --- Benachrichtigungen (optional) ---
     telegram_bot_token: str = ""  # Leer = Telegram-Benachrichtigungen deaktiviert
     telegram_chat_id: str = ""
@@ -75,6 +82,7 @@ def load_config() -> Config:
         stop_loss_pct=stop_loss_pct,
         state_file=state_file,
         stop_loss_state_file=stop_loss_state_file,
+        allocator_state_file=os.getenv("DCA_ALLOCATOR_STATE_FILE", ""),
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
     )
