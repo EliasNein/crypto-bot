@@ -1,8 +1,9 @@
 # Trading-Bots (Binance Testnet)
 
-Drei komplett eigenständige Bots im selben Projekt, alle gegen die
-**Binance Testnet API** – es wird zu keinem Zeitpunkt echtes Geld bewegt,
-solange du keine echten API-Keys einträgst:
+Drei komplett eigenständige Trading-Bots plus ein steuernder Zusatzprozess
+im selben Projekt, alle gegen die **Binance Testnet API** – es wird zu
+keinem Zeitpunkt echtes Geld bewegt, solange du keine echten API-Keys
+einträgst:
 
 - **DCA-Bot** (`dca_bot/main.py`): kauft in festen Intervallen einen festen
   Betrag eines Assets (Dollar-Cost-Averaging).
@@ -13,8 +14,13 @@ solange du keine echten API-Keys einträgst:
   EMA-Crossover mit Trendstärke-Filter auf Tageskerzen, long-only, mit
   festem Stop-Loss pro Trade. Vor dem ersten Dry-Run per Backtest über
   mehrere historische Marktphasen validiert (siehe `trend_backtest.py`).
+- **Kapital-Allocator** (`dca_bot/main_allocator.py`, siehe Abschnitt 10):
+  kein eigener Trading-Bot, sondern ein steuernder Zusatzprozess, der
+  Kapital stufenlos zwischen DCA- und Trend-Following-Bot umschichtet, je
+  nach aktueller Trendstärke. Platziert selbst nie Orders, wirkt sich auf
+  DCA/Trend nur nach explizitem Opt-in aus.
 
-Alle drei teilen sich nur die Binance-/Telegram-Zugangsdaten in der `.env` -
+Alle vier teilen sich nur die Binance-/Telegram-Zugangsdaten in der `.env` -
 Zustand (Trade-Historie, Notaus, Stop-Loss) ist für jeden Bot komplett
 getrennt, sie können unabhängig voneinander (auch gleichzeitig) laufen.
 
@@ -98,6 +104,11 @@ trading-bot/
 │   ├── trend_strategy.py # Trend-Following-Ein-/Ausstiegslogik
 │   ├── trend_backtest.py # Backtest über historische Marktphasen
 │   ├── main_trend.py     # Einstiegspunkt Trend-Bot
+│   ├── allocator_config.py  # Zentrale Konfiguration Allocator (liest .env)
+│   ├── allocator_signals.py # Zuteilungs-/Glättungslogik + State-Reader (Backtest UND Live)
+│   ├── allocator.py         # Allocator-Kernlogik (Berechnung + State-Datei)
+│   ├── allocator_backtest.py # Backtest: kombiniert vs. isoliert DCA/Trend
+│   ├── main_allocator.py    # Einstiegspunkt Allocator
 │   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
 │   └── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
@@ -363,10 +374,102 @@ bei Null anfangen müssen.
   realisiertem Gewinn/Verlust und Ausstiegsgrund), `[TREND-STOP-LOSS]`,
   `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
 
-## 10. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
+## 10. Kapital-Allocator (vierter, übergeordneter Baustein)
+
+Stufenlose Umschichtung von Kapital zwischen DCA-Bot und Trend-Following-Bot
+je nach aktueller Trendstärke (EMA-Abstand) - **kein** eigenständiger
+Trading-Bot, sondern ein steuernder Zusatzprozess. Grid-Bot bleibt davon
+unberührt (hat bereits einen eigenen Trendbruch-Stop-Loss, siehe Abschnitt
+8.4). Der Allocator platziert selbst **nie** Orders - er berechnet nur eine
+Zahl (den Trend-Following-Anteil zwischen 0% und 100%) und schreibt sie in
+seine State-Datei.
+
+**Backtest verfügbar** (`python -m dca_bot.allocator_backtest`, Code in
+`allocator_backtest.py`) - vergleicht die kombinierte Performance mit
+isoliertem DCA und isoliertem Trend über dieselben drei Marktphasen wie
+die anderen Backtests, inklusive investiertem Betrag und absolutem PnL
+(nicht nur Prozent) - die Kapitalbasis ist zwischen den drei Varianten
+NICHT gleich groß (siehe Modul-Docstring/Report-Hinweis in
+`allocator_backtest.py`), ein reiner Prozentvergleich wäre irreführend.
+Siehe `trading-bot-projekt.md` für die vollständigen Ergebnisse.
+
+### 10.1 Konfiguration
+
+Zusätzlich zu den Binance-/Telegram-Zugangsdaten oben (werden mitgenutzt):
+
+```
+ALLOCATOR_SYMBOL=BTCUSDT
+ALLOCATOR_EMA_FAST_PERIOD=20
+ALLOCATOR_EMA_SLOW_PERIOD=50
+ALLOCATOR_ZERO_ANCHOR_PCT=0.0     # EMA-Abstand, ab dem 0% Trend-Anteil gilt
+ALLOCATOR_FULL_ANCHOR_PCT=3.0     # EMA-Abstand, ab dem 100% Trend-Anteil gilt
+ALLOCATOR_SMOOTHING_PERIOD=24     # EMA-Glättung der Zuteilung, in Allocator-Zyklen
+ALLOCATOR_INTERVAL_MINUTES=60     # Wie oft neu berechnet wird
+ALLOCATOR_NOTIFY_THRESHOLD_PP=15.0
+ALLOCATOR_KILL_SWITCH_FILE=STOP_ALLOCATOR
+ALLOCATOR_HALT=false
+ALLOCATOR_STATE_FILE=data/allocator_state.json
+```
+
+Die Ankerpunkte (0%/3%) sind ein bewusster Ausgangspunkt, kein empirisch
+hergeleiteter Optimalwert - siehe Backtest-Ergebnisse zur Einordnung.
+
+**Wirkung auf DCA/Trend nur nach explizitem Opt-in:** Standardmäßig
+kennen weder der DCA-Bot noch der Trend-Bot den Allocator. Erst wenn du
+in der `.env` zusätzlich `DCA_ALLOCATOR_STATE_FILE` bzw.
+`TREND_ALLOCATOR_STATE_FILE` auf denselben Pfad wie `ALLOCATOR_STATE_FILE`
+setzt, skaliert der jeweilige Bot den Betrag einer NEUEN Order mit der
+aktuellen Zuteilung. Offene Positionen bleiben davon immer unberührt.
+
+### 10.2 Starten
+
+```bash
+python -m dca_bot.main_allocator
+```
+
+Läuft komplett unabhängig von DCA/Grid/Trend (auch parallel), eigenes Log
+unter `logs/allocator.log`. Lädt beim Start automatisch echte historische
+Tageskerzen, damit die EMAs nicht bei Null anfangen müssen (wie der
+Trend-Bot).
+
+### 10.3 Kernlogik
+
+- **Trendstärke**: wiederverwendet `TrendSignalGenerator` aus
+  `trend_signals.py` (mit `min_gap_pct=0`, da die dortige
+  Bestätigungslogik für binäre Ein-/Ausstiegsentscheidungen gedacht ist -
+  der Allocator braucht den rohen, kontinuierlichen EMA-Abstand). Nur eine
+  bestätigte AUFWÄRTS-Richtung zählt als Stärke - der Trend-Bot ist
+  long-only, bei Abwärtstrend bekäme er ohnehin kein Kapital zugeteilt.
+- **Lineare Interpolation** zwischen `ALLOCATOR_ZERO_ANCHOR_PCT` und
+  `ALLOCATOR_FULL_ANCHOR_PCT`, außerhalb der Anker geklemmt (kein
+  Extrapolieren).
+- **Whipsaw-Schutz durch EMA-Glättung der Zuteilung selbst** (gleiche
+  Formel wie die Preis-EMAs in `trend_signals.py`, hier auf die
+  Zuteilungs-Prozentzahl angewandt) - da es bei einer stufenlosen Kurve
+  keine feste Stufe zum "Bestätigen" gibt wie bei diskreten Signalen.
+- **Additive, standardmäßig deaktivierte Integration**: DCA/Trend lesen
+  die Zuteilung nur bei explizitem Opt-in (siehe 10.1) unmittelbar vor
+  einer NEUEN Order; unterhalb von 5 USDT wird die Order übersprungen
+  statt einer wirtschaftlich bedeutungslosen Mini-Order.
+- **Telegram-Benachrichtigung** (falls konfiguriert) nur bei einer
+  Verschiebung um mindestens `ALLOCATOR_NOTIFY_THRESHOLD_PP`
+  Prozentpunkte seit der letzten Meldung - verhindert Spam bei kleinen,
+  stufenlosen Schwankungen.
+
+### 10.4 Sicherheitsmechanismen (eigenständig von DCA/Grid/Trend)
+
+- **Notaus**: eigene Datei (`ALLOCATOR_KILL_SWITCH_FILE`, Default
+  `STOP_ALLOCATOR`) und eigene Env-Variable (`ALLOCATOR_HALT`) -
+  unabhängig von DCA/Grid/Trend. Der Allocator platziert ohnehin nie
+  Orders, der Notaus stoppt hier nur die Berechnung/State-Aktualisierung.
+- **Telegram-Benachrichtigungen**: `[ALLOCATION-UPDATE]` (bei
+  signifikanter Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
+
+## 11. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)
 - [ ] Backtesting-Skript für die DCA-Logik auf historischen Daten
 - [x] Grid-Trading-Strategie als zweiter, eigenständiger Bot (siehe Abschnitt 8), inkl. Backtesting-Skript (siehe Abschnitt 8.5)
 - [x] Trend-Following-Strategie (EMA-Crossover) als dritter, eigenständiger Bot, inkl. Backtest vor dem ersten Dry-Run (siehe Abschnitt 9)
+- [x] Kapital-Allocator als vierter, übergeordneter Baustein (siehe Abschnitt 10), inkl. Backtest vor dem ersten Dry-Run - Live-Dry-Run noch offen
