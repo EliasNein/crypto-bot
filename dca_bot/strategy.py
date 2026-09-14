@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timezone
 
+from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
 from .binance_client import TradingClient
 from .config import Config
 from .notifier import send_notification
@@ -55,6 +56,20 @@ class DCAStrategy:
         symbol = self._config.symbol
         amount = self._config.quote_amount
 
+        # Optionale Kapital-Allocator-Anbindung (siehe allocator.py):
+        # nur aktiv, wenn DCA_ALLOCATOR_STATE_FILE explizit gesetzt ist -
+        # sonst read_allocation_fraction() -> None und amount bleibt
+        # unverändert (exakt das Verhalten ohne Allocator).
+        trend_fraction = read_allocation_fraction(self._config.allocator_state_file)
+        if trend_fraction is not None:
+            amount = self._config.quote_amount * (1 - trend_fraction)
+            logger.info(
+                "Allocator aktiv: DCA-Anteil %.1f%% -> effektiver Kaufbetrag %.2f (Basis %.2f).",
+                (1 - trend_fraction) * 100,
+                amount,
+                self._config.quote_amount,
+            )
+
         # Stop-Loss bewusst VOR dem Tageslimit geprüft: Er soll in jedem
         # Zyklus ausgewertet werden und pausieren/benachrichtigen können,
         # auch wenn das Tageslimit an diesem Tag bereits ausgeschöpft ist.
@@ -65,6 +80,15 @@ class DCAStrategy:
         logger.info("Aktueller Preis für %s: %.2f", symbol, price)
 
         if self._stop_loss.is_triggered(symbol, price):
+            return
+
+        if trend_fraction is not None and amount < MIN_EFFECTIVE_QUOTE_AMOUNT:
+            logger.info(
+                "Effektiver Kaufbetrag %.2f unter Mindestbetrag (%.2f) - Kauf heute "
+                "übersprungen (Allocator weist DCA aktuell kaum/kein Kapital zu).",
+                amount,
+                MIN_EFFECTIVE_QUOTE_AMOUNT,
+            )
             return
 
         if not self._within_daily_limit(amount):

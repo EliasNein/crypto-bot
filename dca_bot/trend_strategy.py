@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
+from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
 from .backtest import fetch_historical_klines
 from .binance_client import TradingClient
 from .notifier import send_notification
@@ -67,6 +68,29 @@ class TrendFollowingStrategy:
 
     def _open_position(self, price: float) -> None:
         amount = self._config.amount_per_trade
+
+        # Optionale Kapital-Allocator-Anbindung (siehe allocator.py): nur
+        # aktiv, wenn TREND_ALLOCATOR_STATE_FILE explizit gesetzt ist -
+        # sonst read_allocation_fraction() -> None und amount bleibt
+        # unverändert (exakt das Verhalten ohne Allocator).
+        trend_fraction = read_allocation_fraction(self._config.allocator_state_file)
+        if trend_fraction is not None:
+            amount = self._config.amount_per_trade * trend_fraction
+            logger.info(
+                "Allocator aktiv: Trend-Anteil %.1f%% -> effektiver Einstiegsbetrag %.2f (Basis %.2f).",
+                trend_fraction * 100,
+                amount,
+                self._config.amount_per_trade,
+            )
+            if amount < MIN_EFFECTIVE_QUOTE_AMOUNT:
+                logger.info(
+                    "Effektiver Einstiegsbetrag %.2f unter Mindestbetrag (%.2f) - "
+                    "Einstieg übersprungen (Allocator weist Trend aktuell kaum Kapital zu).",
+                    amount,
+                    MIN_EFFECTIVE_QUOTE_AMOUNT,
+                )
+                return
+
         order = self._client.place_market_buy(self._config.symbol, amount)
 
         if order is None and self._config.trading_enabled:

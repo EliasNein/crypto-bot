@@ -40,6 +40,14 @@ class TrendConfig:
     state_file: str = "data/trend_ledger.json"
     stop_loss_state_file: str = "data/trend_stop_loss_paused.json"
 
+    # --- Kapital-Allocator (optional, siehe allocator.py) ---
+    # Leer = deaktiviert (Default): der Bot verhält sich dann exakt wie
+    # ohne Allocator, unverändertes Standardverhalten. Nur wenn explizit
+    # auf den gleichen Pfad wie ALLOCATOR_STATE_FILE gesetzt, skaliert der
+    # Bot den Betrag eines NEUEN Einstiegs anhand der dort geschriebenen
+    # Zuteilung.
+    allocator_state_file: str = ""
+
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
@@ -83,6 +91,7 @@ def load_trend_config() -> TrendConfig:
         stop_loss_state_file=os.getenv(
             "TREND_STOP_LOSS_STATE_FILE", "data/trend_stop_loss_paused.json"
         ),
+        allocator_state_file=os.getenv("TREND_ALLOCATOR_STATE_FILE", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )
