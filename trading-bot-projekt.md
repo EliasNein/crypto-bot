@@ -1,7 +1,7 @@
 # Trading-Bot-Projekt: Planung & Recherche
 
-**Stand:** September 2026
-**Status:** Planungsphase – Entwicklung startet auf Demo-/Testnet-Konto, kein Live-Geld bisher.
+**Stand:** 14. September 2026
+**Status:** Testnet-Betrieb – drei Strategien laufen parallel auf einem gemieteten VPS, vierter Baustein (Allocator) backgetestet, Live-Test steht noch aus. Kein Live-Geld bisher.
 
 ---
 
@@ -102,90 +102,121 @@ Arbitrage, Market Making, Scalping als **erste** Strategien – zu kapital-/late
 
 ---
 
-## 6. Nächste Schritte (offen)
+## 5a. Kapital-Allocator zwischen DCA und Trend-Following — BACKTEST ABGESCHLOSSEN
 
-- [ ] Konkrete Erst-Strategie final festlegen (Empfehlung: DCA als Startpunkt)
-- [ ] Binance-Testnet-Account einrichten
-- [ ] Projektgrundgerüst aufsetzen (Python, ggf. Freqtrade)
-- [ ] Erste einfache Strategie + Backtesting-Skript implementieren
-- [x] Risikomanagement-Logik definieren (Positionsgrößen, Stop-Loss, Tagesverlustlimit) – Notaus, persistentes Tageslimit und Portfolio-Stop-Loss in `dca_bot/risk.py` umgesetzt
-- [ ] Optionaler automatischer Reset des Portfolio-Stop-Loss (Erholungs-Schwelle + Cooldown-Zeit, z.B. "erst wieder aktiv, wenn Kurs X% über Trigger-Niveau UND mindestens Y Stunden seit Trigger vergangen"): bewusst noch **nicht** implementiert. Aktueller Default ist ein reiner manueller Reset (siehe `dca_bot/reset_stop_loss.py`), um Whipsaw-Effekte (wiederholtes Neu-Einsteigen bei kurzen Erholungen knapp über der Schwelle, gefolgt von erneutem Fall) zu vermeiden. Falls das zu unpraktisch wird, könnte diese Erweiterung optional (per Config-Flag) nachgerüstet werden.
-- [x] Monitoring & Benachrichtigungen (Telegram) – `dca_bot/notifier.py` sendet optional (nur wenn `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` gesetzt sind) bei jedem Kaufzyklus, Stop-Loss-Trigger, Notaus, unerwarteten Fehlern und einmal täglich als Zusammenfassung; Fehler beim Senden legen den Bot nie lahm (siehe README Abschnitt 7). Fertig gebaut und am 10.09.2026 auf dem Desktop-PC verifiziert (Dry-Run-Livetest mit echten Telegram-Nachrichten für Kauf, Stop-Loss und Notaus, jeweils per isoliertem Fake-Client-Test bestätigt). Dabei eine echte Prüfreihenfolge-Lücke in `strategy.py` gefunden und behoben: Der Stop-Loss wurde vor dem Fix erst NACH dem Tageslimit-Check geprüft, wodurch er an Tagen mit bereits ausgeschöpftem Tageslimit gar nicht mehr ausgewertet wurde (kein zusätzliches Geld-Risiko, da ohnehin nicht gekauft worden wäre, aber verzögerte/ausbleibende Stop-Loss-Benachrichtigung). Jetzt wird der Stop-Loss vor dem Tageslimit geprüft und greift unabhängig davon in jedem Zyklus.
-- [ ] **Übertragung auf den Laptop zurückgestellt:** Die Telegram-Integration inkl. Bugfix liegt aktuell nur auf dem Desktop-PC (committet, noch nicht gepusht/übertragen). Auf dem Laptop läuft seit dem 09./10.09.2026 ein mehrtägiger 24h-Intervall-Test; um den nicht zu unterbrechen, wird die Telegram-Integration erst nach dessen Abschluss (Samstag, 12.09.2026, 18:10 Uhr) auf den Laptop übertragen.
-- [x] **DCA-Bot 3-Tage-Stabilitätstest auf dem Laptop abgeschlossen** – Zeitraum 09.09.2026 17:57 Uhr bis 11.09.2026 16:54 Uhr, Laufzeit 1 Tag 22h58min von geplanten 3 Tagen (vorzeitig per Notaus beendet, nicht durch einen Fehler). Echtes Trading auf dem Testnet (`DCA_BOT_ENABLE_TRADING=true`), 24h-Intervall: 2 erfolgreiche Käufe (09.09. @ 78.620,79, 10.09. @ 77.209,97, je 15 USDT), keine einzige Fehler-/Exception-Zeile im gesamten Log, sauberer Notaus-Stopp ohne Datenverlust. Vollständiges Log dauerhaft archiviert unter `docs/test-reports/2026-09-09_dca-3tage-stabilitaetstest.log` (nicht in `logs/`, da dieser Ordner per `.gitignore` ausgeschlossen ist und durch künftige Bot-Läufe überschrieben würde; `.gitignore` um eine gezielte Ausnahme `!docs/**/*.log` ergänzt, damit archivierte Logs trotz der globalen `*.log`-Regel eingecheckt werden können).
-- [x] **Zweite, eigenständige Strategie: Spot-Grid-Trading-Bot** (Stufe 2 aus dem Umsetzungsfahrplan in Abschnitt 5) – `dca_bot/main_grid.py`, `grid_config.py`, `grid_risk.py`, `grid_strategy.py`, `reset_grid_stop_loss.py`. Komplett eigenständig vom DCA-Bot: eigenes Trade-Ledger (`data/grid_positions.json`), eigener Notaus (`STOP_GRID`/`GRID_BOT_HALT`), eigener Trendbruch-Stop-Loss (latched, manueller Reset – gleiche Whipsaw-Begründung wie beim DCA-Stop-Loss), eigene Telegram-Nachrichten (`[GRID-KAUF]`, `[GRID-VERKAUF]` inkl. realisiertem PnL, `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`). Positions-Zuordnung: jede Kaufposition speichert ihre eigene Grid-Stufe und ihr individuelles Verkaufsziel (nächsthöhere Stufe) – Verkäufe sind dadurch immer eindeutig einer Kaufstufe zugeordnet. Beim Implementieren zwei echte Designfehler im ersten Entwurf gefunden und vor Fertigstellung behoben (durch selbst geschriebene Tests aufgedeckt, nicht durch Review): (1) ein naiver "aktueller Preis vs. Stufe"-Vergleich hätte bei einem Kaltstart mitten im Grid sofort alle Stufen oberhalb des Startpreises gleichzeitig gekauft statt nur die tatsächlich durchquerten – behoben durch Crossing-Erkennung gegen den zuletzt beobachteten Preis; (2) an der Intervallgrenze wurde die alte Referenzstufe fälschlich doppelt gezählt – durch ein halb-offenes Intervall behoben. Nebenbei zwei kleine, rein additive Änderungen an gemeinsam genutzten Dateien: `KillSwitch` in `risk.py` akzeptiert jetzt einen konfigurierbaren Env-Var-Namen (Default weiterhin `DCA_BOT_HALT`, damit `GRID_BOT_HALT` nicht versehentlich auch den DCA-Bot stoppt), und `binance_client.py` hat jetzt zusätzlich `place_market_sell()`. DCA-Bot-Regressionstest nach beiden Änderungen bestanden. Grid-Dry-Run am 10.09.2026 auf dem Desktop gestartet (zunächst reguläre Preisspanne 68k–88k, dann für einen schnelleren Beobachtungstest temporär auf eine enge ±0,5%-Spanne mit 0,1%-Abstand verengt) – noch keine reale Kursbewegung groß genug für einen ersten Kauf/Verkauf beobachtet, Log-Watcher läuft im Hintergrund weiter.
-  - **Backtesting-Skript nachgerüstet** (`dca_bot/grid_backtest.py`, 12.09.2026) – bis dahin fehlte das im Gegensatz zu DCA/Trend. Um Backtest-Live-Abweichungen zu vermeiden (gleiches Prinzip wie bei `trend_signals.py`), wurde die bis dahin inline in `grid_strategy.py`/`grid_risk.py` verstreute Entscheidungslogik zuerst in ein neues, zustandsloses Modul `grid_signals.py` extrahiert (`compute_grid_levels`, `find_triggered_buy_levels`, `is_sell_target_hit`, `is_trend_break_stop_loss_hit`) – Live-Code und Backtest rufen jetzt exakt dieselben Funktionen auf, keine Doppelimplementierung. Kerzenauflösung bewusst 1h statt 1d, da der Live-Bot alle 5 Minuten prüft und Tageskerzen die meisten Grid-Durchquerungen unsichtbar gemacht hätten.
-  - **Skalen-Mismatch entdeckt und transparent gemacht** (vor Abschluss dem Nutzer gemeldet, nicht stillschweigend übernommen): Anders als bei DCA/Trend sind die Grid-Parameter `GRID_LOWER_LIMIT`/`GRID_UPPER_LIMIT` kein skaleninvarianter Wert, sondern ein absoluter USD-Preisbereich, der an das heutige (2026er) BTC-Kursniveau gekoppelt ist. Gegen die drei Standard-Testzeiträume (2021–2023, BTC damals deutlich niedriger) getestet, hätte die unveränderte Live-Spanne (70.000–90.000) in JEDEM Zeitraum sofort außerhalb gelegen → 0 Trades, sofortiger Trendbruch-Stop-Loss. Das literale Ergebnis wird trotzdem angezeigt (reales, meldenswertes Faktum: die heutige Config hätte damals nie gegriffen), zusätzlich läuft standardmäßig ein klar als "ANALYSE, NICHT Live-Verhalten" gekennzeichneter zweiter Modus, der die Spanne symmetrisch um den tatsächlichen Startpreis der jeweiligen Periode skaliert (gleiches Breiten-Verhältnis/Abstand wie live) – analog zum Aufsetzen des echten Live-Grids "symmetrisch um den aktuellen Preis".
-  - **Backtest-Ergebnisse** (Live-Defaults: 70.000–90.000, Abstand 1,5%, 15 USDT/Stufe, Stop-Loss-Puffer 15%, Gebühr 0,1%/Seite) – literal: in allen drei Zeiträumen 0 Trades, sofortiger Trendbruch-Stop-Loss (Spanne lag historisch nie im Kurs). ANALYSE-Modus (Spanne auf Periodenstart skaliert): 2022 Bärenmarkt 25 Trades, +8,90 realisiert, aber 1 am Ende offene Position mit −9,69 unrealisiert und Stop-Loss ausgelöst (Trendbruch-Risiko bestätigt trotz Schutzmechanismus); 2023 Erholung nur 5 Trades, +1,61 realisiert, keine offene Position (wenig Gelegenheit für Käufe im Aufwärtstrend); 2021 Seitwärts/Konsolidierung 109 Trades, +47,22 realisiert, keine offene Position am Ende – das beste Ergebnis der drei, deckt sich mit der Recherche (Chen/Chen/Jang: Grid funktioniert am besten in Seitwärtsmärkten, Erwartungswert vor Gebühren mathematisch null).
-- [x] **Dritte, eigenständige Strategie: Trend-Following-Bot** (Stufe 3 aus dem Umsetzungsfahrplan in Abschnitt 5 – "Alpha-Strategie") – `dca_bot/main_trend.py`, `trend_config.py`, `trend_signals.py`, `trend_risk.py`, `trend_strategy.py`, `trend_backtest.py`, `reset_trend_stop_loss.py`. EMA-Crossover (Default 20/50 Tage) auf Tageskerzen, long-only, mit Trendstärke-Filter (Mindestabstand der EMAs, Default 1,0% – bewusst statt ADX gewählt: einfacher und robuster korrekt zu implementieren, siehe Modul-Docstring in `trend_signals.py`) und fixem Stop-Loss pro Trade (Default 10%, latched wie bei DCA/Grid). Backtest UND Live-Strategie nutzen exakt dieselbe Entscheidungslogik (`trend_signals.py`), um zu verhindern, dass beide unbemerkt auseinanderlaufen.
-  - **Backtest vor dem ersten Dry-Run** (wie gefordert) über drei historische Marktphasen: 2022 Bärenmarkt (−15,75% Strategie vs. −65,20% Buy&Hold – deutlich weniger Verlust), 2023 Erholung (+13,14% realisiert vs. +153,60% Buy&Hold – erhebliche Unterperformance), 2021 Seitwärts Jun–Sep (0 geschlossene Trades, aber 1 am Periodenende noch offene Position, unrealisiert +1,77 – ursprünglich fälschlich als "0 Aktivität" berichtet, siehe Bugfix unten). Parameter waren vor dem ersten Lauf fixiert (Literatur-Standardwerte, nicht gegen diese Zeiträume optimiert) und wurden nicht nachjustiert – Overfitting-Vorsicht gemäß Gort et al.
-  - **Zusatz-Analyse** (nur zur Einordnung, NICHT das Live-Verhalten): ein simulierter periodischer manueller Stop-Loss-Reset (`--simulate-reset-after-days`) zeigt, dass der fehlende Reset einen erheblichen Teil der 2023-Unterperformance erklärt (mit 14-Tage-Reset: ~+55% statt ~+13% ggü. Positionsgröße, durch einen zusätzlichen Wiedereinstieg am 19.10.2023). Im Bärenmarkt 2022 ändert der Reset dagegen nichts – kein neues Fehlsignal, da der Trend durchgehend negativ blieb.
-  - **Beim Backtesting selbst ein Report-Bug gefunden und behoben** (kein Fehler in der Handelslogik): Eine am Ende eines Testzeitraums noch offene Position wurde nicht in `Anzahl Trades`/`Gesamt-PnL` gezählt, wodurch aktive Perioden fälschlich wie "keine Aktivität" wirkten (siehe 2021-Seitwärts-Ergebnis oben) und die Reset-Analyse zunächst wirkungslos erschien. Jetzt wird eine am Ende offene Position separat und unrealisiert ausgewiesen.
-  - Live-Strategie mit Fake-Client-Tests verifiziert: Einstieg bei bestätigtem Signal, kein Doppel-Einstieg, Ausstieg per Signal-Umkehr (separat getestet, ohne Stop-Loss-Interferenz), Stop-Loss-Exit mit Latch und Blockade neuer Einstiege bis manueller Reset, Notaus-Isolation (`TREND_BOT_HALT` betrifft nicht DCA/Grid).
-  - Kurzer technischer Dry-Run-Check am 10.09.2026 auf dem Desktop erfolgreich: Start fehlerfrei, historische Tageskerzen korrekt geladen, EMA-Berechnung unabhängig gegengeprüft (EMA-20/EMA-50-Abstand 6,66 %, Richtung "up" bestätigt – deckungsgleich mit der Bot-Entscheidung), ein Dry-Run-Einstieg ausgelöst (kein echter Trade), sauber über den Notaus gestoppt. Kein tagelanger Dauerlauf gestartet, da ein echtes Signal auf Tageskerzen ohnehin mehrere Tage dauert.
-- [x] **Vierter, übergeordneter Baustein: Kapital-Allocator** (stufenlose Umschichtung zwischen DCA-Bot und Trend-Following-Bot je nach Trendstärke, 14.09.2026) – `dca_bot/allocator_config.py`, `allocator_signals.py`, `allocator.py`, `main_allocator.py`, `allocator_backtest.py`. Grid-Bot bleibt bewusst unberührt (hat bereits einen eigenen Trendbruch-Stop-Loss). Läuft als vierter, komplett eigenständiger Prozess (eigener Zustand `data/allocator_state.json`, eigener Notaus `STOP_ALLOCATOR`/`ALLOCATOR_HALT`) und platziert selbst nie Orders.
-  - **Trendstärke-Berechnung**: wiederverwendet `TrendSignalGenerator` aus `trend_signals.py` (mit `min_gap_pct=0`, da die dortige Bestätigungslogik für binäre Ein-/Ausstiegsentscheidungen gedacht ist, der Allocator aber den rohen, kontinuierlichen EMA-Abstand braucht) statt einer zweiten Implementierung. Nur eine bestätigte AUFWÄRTS-Richtung zählt als Stärke (`derive_trend_strength`) – der Trend-Bot ist long-only, bei Abwärtstrend bekäme er ohnehin kein Kapital zugeteilt.
-  - **Lineare Interpolation** zwischen konfigurierbaren Ankerpunkten (Default: 0% EMA-Abstand → 0% Trend-Anteil, 3% → 100% Trend-Anteil, `compute_target_fraction`) – bewusster Ausgangspunkt, kein empirisch hergeleiteter Optimalwert.
-  - **Whipsaw-Schutz durch EMA-Glättung der Zuteilung selbst** (`smooth_fraction`, gleiche Formel wie die Preis-EMAs in `trend_signals.py`, nur auf die Zuteilungs-Prozentzahl angewandt) statt eines rollierenden SMA-Fensters – konsistent mit dem Rest des Projekts, nur ein persistierter Wert nötig statt eines Verlaufsfensters.
-  - **Additive, standardmäßig deaktivierte Integration**: DCA (`strategy.py`) und Trend (`trend_strategy.py`) bekommen je eine neue, leere Default-Config-Option (`DCA_ALLOCATOR_STATE_FILE`/`TREND_ALLOCATOR_STATE_FILE`). Nur wenn explizit gesetzt, skalieren sie den Betrag einer NEUEN Order (`read_allocation_fraction` aus `allocator_signals.py`); ist die Datei nicht gesetzt/vorhanden/lesbar, verhalten sich beide exakt wie zuvor. Offene Positionen bleiben in jedem Fall unangetastet – nur neue Käufe/Einstiege werden umgeschichtet. Unterhalb von 5 USDT wird ein Kauf/Einstieg übersprungen statt einer wirtschaftlich bedeutungslosen Mini-Order (`MIN_EFFECTIVE_QUOTE_AMOUNT`). Per Fake-Client-Tests verifiziert: unverändertes Verhalten ohne Allocator, korrekte Skalierung bei aktivem Allocator, korrektes Überspringen unterhalb des Mindestbetrags.
-  - **Backtest vor jedem Live-Test** (wie gefordert) über dieselben drei Zeiträume wie DCA/Trend, kombiniert vs. isoliert – mit investiertem Betrag, absolutem PnL und Rendite%, da die Kapitalbasis zwischen den drei Varianten NICHT gleich groß ist (siehe Korrektur unten):
+**Problem:** DCA ist für Seitwärts-/lineare Marktphasen gedacht und performt nachweislich schlecht bei starken, anhaltenden Trends.
 
-    | Zeitraum | Kombiniert: investiert / PnL / % | Isoliert DCA: investiert / PnL / % | Isoliert Trend: investiert / PnL / % | Buy & Hold |
-    |---|---|---|---|---|
-    | 2022 Bärenmarkt | 5.199,13 / −1.667,56 / −32,07 % | 5.460,00 / −1.821,46 / −33,36 % | 15,00 / −2,36 / −15,75 % | −65,20 % |
-    | 2023 Erholung | 2.136,57 / +1.370,90 / +64,16 % | 5.460,00 / **+2.844,11** / +52,09 % | 30,00 / +3,94 / +13,14 % | +153,60 % |
-    | 2021 Seitwärts | 1.062,69 / **+242,89** / +22,86 % | 1.830,00 / +198,74 / +10,86 % | 15,00 / +0,00 / +0,00 % | +19,43 % |
+**Umgesetzt (14.09.2026):** Stufenloser Kapital-Umschalter (Allocator) zwischen DCA-Bot und Trend-Following-Bot – `dca_bot/allocator_config.py`, `allocator_signals.py`, `allocator.py`, `main_allocator.py`, `allocator_backtest.py`. Grid-Bot bleibt bewusst unberührt (hat bereits einen eigenen Trendbruch-Stop-Loss). Läuft als vierter, komplett eigenständiger Prozess (eigener Zustand `data/allocator_state.json`, eigener Notaus `STOP_ALLOCATOR`/`ALLOCATOR_HALT`) und platziert selbst nie Orders.
 
-    **Korrektur nach expliziter Nutzer-Nachfrage vor dem Commit** (berechtigter Einwand: ist die Kapitalbasis beim Prozent-Vergleich überhaupt gleich groß?) – Antwort: **nein**. Kombiniert investiert deutlich weniger Gesamtkapital als Isoliert DCA (z.B. 2023: 2.136,57 statt 5.460,00, nur 39 %): DCA wird täglich um den aktuellen Trend-Anteil reduziert, aber das dadurch "freiwerdende" Kapital fließt nicht automatisch zum Trend-Bot – der investiert nur an seinen eigenen, seltenen Einstiegstagen; an allen anderen Tagen bleibt der reduzierte DCA-Betrag schlicht uninvestiert (exakt wie im Live-Design: additive, unabhängige Skalierung je Seite, kein gemeinsamer Kapitaltopf). Die Prozentwerte sind daher eine Rendite-pro-eingesetztem-Euro-Kennzahl je Strategie, **kein** Vergleich bei identischem Gesamtbudget.
+**Architektur:**
+- **Trendstärke-Berechnung:** wiederverwendet `TrendSignalGenerator` aus `trend_signals.py` (mit `min_gap_pct=0`, da die dortige Bestätigungslogik für binäre Ein-/Ausstiegsentscheidungen gedacht ist, der Allocator aber den rohen, kontinuierlichen EMA-Abstand braucht). Nur eine bestätigte AUFWÄRTS-Richtung zählt als Stärke – Trend-Bot ist long-only, bei Abwärtstrend bekäme er ohnehin kein Kapital zugeteilt.
+- **Lineare Interpolation** zwischen konfigurierbaren Ankerpunkten (Default: 0% EMA-Abstand → 0% Trend-Anteil, 3% → 100% Trend-Anteil) – bewusster Ausgangspunkt, kein empirisch hergeleiteter Optimalwert.
+- **Whipsaw-Schutz durch EMA-Glättung der Zuteilung selbst** (gleiche Formel wie die Preis-EMAs in `trend_signals.py`, nur auf die Zuteilungs-Prozentzahl angewandt) – nur ein persistierter Wert nötig statt eines Verlaufsfensters.
+- **Additive, standardmäßig deaktivierte Integration:** DCA und Trend bekommen je eine neue, leere Default-Config-Option. Nur wenn explizit gesetzt, skalieren sie den Betrag einer NEUEN Order; ist die Option nicht gesetzt, verhalten sich beide exakt wie zuvor. Offene Positionen bleiben in jedem Fall unangetastet. Unterhalb von 5 USDT wird ein Kauf/Einstieg übersprungen statt einer wirtschaftlich bedeutungslosen Mini-Order. Per Fake-Client-Tests verifiziert.
 
-    Bei ABSOLUTEM Gewinn zeigt sich dadurch ein gemischtes Bild statt eines klaren "Kombiniert gewinnt immer": In 2021 (Seitwärts) und 2022 (Bärenmarkt, hier: kleinerer Verlust) übertrifft Kombiniert Isoliert DCA trotz geringerem Kapitaleinsatz auch absolut (+242,89 vs. +198,74 bzw. −1.667,56 vs. −1.821,46 – echter Vorteil, nicht nur prozentual). In 2023 (Erholung) dagegen erzielt Isoliert DCA trotz niedrigerer Prozentrendite den deutlich höheren absoluten Gewinn (+2.844,11 vs. +1.370,90), weil dort mehr als doppelt so viel Kapital eingesetzt wird – die höhere Allocator-Prozentrendite kompensiert die geringere Kapitalbindung in diesem Zeitraum nicht.
+**Backtest-Ergebnisse** (dieselben drei Zeiträume wie DCA/Trend, mit investiertem Betrag, absolutem PnL und Rendite%):
 
-    Ein davon unabhängiger, separat gegengeprüfter Befund bleibt gültig: Die DCA-Seite *innerhalb* der Kombination erzielt selbst schon eine bessere Rendite pro eingesetztem Euro als isoliertes, uniformes DCA (2023: 64,55 % statt 52,09 %) – an Tagen mit hoher Trendstärke (typischerweise nach bereits erfolgten Kursanstiegen) wird weniger DCA-Kapital eingesetzt, was den durchschnittlichen Einstandspreis des verbleibenden DCA-Kapitals verbessert. Das ist eine Rendite-Effizienz-Verbesserung je eingesetztem Euro, kein Widerspruch zum obigen absoluten Befund – sie ändert nichts daran, dass insgesamt weniger Kapital eingesetzt wird. Parameter sind unveränderte Live-Defaults, nicht gegen diese Zeiträume optimiert.
-  - Glättungsperiode im Backtest ist ein eigener, separat konfigurierbarer Tages-Parameter (`--smoothing-period-days`), keine Einheiten-Umrechnung der Live-Zyklen (Live: Zyklen à `ALLOCATOR_INTERVAL_MINUTES`) – analog zur 1h-Kerzenauflösung beim Grid-Backtest eine bewusste Näherung, kein exaktes Abbild.
-  - Noch kein Live-Dry-Run gestartet (wie gefordert erst nach dem Backtest) – offen für eine spätere Session.
+| Zeitraum | Kombiniert: investiert / PnL / % | Isoliert DCA: investiert / PnL / % | Isoliert Trend: investiert / PnL / % | Buy & Hold |
+|---|---|---|---|---|
+| 2022 Bärenmarkt | 5.199,13 / −1.667,56 / −32,07 % | 5.460,00 / −1.821,46 / −33,36 % | 15,00 / −2,36 / −15,75 % | −65,20 % |
+| 2023 Erholung | 2.136,57 / +1.370,90 / +64,16 % | 5.460,00 / **+2.844,11** / +52,09 % | 30,00 / +3,94 / +13,14 % | +153,60 % |
+| 2021 Seitwärts | 1.062,69 / **+242,89** / +22,86 % | 1.830,00 / +198,74 / +10,86 % | 15,00 / +0,00 / +0,00 % | +19,43 % |
 
-## 6a. Plan für Samstag (nach Abschluss des Laptop-DCA-Tests, 12.09.2026, 18:10 Uhr)
+**Wichtige Korrektur nach expliziter Nachfrage vor dem Commit** (berechtigter Einwand: ist die Kapitalbasis beim Prozentvergleich überhaupt gleich groß?) – Antwort: **nein**. Kombiniert investiert deutlich weniger Gesamtkapital als Isoliert DCA (z.B. 2023: nur 39%): DCA wird täglich um den aktuellen Trend-Anteil reduziert, das freiwerdende Kapital fließt aber nicht automatisch zum Trend-Bot (der nur an eigenen, seltenen Einstiegstagen investiert) – exakt wie im Live-Design (additive, unabhängige Skalierung, kein gemeinsamer Kapitaltopf). Die Prozentwerte sind eine Rendite-pro-eingesetztem-Euro-Kennzahl je Strategie, **kein** Vergleich bei identischem Gesamtbudget.
 
-Reihenfolge wichtig: Schritt 2 (Datei-Transfer) muss vor Schritt 3
-(Grid-Bot starten) passieren, sonst startet der Grid-Bot fälschlich mit
-leerem Zustand statt die bestehenden Positionen fortzusetzen. Schritte 1
-und 4 sind davon unabhängig und können in beliebiger Reihenfolge erfolgen.
+Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 übertrifft Kombiniert Isoliert DCA trotz geringerem Kapitaleinsatz auch absolut. In 2023 erzielt Isoliert DCA trotz niedrigerer Prozentrendite den deutlich höheren absoluten Gewinn, weil dort mehr als doppelt so viel Kapital eingesetzt wird.
 
-1. **DCA-Bot mit Telegram-Integration auf dem Laptop neu starten.**
-   Sicherstellen, dass alle Commits vom Desktop nach GitHub gepusht
-   wurden, dann auf dem Laptop `git pull` (bringt Telegram-Integration +
-   den Stop-Loss/Tageslimit-Prüfreihenfolge-Fix). In der Laptop-`.env`
-   `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` ergänzen (Teil von `.gitignore`,
-   kommt nicht automatisch mit). Prüfen, dass `interval_hours` in
-   `config.py` auf dem regulären Wert (24) steht, nicht mehr auf einem
-   Test-Intervall. Starten mit `python -m dca_bot.main`.
+**Separat gegengeprüfter, weiterhin gültiger Befund:** Die DCA-Seite *innerhalb* der Kombination erzielt eine bessere Rendite pro eingesetztem Euro als isoliertes, uniformes DCA (2023: 64,55% statt 52,09%) – an Tagen mit hoher Trendstärke wird weniger DCA-Kapital eingesetzt, was den durchschnittlichen Einstandspreis des verbleibenden DCA-Kapitals verbessert.
 
-2. **Zustand vom Desktop auf den Laptop übertragen – manuell, NICHT über
-   Git.** Der Ordner `data/` steht in `.gitignore` und wird nicht
-   synchronisiert. Insbesondere `data/grid_positions.json` (6 offene
-   Grid-Positionen vom 10.09.2026, siehe oben) muss manuell kopiert
-   werden (z.B. USB-Stick oder Cloud-Speicher) – sonst startet der
-   Grid-Bot auf dem Laptop mit leerem Ledger statt die bestehenden
-   Positionen weiterzuverfolgen. Optional auch `data/trend_ledger.json`
-   (1 offene Dry-Run-Position aus dem Technik-Check vom 10.09.2026)
-   mitübertragen, falls dort Kontinuität gewünscht ist – nicht zwingend,
-   da es nur ein Testartefakt ohne echten Trade war.
+**Geplanter Vergleichstest:** Sobald live getestet, zusätzlich auf dem Homeserver parallel zum isolierten Drei-Bot-System auf dem VPS laufen lassen (separater, neuer Testnet-Account nötig, damit keine gemeinsame Kontostand-Verfälschung entsteht).
 
-3. **Grid-Bot auf dem Laptop fortsetzen.** Nach dem Datei-Transfer aus
-   Schritt 2: `GRID_LOWER_LIMIT`/`GRID_UPPER_LIMIT`/`GRID_SPACING_PCT`/
-   `GRID_INTERVAL_MINUTES` in der Laptop-`.env` auf die eigentlichen
-   Ziel-Werte setzen (68000.0 / 88000.0 / 1.5 / 5) – **nicht** die auf dem
-   Desktop nur für den kurzen Beobachtungstest verwendete enge Spanne
-   (±0,5 %, 0,1 % Abstand, 2-Minuten-Intervall) übernehmen. Starten mit
-   `python -m dca_bot.main_grid` – die 6 übertragenen offenen Positionen
-   werden automatisch aus dem Ledger erkannt und weiterverfolgt.
+**Modellwahl:** Sonnet 5 (high effort) für die Umsetzung. Opus 5 gezielt für den finalen Sicherheitsreview vor Echtgeld reserviert (siehe 6d).
 
-4. **Trend-Following-Bot auf dem Laptop starten.** Mit den Backtest-
-   Defaults (20/50 EMA, 1,0 % Filter, 10 % Stop-Loss), unverändert.
-   Starten mit `python -m dca_bot.main_trend` – lädt die EMA-Historie
-   beim Start automatisch aus echten historischen Kursdaten neu, dafür
-   ist kein manueller Datei-Transfer nötig.
+**Status:** Backtest abgeschlossen und verifiziert. Noch kein Live-Dry-Run gestartet (wie gefordert erst nach dem Backtest) – offen für eine spätere Session.
+
+## 5b. Geplantes Live-Kapital
+
+Nutzer plant beim eventuellen Live-Start mit 100–300€ Echtkapital zu starten (genaue Aufteilung zwischen DCA/Grid/Trend-Following bzw. dem Allocator-System noch offen). Relevant erst nach Abschluss der Testnet-Phase – bei Verteilung auf mehrere Bots ergeben sich entsprechend kleine Positionsgrößen pro Trade, das sollte vor dem Live-Gang nochmal bewusst durchgerechnet werden.
 
 ---
 
-*Diese Datei dient als lebendes Projektdokument und sollte bei neuen Entscheidungen und Recherche-Ergebnissen aktualisiert werden.*
+## 6. Nächste Schritte / Fortschritts-Log
+
+- [x] Erst-Strategie festgelegt: DCA als Startpunkt
+- [x] Binance-Testnet-Account eingerichtet
+- [x] Projektgrundgerüst aufgesetzt (Python, `dca_bot`-Package)
+- [x] DCA-Strategie + Backtesting-Skript implementiert (`backtest.py`), verifiziert an 2022 (Bärenmarkt) vs. 2023 (Bullenmarkt)
+- [x] Risikomanagement-Logik (`dca_bot/risk.py`): Notaus (`KillSwitch`), persistentes Tageslimit (`TradeLedger`), Portfolio-Stop-Loss (latched, manueller Reset). Whipsaw-Vermeidung bewusster Grund für fehlenden Automatik-Reset (dokumentiert im Code).
+- [ ] Optionaler automatischer Stop-Loss-Reset (Erholungs-Schwelle + Cooldown) – bewusst nicht implementiert, siehe Begründung oben. Könnte bei Bedarf als Config-Flag nachgerüstet werden.
+- [x] **Monitoring & Benachrichtigungen (Telegram)** – `dca_bot/notifier.py`, sendet optional (nur wenn Token/Chat-ID gesetzt) bei Kaufzyklus, Stop-Loss, Notaus, Fehlern, tägliche Zusammenfassung. Fehler beim Senden legen den Bot nie lahm. Verifiziert am 10.09.2026 auf dem Desktop-PC (Dry-Run-Livetest, alle vier Nachrichtentypen bestätigt). Dabei echte Prüfreihenfolge-Lücke in `strategy.py` gefunden und behoben: Stop-Loss wurde vor dem Fix erst NACH dem Tageslimit-Check geprüft, wodurch er an Tagen mit ausgeschöpftem Tageslimit übersprungen wurde. Jetzt Preisabfrage/Stop-Loss-Check vor dem Tageslimit-Check.
+- [x] **DCA-Bot 3-Tage-Stabilitätstest auf dem Laptop** – Zeitraum 09.09.2026 17:57 bis 11.09.2026 16:54 Uhr, Laufzeit 1 Tag 22h58min von geplanten 3 Tagen (vorzeitig per Notaus beendet, nicht durch Fehler). Echtes Trading (`DCA_BOT_ENABLE_TRADING=true`), 24h-Intervall: 2 erfolgreiche Käufe (09.09. @ 78.620,79, 10.09. @ 77.209,97, je 15 USDT), keine einzige Fehler-Zeile im gesamten Log. Vollständiges Log archiviert unter `docs/test-reports/2026-09-09_dca-3tage-stabilitaetstest.log` (`.gitignore` um `!docs/**/*.log` ergänzt).
+- [x] **Zweite Strategie: Spot-Grid-Trading-Bot** – `dca_bot/main_grid.py`, `grid_config.py`, `grid_risk.py`, `grid_strategy.py`, `grid_signals.py`, `reset_grid_stop_loss.py`. Komplett eigenständig: eigenes Ledger (`data/grid_positions.json`), eigener Notaus (`GRID_BOT_HALT`), eigener Trendbruch-Stop-Loss (latched), eigene Telegram-Nachrichten. Positions-Zuordnung: jede Kaufposition kennt ihre Grid-Stufe und ihr individuelles Verkaufsziel.
+  - Zwei echte Designfehler vor Fertigstellung selbst gefunden und behoben: (1) Kaltstart-Bug (naiver Preis-vs-Stufe-Vergleich hätte bei Start mitten im Grid alle Stufen oberhalb gleichzeitig gekauft) – behoben durch Crossing-Erkennung gegen zuletzt beobachteten Preis. (2) Intervallgrenzen-Fehler (Referenzstufe doppelt gezählt) – behoben durch halb-offenes Intervall.
+  - Additive Änderungen an Shared-Code: `KillSwitch` akzeptiert konfigurierbaren Env-Var-Namen; `binance_client.py` erhielt `place_market_sell()`. DCA-Regressionstest danach bestanden.
+  - **Backtesting nachgerüstet** (`grid_backtest.py`, 12.09.2026): Logik zuerst in zustandsloses `grid_signals.py` extrahiert (keine Doppelimplementierung, analog zu `trend_signals.py`). 1h-Kerzen (nicht Tageskerzen, da Live-Bot alle 5 Minuten prüft).
+  - **Skalen-Mismatch entdeckt und transparent gemacht:** Grid-Preisspanne ist absoluter USD-Wert, an heutiges Kursniveau gekoppelt (anders als DCA/Trend, die skaleninvariant sind). Gegen 2021–2023-Daten getestet, hätte die Live-Spanne (70k–90k) 0 Trades ergeben. Literales Ergebnis UND ein zusätzlicher, klar gekennzeichneter Analyse-Modus (Spanne auf Periodenstart skaliert) werden beide gezeigt.
+  - **Backtest-Ergebnisse** (Live-Defaults, Analyse-Modus): 2022 Bärenmarkt 25 Trades, +8,90 realisiert, aber 1 offene Position −9,69 unrealisiert bei ausgelöstem Stop-Loss; 2023 Erholung nur 5 Trades, +1,61; 2021 Seitwärts 109 Trades, +47,22 realisiert, glatt geschlossen – bestätigt Recherche (Grid funktioniert am besten in Seitwärtsmärkten).
+  - Grid-Dry-Run-Test auf dem Desktop (10.09.2026): 6 echte Kaufpositionen aus tatsächlicher Marktbewegung entstanden (Crossing-Erkennung bei mehreren gleichzeitig durchquerten Stufen live bestätigt), noch kein Verkauf beobachtet, bevor auf den VPS umgezogen wurde.
+- [x] **Dritte Strategie: Trend-Following-Bot** – `dca_bot/main_trend.py`, `trend_config.py`, `trend_signals.py`, `trend_risk.py`, `trend_strategy.py`, `trend_backtest.py`, `reset_trend_stop_loss.py`. EMA-Crossover (20/50 Tage), long-only, Trendstärke-Filter (Mindestabstand 1,0%, bewusst statt ADX – einfacher korrekt zu implementieren). Backtest und Live-Strategie nutzen exakt dieselbe Logik (`trend_signals.py`).
+  - **Backtest-Ergebnisse:** 2022 Bärenmarkt −15,75% Strategie vs. −65,20% Buy&Hold (deutlich weniger Verlust); 2023 Erholung +13,14% vs. +153,60% Buy&Hold (erhebliche Unterperformance); 2021 Seitwärts 0 geschlossene Trades, 1 offene Position +1,77 unrealisiert am Ende.
+  - **Zusatz-Analyse** (simulierter periodischer Reset): erklärt einen erheblichen Teil der 2023-Unterperformance (mit 14-Tage-Reset: ~+55% statt ~+13%, durch zusätzlichen Wiedereinstieg). Im Bärenmarkt 2022 ändert Reset nichts (kein neues Fehlsignal).
+  - Beim Backtesting ein Report-Bug gefunden und behoben: eine am Ende offene Position wurde nicht in Anzahl Trades/PnL gezählt (wirkte fälschlich wie "keine Aktivität"). Jetzt separat als unrealisiert ausgewiesen.
+  - Fake-Client-Tests: Einstieg bei bestätigtem Signal, kein Doppel-Einstieg, Ausstieg per Signal-Umkehr (separat getestet), Stop-Loss-Exit mit Latch, Notaus-Isolation bestätigt.
+  - Technischer Dry-Run-Check (10.09.2026): EMA-Berechnung unabhängig gegengeprüft (6,66% Abstand, Richtung "up"), ein Dry-Run-Einstieg ausgelöst, sauber gestoppt.
+
+---
+
+## 6a. Übertragung auf den Laptop (12.09.2026) — ABGESCHLOSSEN
+
+Nach Abschluss des Laptop-DCA-Tests: DCA-Bot mit Telegram-Integration neu gestartet, `data/`-Ordner (6 offene Grid-Positionen, 1 Trend-Testposition) manuell vom Desktop übertragen (nicht über Git, da `data/` in `.gitignore`), Grid- und Trend-Bot auf dem Laptop mit den korrekten Ziel-Werten gestartet (nicht die engen Test-Werte vom Desktop-Beobachtungstest).
+
+## 6b. Umzug auf einen gemieteten VPS (13.09.2026) — ABGESCHLOSSEN
+
+**Grund:** Laptop/PC können nicht wochenlang durchlaufen (Stromverbrauch, Praktikabilität). Für einen geplanten ca. einmonatigen Beobachtungszeitraum aller drei Strategien wurde ein Cloud-VPS gemietet.
+
+**Anbieter:** Contabo Cloud VPS 4 (4 vCPU, 8 GB RAM, 100 GB SSD), Ubuntu 24.04, 1 Monat Laufzeit für 6,55€. Bestellt 12.09.2026, **Kündigung bereits zum 12.10.2026 gesetzt** (verhindert automatische Vertragsverlängerung; Server läuft bis dahin regulär weiter). Server-IP: 161.97.113.170, Projektpfad `/root/crypto-bot`.
+
+**Wichtiger Reminder:** Vor dem 12.10. müssen Logs und `data/`-Ordner final gesichert werden (siehe 6c), sonst gehen die Testergebnisse beim Vertragsende verloren.
+
+**Absicherung:** SSH-Key-Login eingerichtet (Ed25519), Passwort-Authentifizierung deaktiviert (`PasswordAuthentication no` in `sshd_config`). Zusätzlich ein separater, passphrasefreier Deploy-Key für Claude-Code-Automatisierung angelegt (getrennt vom Haupt-SSH-Key, der weiterhin für GitHub etc. mit Passphrase geschützt bleibt).
+
+**Deployment:** Projekt von GitHub geklont (öffentliches Repo `EliasNein/crypto-bot`), `.env` und `data/`-Ordner manuell übertragen (`scp`, da beide über `.gitignore` ausgeschlossen sind). Alle drei Bots laufen als **systemd-Services** (`dca-bot`, `grid-bot`, `trend-bot`):
+- Automatischer Start bei Server-Neustart (`enabled`)
+- Automatischer Neustart bei Absturz (`Restart=on-failure`)
+- Laufen unabhängig von aktiver SSH-Sitzung
+- Nutzen die Projekt-`.venv`
+- Notaus-Mechanismus (STOP-Dateien) und `systemctl stop` funktionieren nachweislich unabhängig voneinander (verifiziert durch Code-/Systemd-Semantik-Analyse statt riskantem Live-Test: `BotHalted` führt zu regulärem `break` und Exit-Code 0, `Restart=on-failure` reagiert nur auf Fehler-Exits; `systemctl stop` unterdrückt `Restart=` grundsätzlich bei administrativ angefordertem Stopp)
+
+**Live-Konfiguration beim Start:**
+- DCA-Bot: `DCA_BOT_ENABLE_TRADING=true` (echte Testnet-Orders, wie beim vorherigen erfolgreichen Laptop-Test) – erster echter Kauf sofort erfolgreich (15 USDT @ 76.952,01)
+- Grid-Bot: Dry-Run, korrekte Ziel-Spanne (68.000–87.585, 18 Stufen)
+- Trend-Bot: Dry-Run, Historie geladen
+
+Eine Telegram-Nachricht scheiterte initial an einem transienten Verbindungsfehler – vom Notifier wie vorgesehen abgefangen (kein Crash), bestätigt die robuste Fehlerbehandlung.
+
+## 6c. Plan für die kommenden Wochen (Testmonat auf dem VPS)
+
+- Kein Dauerbeobachten nötig – gelegentliche Check-ins (SSH `journalctl -u <service> -f`, oder Telegram) reichen.
+- **Zu erwartende Meilensteine, bevor der Test als "ausreichend" gilt:**
+  - DCA: mehrere weitere Zyklen ohne Fehler (Basis: schon 2 Tage sauber auf dem Laptop verifiziert)
+  - Grid: mindestens ein kompletter Kauf-Verkauf-Zyklus einer Position (bisher nur Käufe live beobachtet)
+  - Trend-Following: mindestens ein echtes, bestätigtes Signal (kann laut Tageskerzen-Logik mehrere Tage dauern)
+- **Snapshot-Strategie statt Live-Sync:** Keine automatische Synchronisierung einrichten. Stattdessen alle paar Tage bzw. an Meilensteinen `scp`-Snapshots von Logs und `data/`-Ordner auf den PC ziehen, zusätzlich zwingend **vor dem 12.10.** ein finaler Snapshot.
+- **Vor dem 12.10. zu entscheiden:** Server verlängern (neue Bestellung) oder Umzug auf den Homeserver abschließen (siehe 6d).
+
+## 6d. Plan für den Live-Gang nach dem Testmonat
+
+Nutzer plant: nach Abschluss des VPS-Testmonats Umzug auf den eigenen Homeserver (TrueNAS, bereits eine Ubuntu-Server-VM für Cloudflare-Webseiten aktiv) für den Live-Betrieb mit echtem Kapital (100–300€, siehe 5b).
+
+**Empfehlung: separate, eigene VM auf dem TrueNAS-Server** für die Bots (nicht die bestehende Webseiten-VM mitnutzen), um Isolation zu wahren – konsistent mit dem Trennungsprinzip zwischen den Bot-Strategien selbst. Einrichtung technisch nahezu identisch zum VPS-Setup (Ubuntu, Python, Git-Clone, systemd-Services), aber ohne laufende Kosten.
+
+**Vor dem eigentlichen Live-Gang mit echtem Geld noch zu klären/umzusetzen:**
+1. **Sicherheitsreview (Code + Infrastruktur) mit Claude Opus 5** – bewusst zurückgestellt bis kurz vor Live-Gang, jetzt zeitlich relevant
+2. **Echter, exchange-seitiger Stop-Loss** statt nur software-interner Überwachung – aktueller Stop-Loss wirkt nur, solange der Bot-Prozess läuft; bei einem Ausfall (Stromausfall/Internetausfall zuhause) wäre eine offene Position sonst ungeschützt
+3. Entscheidung zur Kapitalverteilung auf die Strategien (nach Auswertung der Testmonat-Ergebnisse, inkl. Allocator-System)
+4. Home-Netzwerk-Absicherung prüfen (Router-Firewall, ggf. VPN-Zugriff statt offener Ports)
+5. Allocator-System (siehe 5a) fertig getestet und verifiziert – Backtest abgeschlossen, Live-Dry-Run steht noch aus, falls bis dahin nicht nachgeholt
+
+---
+
+*Diese Datei dient als lebendes Projektdokument und sollte bei neuen Entscheidungen und Recherche-Ergebnissen aktualisiert werden. Stand 13.09.2026: zusammengeführt aus zwei parallel gepflegten Versionen (Chat-Artefakt + lokale Claude-Code-Fortschreibung).*
