@@ -62,6 +62,15 @@ class FakeTradingClient:
         # weil die Order zwischenzeitlich bereits FILLED wurde - das wird
         # stattdessen über fill_order() VOR dem Cancel-Aufruf simuliert).
         self.force_transient_cancel_failure = False
+        # Erzwingt, dass place_market_sell() None zurueckgibt, OBWOHL
+        # trading_enabled=True ist - simuliert einen echten API-Fehler
+        # beim Verkauf (der zweite, voellig andere Grund fuer None neben
+        # dem Dry-Run; siehe K1 in TrendSellSafetyTestCase unten).
+        self.force_market_sell_failure = False
+        # Erzwingt, dass auch das Platzieren einer Stop-Loss-Order
+        # fehlschlaegt - fuer den doppelt kritischen Fall "weder verkauft
+        # noch abgesichert".
+        self.force_stop_order_failure = False
 
     def _new_order_id(self) -> str:
         self._next_order_id += 1
@@ -84,6 +93,8 @@ class FakeTradingClient:
         self.call_log.append("place_market_sell")
         if not self.trading_enabled:
             return None
+        if self.force_market_sell_failure:
+            return None
         return {"cummulativeQuoteQty": quantity * self.price}
 
     def place_stop_loss_limit_sell(
@@ -91,6 +102,8 @@ class FakeTradingClient:
     ) -> dict | None:
         self.stop_order_calls.append((symbol, quantity, stop_price, limit_price))
         if not self.trading_enabled:
+            return None
+        if self.force_stop_order_failure:
             return None
         order_id = self._new_order_id()
         order = {
@@ -130,7 +143,14 @@ class FakeTradingClient:
         order["cummulativeQuoteQty"] = cumulative_quote
 
 
-class TrendStopLossTestCase(unittest.TestCase):
+class TrendStrategyTestBase(unittest.TestCase):
+    """
+    Gemeinsame Testumgebung (temporaere Ledger-/State-Dateien, Config- und
+    Strategie-Fabrik) fuer die Trend-Testfaelle. Enthaelt bewusst KEINE
+    eigenen Testmethoden: erbte eine Testklasse direkt von einer anderen,
+    wuerden deren Tests in beiden Klassen erneut ausgefuehrt.
+    """
+
     def setUp(self) -> None:
         self._tmpdir = tempfile.TemporaryDirectory()
         tmp_path = Path(self._tmpdir.name)
@@ -162,6 +182,10 @@ class TrendStopLossTestCase(unittest.TestCase):
         strategy = TrendFollowingStrategy(config, client)
         strategy._seeded = True  # kein echter Netzwerkzugriff für die Historie
         return strategy, client
+
+
+class TrendStopLossTestCase(TrendStrategyTestBase):
+    """Echter, exchange-seitiger Stop-Loss (siehe Modul-Docstring)."""
 
     # -- a) Entry setzt eine Stop-Loss-Order und speichert die Order-ID --
 
@@ -459,6 +483,253 @@ class TrendStopLossTestCase(unittest.TestCase):
         # Keine offene Position vorhanden.
         strategy.reconcile_on_startup()
         self.assertEqual(client.order_status_calls, [])
+
+
+class TrendSellSafetyTestCase(TrendStrategyTestBase):
+    """
+    Tests für die Verkaufs-Sicherheit des Trend-Bots
+    (Sicherheitsreview-Punkte K1 und K4, siehe
+    trend_strategy.py._close_position).
+
+    Teilt sich die Testumgebung (TrendStrategyTestBase) mit den
+    Stop-Loss-Tests oben - die Szenarien hier bauen auf exakt derselben
+    Umgebung auf, nur mit anderem Fokus:
+
+    - K1: place_market_sell() gibt None in ZWEI völlig verschiedenen
+      Fällen zurück (Dry-Run UND echter API-Fehler). Vor dem Fix wurden
+      beide gleich behandelt - der Bot erfand bei einem echten Fehler
+      einen Erlös aus quantity*price und schloss die Position trotzdem.
+    - K4: Eine im Dry-Run eröffnete Position (dry_run=true im Ledger)
+      wäre nach einem Umschalten auf TREND_BOT_ENABLE_TRADING=true real
+      verkauft worden - Assets, die nie gekauft wurden.
+
+    Trend-spezifisch gegenüber Grid: _resolve_stop_order_before_close()
+    storniert die exchange-seitige Stop-Order, BEVOR verkauft wird.
+    Schlägt der Verkauf dann fehl, wäre die weiterhin offene Position
+    schutzlos - es muss eine NEUE Stop-Order platziert werden.
+    """
+
+    def _open_dry_run_position_then_enable_trading(self, price: float = 50_000.0):
+        """
+        Stellt exakt den Zustand her, um den es in K4 geht: Position im
+        Dry-Run eröffnet, danach auf echtes Trading umgeschaltet. Das
+        Ledger bleibt dasselbe, nur Config und Client wechseln - wie beim
+        echten Umschalten per .env plus Bot-Neustart.
+        """
+        dry_strategy, _ = self._make_strategy(trading_enabled=False, price=price)
+        dry_strategy._open_position(price)
+
+        live_client = FakeTradingClient(trading_enabled=True, price=price)
+        live_strategy = TrendFollowingStrategy(self._make_config(True), live_client)
+        live_strategy._seeded = True
+        return live_strategy, live_client
+
+    # -- K4: Dry-Run-Position wird NIE real verkauft --
+
+    def test_dry_run_position_is_never_really_sold_when_trading_enabled(self):
+        strategy, client = self._open_dry_run_position_then_enable_trading()
+        open_trade = strategy._ledger.open_position()
+        self.assertTrue(open_trade["dry_run"], "Vorbedingung: im Dry-Run eröffnet")
+
+        with self.assertLogs("trend_bot", level="INFO") as captured:
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(client.market_sell_calls, [], "Keine echte Verkaufsorder erlaubt")
+        self.assertEqual(client.cancel_calls, [], "Dry-Run-Position hat keine Stop-Order")
+
+        marker_lines = [line for line in captured.output if "[DRY-RUN-POSITION]" in line]
+        self.assertEqual(len(marker_lines), 1)
+        self.assertIn("Verkauf bleibt simuliert", marker_lines[0])
+
+        # Simuliert geschlossen - korrektes Verhalten, nur ohne echte Order.
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["exit_reason"], "signal")
+        self.assertIsNone(strategy._ledger.open_position())
+
+    def test_dry_run_position_stop_loss_exit_still_latches(self):
+        """
+        Ein Stop-Loss-Exit einer Dry-Run-Position bleibt simuliert, muss
+        aber weiterhin den Stop-Loss-Latch setzen - die Strategie hat den
+        Ausstieg ja regulär entschieden.
+        """
+        strategy, client = self._open_dry_run_position_then_enable_trading()
+        open_trade = strategy._ledger.open_position()
+
+        strategy._close_position(open_trade, price=44_000.0, reason="stop_loss")
+
+        self.assertEqual(client.market_sell_calls, [])
+        self.assertTrue(strategy._stop_loss.is_paused())
+
+    # -- K1: fehlgeschlagener echter Verkauf schließt die Position NICHT --
+
+    def test_failed_real_sell_keeps_position_open_without_fake_pnl(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        client.force_market_sell_failure = True
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(len(client.market_sell_calls), 1, "Der Verkauf wurde versucht")
+
+        still_open = strategy._ledger.open_position()
+        self.assertIsNotNone(still_open, "Position muss OFFEN bleiben")
+        self.assertEqual(still_open["id"], open_trade["id"])
+        self.assertIsNone(still_open["realized_pnl"])
+        self.assertIsNone(still_open["exit_price"])
+        self.assertIsNone(still_open["exit_time"])
+        self.assertIsNone(still_open["exit_reason"])
+
+        warnings = [line for line in captured.output if "[TREND-VERKAUF-FEHLGESCHLAGEN]" in line]
+        self.assertTrue(warnings)
+        self.assertIn("[TREND-VERKAUF-FEHLGESCHLAGEN]", mock_notify.call_args[0][0])
+
+    def test_failed_real_sell_places_new_stop_loss_order(self):
+        """
+        Der Trend-spezifische Kern: _resolve_stop_order_before_close() hat
+        die Stop-Order VOR dem fehlgeschlagenen Verkauf storniert, die
+        weiterhin offene Position wäre danach ungeschützt. Es muss eine
+        NEUE Stop-Order platziert und im Ledger hinterlegt werden.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        original_order_id = open_trade["stop_loss_order_id"]
+        client.force_market_sell_failure = True
+
+        strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        # Die ursprüngliche Order wurde storniert ...
+        self.assertEqual(client.orders[original_order_id]["status"], "CANCELED")
+        # ... und eine zweite Stop-Order platziert (die erste kam vom Entry).
+        self.assertEqual(len(client.stop_order_calls), 2)
+        self.assertEqual(len(client.market_sell_calls), 1)
+
+        _, quantity, stop_price, limit_price = client.stop_order_calls[1]
+        self.assertAlmostEqual(quantity, open_trade["quantity"], places=10)
+        # Schwelle identisch zum Original: 10% unter dem Einstiegspreis.
+        self.assertAlmostEqual(stop_price, 45_000.0, places=2)
+        self.assertAlmostEqual(limit_price, 45_000.0 * (1 - 0.005), places=2)
+
+        still_open = strategy._ledger.open_position()
+        self.assertIsNotNone(still_open)
+        self.assertNotEqual(still_open["stop_loss_order_id"], original_order_id)
+        self.assertEqual(client.orders[still_open["stop_loss_order_id"]]["status"], "NEW")
+        self.assertAlmostEqual(still_open["stop_limit_price"], limit_price, places=2)
+
+    def test_failed_real_sell_and_failed_stop_order_warns_twice(self):
+        """
+        Doppelt kritisch: weder verkauft noch abgesichert. Muss deutlich
+        eskaliert werden, und die längst stornierte Order-ID darf nicht
+        als gültige Absicherung im Ledger stehen bleiben.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        client.force_market_sell_failure = True
+        client.force_stop_order_failure = True
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        error_lines = [line for line in captured.output if line.startswith("ERROR")]
+        self.assertEqual(len(error_lines), 1, "Der doppelt kritische Zustand muss ERROR sein")
+        self.assertIn("weder", error_lines[0])
+        self.assertIn("noch exchange-seitig abgesichert", error_lines[0])
+
+        # Bewusst EINE Telegram-Nachricht, die beide Fakten nennt, statt
+        # zweier aufeinanderfolgender - der Empfaenger braucht den
+        # Gesamtzustand, nicht zwei Teilmeldungen.
+        self.assertEqual(mock_notify.call_count, 1)
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-FEHLER]", text)
+        self.assertIn("Verkauf", text)
+        self.assertIn("Stop-Loss-Order", text)
+
+        still_open = strategy._ledger.open_position()
+        self.assertIsNotNone(still_open)
+        self.assertIsNone(
+            still_open["stop_loss_order_id"],
+            "Die stornierte Order-ID darf nicht als Absicherung stehen bleiben",
+        )
+        self.assertIsNone(still_open["stop_limit_price"])
+
+    def test_failed_real_sell_does_not_latch_stop_loss(self):
+        """
+        Kein Ausstieg = kein Stop-Loss-Latch. Sonst würde ein reiner
+        API-Fehler dauerhaft neue Einstiege blockieren, obwohl die
+        Position noch offen ist.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        client.force_market_sell_failure = True
+
+        strategy._close_position(open_trade, price=44_000.0, reason="stop_loss")
+
+        self.assertFalse(strategy._stop_loss.is_paused())
+        self.assertIsNotNone(strategy._ledger.open_position())
+
+    def test_failed_real_sell_is_retried_next_cycle(self):
+        """Die offene Position wird im nächsten Zyklus erneut verkauft."""
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        client.force_market_sell_failure = True
+        strategy._close_position(strategy._ledger.open_position(), 52_000.0, reason="signal")
+
+        client.force_market_sell_failure = False
+        strategy._close_position(strategy._ledger.open_position(), 52_000.0, reason="signal")
+
+        self.assertIsNone(strategy._ledger.open_position())
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        # Die beim ersten Fehlschlag neu platzierte Stop-Order wurde vor
+        # dem zweiten Versuch ordentlich storniert.
+        self.assertEqual(len(client.cancel_calls), 2)
+
+    # -- Regression: erfolgreicher echter Verkauf unverändert --
+
+    def test_successful_real_sell_still_closes_with_real_proceeds(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        self.assertFalse(open_trade["dry_run"], "Vorbedingung: echte Position")
+
+        strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(len(client.market_sell_calls), 1)
+        # Keine zusaetzliche Stop-Order - nur die vom Entry.
+        self.assertEqual(len(client.stop_order_calls), 1)
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["exit_reason"], "signal")
+        # proceeds stammen aus cummulativeQuoteQty der echten Order - der
+        # Fake-Client fuellt zu client.price, nicht zum an _close_position
+        # uebergebenen Preis (wie an der Boerse: der Fuellpreis entsteht
+        # beim Ausfuehren, nicht aus dem zuvor gelesenen Ticker).
+        expected_pnl = open_trade["quantity"] * client.price - open_trade["quote_spent"]
+        self.assertAlmostEqual(closed["realized_pnl"], expected_pnl, places=6)
+
+    def test_missing_dry_run_field_blocks_any_sell_attempt(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        del open_trade["dry_run"]  # simuliert einen manuell editierten Ledger-Eintrag
+
+        with self.assertLogs("trend_bot", level="INFO") as captured:
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(client.market_sell_calls, [])
+        self.assertEqual(client.cancel_calls, [], "Auch die Stop-Order bleibt unangetastet")
+        self.assertIsNotNone(strategy._ledger.open_position())
+        self.assertTrue(
+            any("[TREND-POSITION-UNKLAR]" in line for line in captured.output),
+            "Der unklare Zustand muss sichtbar geloggt werden",
+        )
 
 
 if __name__ == "__main__":

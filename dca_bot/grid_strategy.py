@@ -44,6 +44,10 @@ class GridTradingStrategy:
         # Neustart wird im ersten Zyklus nur neu referenziert statt
         # rückwirkend zu handeln, das ist sicher und einfach zu erklären.
         self._last_seen_price: float | None = None
+        # IDs von Positionen, fuer die ein fehlgeschlagener ECHTER Verkauf
+        # bereits per Telegram gemeldet wurde (siehe _report_failed_sell) -
+        # bewusst nur im Prozessspeicher, wie _last_seen_price.
+        self._failed_sell_notified: set[str] = set()
         logger.info(
             "Grid initialisiert: %d Stufen von %.2f bis %.2f (Abstand %.2f%%, "
             "max. Kapitalbindung ca. %.2f)",
@@ -55,13 +59,66 @@ class GridTradingStrategy:
         )
 
     def _process_sells(self, price: float) -> None:
-        """Verkauft jede offene Position, deren individuelles Sell-Target
-        erreicht ist - unabhängig vom Trendbruch-Stop-Loss."""
+        """
+        Verkauft jede offene Position, deren individuelles Sell-Target
+        erreicht ist - unabhängig vom Trendbruch-Stop-Loss.
+
+        Ob dabei tatsächlich eine echte Order platziert wird, hängt NICHT
+        nur am aktuellen Trading-Modus, sondern zusätzlich am `dry_run`-Flag
+        der jeweiligen Position im Ledger (siehe README.md Abschnitt 8.4):
+        eine im Dry-Run "gekaufte" Position existiert an der Börse gar
+        nicht und darf deshalb auch nach einem Umschalten auf echtes
+        Trading niemals real verkauft werden.
+        """
         for record in self._ledger.open_positions():
             if not is_sell_target_hit(price, record["target_sell_price"]):
                 continue
 
-            order = self._client.place_market_sell(self._config.symbol, record["quantity"])
+            position_dry_run = record.get("dry_run")
+            if position_dry_run is None:
+                # Ledger-Eintrag ohne dry_run-Feld (praktisch nur durch
+                # manuelles Editieren möglich - GridPosition schreibt es
+                # immer). Hier wird bewusst NICHT geraten: "echt"
+                # anzunehmen hieße, nie gekaufte Assets verkaufen zu
+                # wollen; "Dry-Run" anzunehmen hieße, eine echte Position
+                # mit erfundenem Erlös als geschlossen zu buchen, während
+                # die Assets an der Börse liegen bleiben. Beides ist
+                # schlechter als abzuwarten.
+                logger.warning(
+                    "[GRID-POSITION-UNKLAR] Position %s (Stufe %s) hat kein "
+                    "dry_run-Feld im Ledger - Verkaufsziel erreicht, aber "
+                    "kein Verkaufsversuch. Position bleibt offen, bitte "
+                    "manuell prüfen (python -m dca_bot.audit_positions).",
+                    record["id"],
+                    record.get("level_index", "?"),
+                )
+                continue
+
+            if position_dry_run and self._config.trading_enabled:
+                # place_market_sell() prüft nur config.trading_enabled, NICHT
+                # das Positions-Flag - ein Aufruf wäre hier also eine echte
+                # Order für eine nie gekaufte Position. Deshalb gar nicht
+                # erst aufrufen, sondern direkt simulieren.
+                logger.warning(
+                    "[DRY-RUN-POSITION] Position %s (Stufe %d) wurde im "
+                    "Dry-Run eröffnet, Verkauf bleibt simuliert, unabhängig "
+                    "vom aktuellen Trading-Modus.",
+                    record["id"],
+                    record["level_index"],
+                )
+                order = None
+            else:
+                order = self._client.place_market_sell(self._config.symbol, record["quantity"])
+                if order is None and self._config.trading_enabled:
+                    # Echter Verkaufsversuch bei der Börse fehlgeschlagen -
+                    # anders als im Dry-Run (wo None der Normalfall ist).
+                    # Kein erfundener Erlös, kein record_sell(): die
+                    # Position bleibt OFFEN und wird im nächsten Zyklus
+                    # erneut versucht (das Sell-Target ist ja weiterhin
+                    # erreicht).
+                    self._report_failed_sell(record, price)
+                    continue
+
             if order is not None:
                 proceeds = float(order.get("cummulativeQuoteQty", record["quantity"] * price))
             else:
@@ -70,6 +127,7 @@ class GridTradingStrategy:
 
             sold_at = datetime.now(timezone.utc).isoformat()
             self._ledger.record_sell(record["id"], price, sold_at, realized_pnl)
+            self._failed_sell_notified.discard(record["id"])
 
             logger.info(
                 "Grid-Verkauf: Stufe %d, Kauf @ %.2f -> Verkauf @ %.2f, realisiert %.2f",
@@ -84,6 +142,44 @@ class GridTradingStrategy:
                 f"{self._config.symbol} @ {price:.2f} verkauft "
                 f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}"
             )
+
+    def _report_failed_sell(self, record: dict, price: float) -> None:
+        """
+        Meldet einen fehlgeschlagenen ECHTEN Verkauf (siehe _process_sells).
+
+        Anders als beim Trend-Bot muss hier keine Absicherung
+        wiederhergestellt werden: der Grid-Bot platziert nie eine
+        exchange-seitige Stop-Order und storniert vor einem Verkauf
+        entsprechend auch keine. Die Position ist nach dem Fehlschlag also
+        exakt so abgesichert wie eine Sekunde davor und wird im nächsten
+        Zyklus (alle GRID_INTERVAL_MINUTES) automatisch erneut zum Verkauf
+        angeboten, da ihr Sell-Target weiterhin erreicht ist.
+
+        Die Telegram-Meldung geht bewusst nur EINMAL pro Prozesslauf und
+        Position raus: bei einer dauerhaften Ursache (z.B. zu wenig
+        Guthaben) würde der 5-Minuten-Zyklus sonst im Minutentakt
+        benachrichtigen. Ins Log geht dagegen jeder einzelne Fehlschlag.
+        Der Zustand lebt nur im Prozessspeicher (wie _last_seen_price) -
+        nach einem Neustart wird einmalig erneut gemeldet.
+        """
+        logger.warning(
+            "[GRID-VERKAUF-FEHLGESCHLAGEN] Echter Verkauf für Stufe %d "
+            "fehlgeschlagen (Position %s, Preis ~%.2f) - Position bleibt "
+            "OFFEN im Ledger, kein Erlös verbucht. Der nächste Zyklus "
+            "versucht es erneut.",
+            record["level_index"],
+            record["id"],
+            price,
+        )
+
+        if record["id"] in self._failed_sell_notified:
+            return
+        self._failed_sell_notified.add(record["id"])
+        send_notification(
+            f"[GRID-VERKAUF-FEHLGESCHLAGEN] Stufe {record['level_index']}: "
+            f"echter Verkauf @ {price:.2f} fehlgeschlagen. Position bleibt "
+            "offen, kein Erlös verbucht - siehe Bot-Log."
+        )
 
     def _process_buys(self, price: float) -> None:
         """
