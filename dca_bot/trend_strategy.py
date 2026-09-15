@@ -24,6 +24,7 @@ from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fract
 from .backtest import fetch_historical_klines
 from .binance_client import TradingClient
 from .notifier import send_notification
+from .order_utils import net_executed_quantity, net_proceeds, quantize_quantity
 from .risk import KillSwitch
 from .trend_config import TrendConfig
 from .trend_risk import TrendLedger, TrendStopLoss, TrendTrade
@@ -106,6 +107,12 @@ class TrendFollowingStrategy:
                 )
                 return
 
+        # Handelsregeln bewusst VOR dem Kauf holen (danach aus dem Cache):
+        # schlägt der Abruf fehl, bricht der Zyklus ab, ohne dass eine
+        # Order existiert. Nach einem ausgeführten Kauf hier eine Exception
+        # zu riskieren, würde den Trade unverbucht lassen.
+        rules = self._client.get_symbol_trading_rules(self._config.symbol)
+
         order = self._client.place_market_buy(self._config.symbol, amount)
 
         if order is None and self._config.trading_enabled:
@@ -121,10 +128,18 @@ class TrendFollowingStrategy:
             return
 
         if order is not None:
-            quantity = float(order.get("executedQty", amount / price))
+            # Menge abzüglich der in BTC abgezogenen Kaufgebühr. Das ist
+            # hier besonders wichtig: mit dieser Menge wird gleich die
+            # exchange-seitige Stop-Loss-Order platziert - über die
+            # ungekürzte Menge würde die Börse sie ablehnen, und die
+            # Position bliebe ungeschützt.
+            quantity = net_executed_quantity(order, rules, fallback=amount / price)
             quote_spent = float(order.get("cummulativeQuoteQty", amount))
         else:
-            quantity = amount / price
+            # Dry-Run: keine echte Gebühr bekannt, deshalb keine geschätzte
+            # abgezogen - die Menge wird aber quantisiert, damit simulierte
+            # und echte Werte vergleichbar bleiben.
+            quantity = quantize_quantity(amount / price, rules.step_size)
             quote_spent = amount
 
         trade = TrendTrade.new(
@@ -306,6 +321,11 @@ class TrendFollowingStrategy:
             )
             return
 
+        # Siehe _open_position: Regeln vor der ersten Order holen, damit
+        # ein Fehlschlag folgenlos abbricht statt einen bereits
+        # ausgeführten Verkauf unverbucht zu lassen.
+        rules = self._client.get_symbol_trading_rules(self._config.symbol)
+
         outcome = self._resolve_stop_order_before_close(open_trade)
         if outcome == "already_closed":
             return  # per _close_from_filled_stop_order bereits erledigt
@@ -338,7 +358,9 @@ class TrendFollowingStrategy:
                 return
 
         if order is not None:
-            proceeds = float(order.get("cummulativeQuoteQty", open_trade["quantity"] * price))
+            # Netto, also abzüglich der in USDT abgerechneten
+            # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
+            proceeds = net_proceeds(order, rules, fallback=open_trade["quantity"] * price)
         else:
             proceeds = open_trade["quantity"] * price
         realized_pnl = proceeds - open_trade["quote_spent"]

@@ -314,6 +314,29 @@ Zwei Wege führten hinein: (a) die Stop-Order scheiterte schon beim Entry – di
 
 **Tests:** 10 neue in der Klasse `TrendStopLossProtectionTestCase` (`tests/test_trend_stop_loss.py`) – Wiederherstellung im Zyklus und beim Neustart, Zähler-Eskalation genau ab der Schwelle, Reset plus Entwarnung nach erfolgreicher Reparatur, der konkrete Weg über einen fehlgeschlagenen Verkauf mit anschließend entfallenem Exit-Grund, sowie die Abgrenzungen (bereits abgesicherte Position wird nicht angefasst, Dry-Run-Position und Dry-Run-Modus bekommen nie eine echte Order). Gesamtstand: 46 Tests, alle grün. `audit_positions.py` weist `unprotected_cycles` jetzt mit aus.
 
+### K3: Gebühren und echte Handelsregeln (16.09.2026)
+
+Zwei zusammenhängende Befunde, die beide erst im Echtgeld-Betrieb zugeschlagen hätten – auf dem Testnet waren sie unsichtbar, weil `commission` dort bei allen bisherigen Fills `0.00000000` war.
+
+**Gebühr wurde nicht abgezogen:** Binance zieht die Handelsgebühr bei einem Spot-Kauf vom erhaltenen Base-Asset ab (bei BTCUSDT in BTC), sichtbar in `fills[].commission`/`commissionAsset`. Gespeichert wurde bisher `executedQty`, also der Betrag VOR diesem Abzug. Diese zu hohe Menge ging anschließend in die exchange-seitige Stop-Loss-Order **und** in jeden Market-Sell beim Exit – live mit ca. 0,1% Gebühr hätte das **jeden einzelnen Verkaufsversuch** betroffen, und beim Trend-Bot zusätzlich dazu geführt, dass die Stop-Order gar nicht erst zustande kommt (die Position wäre ungeschützt geblieben, siehe den Folgefund oben).
+
+**Keine Anbindung an die echten Handelsregeln:** `tickSize`/`stepSize`/`minNotional` wurden nirgends abgefragt; der bekannte TODO in `binance_client.py` deckte nur den Preis der Stop-Order ab (feste Rundung auf 2 Nachkommastellen). Eine nicht durch `stepSize` teilbare Menge lehnt die Börse direkt ab.
+
+**Umgesetzt:**
+- Neues Modul `dca_bot/order_utils.py` (rein, ohne Seiteneffekte, wie `*_signals.py`): `quantize_price`, `quantize_quantity` (Verkaufsmengen **immer** abrunden – eine zu hohe Menge wird abgelehnt, eine minimal zu niedrige ist nur unwesentlich suboptimal), `sum_commission`, `net_executed_quantity`, `net_proceeds`. Gerechnet wird mit `Decimal`, nicht mit float: `math.floor(0.3 / 0.1)` ergibt 2 statt 3, eine exakt auf der Schrittweite liegende Menge wäre also um eine ganze Stufe nach unten „korrigiert" worden.
+- `binance_client.get_symbol_trading_rules()` holt die Filter einmalig pro Symbol aus `exchangeInfo` und cacht sie **pro Client-Instanz** (jeder Bot-Prozess erzeugt genau einen Client – faktisch „pro Prozess", aber ohne globalen Zustand, der zwischen Tests durchschlägt). Kein TTL: Binance ändert diese Filter praktisch nie, die Bots werden regelmäßig neu gestartet, und eine veraltete `stepSize` würde sich als abgelehnte Order zeigen, die seit den vorherigen Fixes sauber eskaliert. Schlägt der Abruf fehl, wird der Fehler **weitergereicht** statt auf Defaults auszuweichen.
+- Alle drei `place_*`-Methoden quantisieren vor dem Request. Bei `place_market_buy` greifen bewusst **nicht** `stepSize`/`tickSize` – der Betrag ist in der Quote-Währung angegeben (`quoteOrderQty`), dort zählen Quote-Präzision und Mindestvolumen. Letzteres wird selbst geprüft (klare Meldung) statt die Order von der Börse ablehnen zu lassen, und zwar **vor** dem Dry-Run-Zweig, damit ein zu klein konfigurierter Betrag schon in der Paper-Trade-Phase auffällt.
+- Gebührenkorrektur in allen drei Strategien. **DCA wurde mitgenommen**, obwohl er nie verkauft: `PortfolioStopLoss` bewertet die Position mit `quantity * current_price` – eine zu hohe Menge überschätzt den Portfoliowert und löst den Stop-Loss später aus als konfiguriert.
+- **Verkaufsseite gleich mit:** die beim Verkauf in USDT abgerechnete Gebühr wird vom Erlös abgezogen (`cummulativeQuoteQty` ist brutto). Ohne das wäre nach diesem Fix die Kaufseite gebührengenau und die Verkaufsseite nicht – genau die Inkonsistenz, die später Zeit kostet.
+
+**Reihenfolge als eigener Sicherheitspunkt:** Die Handelsregeln werden in allen Strategien **vor** der ersten Order geholt. Würde eine Exception erst nach einem erfolgreich ausgeführten Kauf auftreten, bliebe ein real bewegter Trade unverbucht – das wäre schlimmer als K3 selbst. Die Gebühren-Auswertung danach parst `fills` vollständig defensiv und wirft nie.
+
+**Dry-Run:** Mengen werden quantisiert (damit Paper-Trade-Zahlen wie Live-Zahlen aussehen), eine Gebühr aber bewusst **nicht** simuliert – es gibt keinen Fill, ein geschätzter Satz wäre erfundene Zahl.
+
+**Bekannte Restlücke, bewusst offen:** Antworten von `get_order()` (also der Pfad „exchange-seitige Stop-Order war bereits gefüllt") enthalten keine `fills` – dort bleibt die Verkaufsgebühr mangels Daten unberücksichtigt, der PnL dieses einen Exit-Pfads ist also weiterhin um ca. 0,1% zu optimistisch. Sauber lösbar nur über eine zusätzliche `myTrades`-Abfrage.
+
+**Tests:** 36 neue. `tests/test_order_utils.py` (22, reine Funktionen inkl. der Decimal-Off-by-one-Falle und des „Menge exakt gleich stepSize"-Falls), `tests/test_dca_fee_adjustment.py` (5), plus `TrendTradingRulesTestCase` (7) und `GridTradingRulesTestCase` (7). Beide Fake-Clients liefern jetzt realistische `fills` mit `commission`/`commissionAsset` und implementieren `get_symbol_trading_rules` – der Gebührensatz bleibt per Default 0.0, weil das exakt dem beobachteten Testnet-Verhalten entspricht; die neuen Tests setzen 0,1%. Gesamtstand: 87 Tests, alle grün.
+
 ---
 
 *Diese Datei dient als lebendes Projektdokument und sollte bei neuen Entscheidungen und Recherche-Ergebnissen aktualisiert werden. Stand 13.09.2026: zusammengeführt aus zwei parallel gepflegten Versionen (Chat-Artefakt + lokale Claude-Code-Fortschreibung).*
