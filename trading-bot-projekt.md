@@ -136,7 +136,9 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 
 ## 5b. Geplantes Live-Kapital
 
-Nutzer plant beim eventuellen Live-Start mit 100–300€ Echtkapital zu starten (genaue Aufteilung zwischen DCA/Grid/Trend-Following bzw. dem Allocator-System noch offen). Relevant erst nach Abschluss der Testnet-Phase – bei Verteilung auf mehrere Bots ergeben sich entsprechend kleine Positionsgrößen pro Trade, das sollte vor dem Live-Gang nochmal bewusst durchgerechnet werden.
+**Grundsatzentscheidung (15.09.2026):** Gesamtbetrag **300€**, Architektur für den Live-Betrieb: **Allocator-Struktur** – DCA und Trend-Following bilden einen gemeinsamen, vom Allocator dynamisch verwalteten Kapitaltopf; Grid-Bot bleibt als eigenständiger, fester Topf davon getrennt (unverändert zur bisherigen Architektur, siehe 5a/10). Aufteilung zwischen den beiden Töpfen: **150€ Grid-Topf / 150€ Allocator-Topf (DCA+Trend gemeinsam)**.
+
+**Bewusst noch offen:** Die konkreten `*_AMOUNT_PER_LEVEL`/`*_AMOUNT_PER_TRADE`-Werte sowie bei Grid die Preisspanne/`GRID_SPACING_PCT` werden NICHT jetzt schon festgelegt – hängen vom aktuellen BTC-Kurs zum Zeitpunkt des Live-Starts sowie von den Erkenntnissen aus dem noch bevorstehenden monatelangen Paper-Trade-Test (mit aktiviertem Allocator-Opt-in, geplant nach Abschluss der übrigen Live-Gang-Vorbereitungen aus 6d) ab. Positionsgrößen-Kalibrierung ist als eigener Schritt kurz vor dem tatsächlichen Live-Start eingeplant, nicht heute schon mit möglicherweise überholten Platzhalter-Werten.
 
 ---
 
