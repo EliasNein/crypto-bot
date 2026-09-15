@@ -220,6 +220,13 @@ def audit_trend(path: Path) -> None:
         if uncertain:
             print(f"  ACHTUNG:         {uncertain} Zyklen mit unklarem Stop-Order-Status in Folge.")
 
+        unprotected = r.get("unprotected_cycles", 0)
+        if unprotected:
+            print(
+                f"  ACHTUNG:         seit {unprotected} Zyklen ohne exchange-seitige "
+                "Absicherung (Neuplatzierung scheitert)."
+            )
+
     _summarize_dry_run(open_records)
 
 

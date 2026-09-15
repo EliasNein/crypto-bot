@@ -298,6 +298,22 @@ Gemeinsam behoben, da beide denselben Ursprung haben: `place_market_sell()` gibt
 
 **Tests:** 16 neue Tests - `tests/test_grid_sell_safety.py` (7, eigener Fake-Client; Dateiname bewusst nicht `test_grid_stop_loss.py`, da der Grid-Stop-Loss der Trendbruch-KAUF-Blocker und ein völlig anderer Mechanismus ist) und eine neue Klasse `TrendSellSafetyTestCase` in `tests/test_trend_stop_loss.py` (9, inkl. Neuplatzierung der Stop-Order nach fehlgeschlagenem Verkauf und dem doppelten Fehlerfall). Die geteilte Testumgebung wurde dafür in eine Basisklasse ohne eigene Testmethoden extrahiert. Gesamtstand: 36 Tests, alle grün.
 
+### Folgefund aus K1: Position konnte dauerhaft ohne Börsen-Absicherung bleiben (16.09.2026)
+
+Auf Nachfrage nach dem K1/K4-Commit geprüft und bestätigt: es gab einen Zustand, aus dem der Trend-Bot allein nicht mehr herausfand, ohne dass es jemals eskalierte.
+
+**Der Befund:** Eine offene, echte Position hat nur dann eine exchange-seitige Stop-Loss-Order, wenn deren Platzierung beim Entry geklappt hat. Schlug sie fehl, gab es **keinen** Codepfad, der das je nachgeholt hätte – `_open_position()` platziert nur beim Einstieg, `_handle_failed_real_sell()` (neu aus K1) nur aus einem Exit-Versuch heraus. Ein erneuter Exit-Versuch passiert aber nur, solange `is_stop_loss_hit()` oder ein bestätigtes Abwärtssignal gilt. Dreht `confirmed_direction` zurück auf "up", entfällt der Exit-Grund – die Position lief dann unbegrenzt weiter, nur noch software-intern abgesichert (also nur, solange der Prozess läuft), ohne Schutz bei Bot-/Strom-/Internetausfall. Nach der einmaligen Fehlermeldung kam nichts mehr: kein Zähler, keine Wiederholungswarnung.
+
+Zwei Wege führten hinein: (a) die Stop-Order scheiterte schon beim Entry – diese Lücke bestand seit 6f, also unabhängig von K1; (b) nach einem fehlgeschlagenen Verkauf scheiterte auch die sofortige Neuplatzierung – dieser Weg kam mit K1 dazu.
+
+**Umgesetzt:** Neue Methode `_ensure_stop_loss_protection()` in `trend_strategy.py`, aufgerufen in jedem Zyklus, in dem die Position **nicht** geschlossen wird, sowie im Reconciliation-Schritt beim Bot-Start. Fehlt die `stop_loss_order_id` einer offenen, echten Position, wird eine neue Order mit derselben Schwelle (`entry_price`) platziert und im Ledger hinterlegt (`[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`). Scheitert das, zählt das neue Ledger-Feld `unprotected_cycles` hoch; ab `UNPROTECTED_CYCLES_WARNING_THRESHOLD` (3, wie bei `uncertain_cycles`) gibt es eine `[TREND-WARNUNG]` per Telegram, dazu eine Entwarnung, sobald die Absicherung wieder steht (nur, wenn zuvor gewarnt wurde – ein einzelner Fehlschlag, der sich sofort einrenkt, bleibt reine Log-Sache).
+
+**Bewusst erst NACH den Exit-Entscheidungen des Zyklus** statt am Zyklusanfang: wird die Position ohnehin gerade geschlossen, wäre die neue Order sofort wieder zu stornieren – und bei ausgelöstem Stop-Loss läge der Preis bereits unter der Stop-Schwelle, die Börse würde eine solche Order mit "would immediately trigger" zurückweisen und den Zähler fälschlich hochlaufen lassen. Im relevanten Fall (Position überlebt den Zyklus) ist das Ergebnis identisch.
+
+**Nebeneffekt, der einen alten Kommentar einlöst:** Die Warnung in `_open_position()` versprach bisher "bis zum nächsten erfolgreichen Versuch" – einen solchen Versuch gab es im Code nirgends, der Text beschrieb nie implementiertes Verhalten. Mit diesem Fix stimmt er zum ersten Mal; Kommentar und Log-Zeile entsprechend präzisiert.
+
+**Tests:** 10 neue in der Klasse `TrendStopLossProtectionTestCase` (`tests/test_trend_stop_loss.py`) – Wiederherstellung im Zyklus und beim Neustart, Zähler-Eskalation genau ab der Schwelle, Reset plus Entwarnung nach erfolgreicher Reparatur, der konkrete Weg über einen fehlgeschlagenen Verkauf mit anschließend entfallenem Exit-Grund, sowie die Abgrenzungen (bereits abgesicherte Position wird nicht angefasst, Dry-Run-Position und Dry-Run-Modus bekommen nie eine echte Order). Gesamtstand: 46 Tests, alle grün. `audit_positions.py` weist `unprotected_cycles` jetzt mit aus.
+
 ---
 
 *Diese Datei dient als lebendes Projektdokument und sollte bei neuen Entscheidungen und Recherche-Ergebnissen aktualisiert werden. Stand 13.09.2026: zusammengeführt aus zwei parallel gepflegten Versionen (Chat-Artefakt + lokale Claude-Code-Fortschreibung).*

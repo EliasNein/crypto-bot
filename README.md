@@ -395,7 +395,8 @@ bei Null anfangen müssen.
   `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`, `[TREND-AUSSTIEG]` (mit
   realisiertem Gewinn/Verlust und Ausstiegsgrund),
   `[TREND-VERKAUF-FEHLGESCHLAGEN]`, `[TREND-STOP-LOSS]`,
-  `[TREND-WARNUNG]`, `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
+  `[TREND-WARNUNG]`, `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`,
+  `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
 
 ### 9.5 Echter, exchange-seitiger Stop-Loss
 
@@ -471,6 +472,24 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   (weder verkauft noch exchange-seitig abgesichert) als `ERROR` geloggt
   und per Telegram gemeldet; die stornierte Order-ID wird aus dem Ledger
   entfernt, statt eine tote Order als Absicherung auszuweisen.
+- **Selbstheilende Absicherung:** In jedem Zyklus, in dem eine offene,
+  echte Position NICHT geschlossen wird, sowie beim Reconciliation-Schritt
+  am Bot-Start prüft der Bot, ob überhaupt eine Stop-Loss-Order hinterlegt
+  ist - und platziert sonst eine neue (Schwelle wie beim Entry aus
+  `entry_price`). Das schließt beide Wege, auf denen eine Position sonst
+  dauerhaft ungeschützt bleiben konnte: die Stop-Order scheiterte schon
+  beim Entry, oder ein fehlgeschlagener Verkauf konnte seine zuvor
+  stornierte Absicherung nicht ersetzen und der Exit-Grund entfiel danach
+  wieder (Trend dreht zurück auf "up") - in beiden Fällen hätte vorher nie
+  wieder etwas eine Order platziert. Erfolg wird als
+  `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]` geloggt; scheitert es weiter,
+  zählt `unprotected_cycles` hoch und löst ab 3 aufeinanderfolgenden
+  Zyklen eine `[TREND-WARNUNG]` per Telegram aus (gleiches Muster wie
+  `uncertain_cycles`), mit Entwarnung, sobald die Absicherung wieder
+  steht. Bewusst erst NACH den Exit-Entscheidungen des Zyklus: wird die
+  Position ohnehin gerade geschlossen, wäre eine neue Order sofort wieder
+  zu stornieren, und bei ausgelöstem Stop-Loss läge der Preis bereits
+  unter der Stop-Schwelle (die Börse würde die Order zurückweisen).
 - **Dry-Run** (`TREND_BOT_ENABLE_TRADING=false`): es wird KEINE echte
   Stop-Order platziert, nur geloggt ("[DRY-RUN] Würde
   Stop-Loss-Order platzieren..."). Die Position bleibt dann wie bisher

@@ -51,6 +51,14 @@ class TrendTrade:
     # aus. Wird bei jedem eindeutigen Ergebnis (sicher verkaufbar oder
     # bereits geschlossen) wieder auf 0 zurückgesetzt.
     uncertain_cycles: int = 0
+    # Zaehlt aufeinanderfolgende Zyklen, in denen diese offene Position
+    # KEINE exchange-seitige Stop-Loss-Order hatte und auch keine neue
+    # platziert werden konnte (siehe trend_strategy.py,
+    # _ensure_stop_loss_protection) - ab einer Schwelle loest das eine
+    # explizite Warnung aus. Ohne diesen Zaehler koennte eine Position
+    # unbegrenzt lange ungeschuetzt bleiben, ohne dass es jemals
+    # eskaliert. Wird bei erfolgreicher Absicherung auf 0 zurueckgesetzt.
+    unprotected_cycles: int = 0
     status: str = "open"  # "open" | "closed"
     exit_price: float | None = None
     exit_time: str | None = None
@@ -120,6 +128,20 @@ class TrendLedger:
         for r in records:
             if r["id"] == trade_id:
                 r["uncertain_cycles"] = count
+                break
+        self._write(records)
+
+    def set_unprotected_cycles(self, trade_id: str, count: int) -> None:
+        """
+        Persistiert den unprotected_cycles-Zähler einer offenen Position
+        (siehe TrendTrade) - eigene Methode aus demselben Grund wie
+        set_uncertain_cycles: hier entsteht weder ein neuer Trade noch
+        ein Exit, nur ein Zwischenstand für die Warnschwelle.
+        """
+        records = self._read()
+        for r in records:
+            if r["id"] == trade_id:
+                r["unprotected_cycles"] = count
                 break
         self._write(records)
 
