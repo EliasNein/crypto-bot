@@ -31,6 +31,26 @@ class TrendTrade:
     quantity: float
     quote_spent: float
     dry_run: bool
+    # ID der echten, exchange-seitigen STOP_LOSS_LIMIT-Order (siehe
+    # binance_client.place_stop_loss_limit_sell) - None im Dry-Run (dort
+    # wird nie eine echte Order platziert, siehe trend_strategy.py).
+    stop_loss_order_id: str | None = None
+    # Limit-Preis der Stop-Loss-Order zum Zeitpunkt der Platzierung (siehe
+    # trend_strategy.py._open_position) - None im Dry-Run. Wird beim
+    # Exit über eine gefüllte Stop-Order für die Fill-Analyse (siehe
+    # [STOP-FILL-ANALYSE] in _close_from_filled_stop_order) gebraucht,
+    # um den tatsächlichen Füllpreis mit dem erwarteten Limit-Preis zu
+    # vergleichen - separat von entry_price/stop_loss_pct gespeichert,
+    # damit eine spätere Config-Änderung (TREND_STOP_LIMIT_OFFSET_PCT)
+    # bereits offene Positionen nicht rückwirkend verfälscht.
+    stop_limit_price: float | None = None
+    # Zählt aufeinanderfolgende Zyklen, in denen der Status der
+    # Stop-Loss-Order nach einem fehlgeschlagenen Cancel-Versuch unklar
+    # blieb (siehe trend_strategy.py, _resolve_stop_order_before_close) -
+    # ab einer konfigurierten Schwelle löst das eine explizite Warnung
+    # aus. Wird bei jedem eindeutigen Ergebnis (sicher verkaufbar oder
+    # bereits geschlossen) wieder auf 0 zurückgesetzt.
+    uncertain_cycles: int = 0
     status: str = "open"  # "open" | "closed"
     exit_price: float | None = None
     exit_time: str | None = None
@@ -87,6 +107,20 @@ class TrendLedger:
     def record_entry(self, trade: TrendTrade) -> None:
         records = self._read()
         records.append(asdict(trade))
+        self._write(records)
+
+    def set_uncertain_cycles(self, trade_id: str, count: int) -> None:
+        """
+        Persistiert den uncertain_cycles-Zähler einer offenen Position
+        (siehe TrendTrade) - eigene Methode statt record_exit/record_entry
+        mitzunutzen, da hier weder ein neuer Trade noch ein Exit
+        entsteht, nur ein Zwischenstand für die Warnschwelle.
+        """
+        records = self._read()
+        for r in records:
+            if r["id"] == trade_id:
+                r["uncertain_cycles"] = count
+                break
         self._write(records)
 
     def record_exit(

@@ -85,6 +85,12 @@ def main() -> None:
     strategy = TrendFollowingStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="TREND_BOT_HALT")
 
+    # Reconciliation VOR dem ersten Zyklus: gleicht eine im Ledger offene
+    # Position gegen den tatsächlichen Stop-Loss-Order-Status bei Binance
+    # ab, damit eine während der Downtime gefüllte Stop-Loss-Order sofort
+    # erkannt wird statt erst im nächsten regulären Zyklus.
+    strategy.reconcile_on_startup()
+
     interval_seconds = config.interval_hours * 60 * 60
 
     try:

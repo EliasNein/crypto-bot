@@ -326,6 +326,7 @@ TREND_INTERVAL_HOURS=24       # Tageskerzen -> einmal täglich prüfen
 TREND_BOT_ENABLE_TRADING=false
 TREND_KILL_SWITCH_FILE=STOP_TREND
 TREND_STOP_LOSS_PCT=10.0      # Fixer Stop-Loss unterhalb des Einstiegspreises
+TREND_STOP_LIMIT_OFFSET_PCT=0.5  # Abstand Stop-/Limit-Preis der echten Exchange-Stop-Order (siehe 9.5)
 ```
 
 ### 9.2 Starten
@@ -373,6 +374,76 @@ bei Null anfangen müssen.
   `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`, `[TREND-AUSSTIEG]` (mit
   realisiertem Gewinn/Verlust und Ausstiegsgrund), `[TREND-STOP-LOSS]`,
   `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
+
+### 9.5 Echter, exchange-seitiger Stop-Loss
+
+Zusätzlich zum software-internen Stop-Loss (siehe 9.4) platziert der Bot
+bei jedem Entry eine echte `STOP_LOSS_LIMIT`-Sell-Order direkt an der
+Börse (`place_stop_loss_limit_sell` in `binance_client.py`). Der Grund:
+der software-interne Stop-Loss wirkt nur, solange der Bot-Prozess läuft
+- fällt der Bot aus (Absturz, Internet-/Stromausfall), bleibt eine offene
+Position ohne diesen Mechanismus komplett ungeschützt, egal wie weit der
+Kurs fällt. Die exchange-seitige Order übernimmt die Überwachung an der
+Börse selbst und wirkt unabhängig vom Bot-Prozess.
+
+- **Stop-/Limit-Preis:** `stop_price = entry_price * (1 -
+  TREND_STOP_LOSS_PCT/100)` (identisch zur Schwelle des internen
+  Stop-Loss), `limit_price = stop_price * (1 -
+  TREND_STOP_LIMIT_OFFSET_PCT/100)` (Default 0,5%) - der Abstand
+  verhindert, dass die Order bei einem schnellen Kurssturz ungefüllt im
+  Orderbuch hängen bleibt.
+- **Exit-Reihenfolge bei Signal-Umkehr oder internem Stop-Loss-Trigger:**
+  der Bot storniert IMMER zuerst die noch offene Stop-Loss-Order, bevor
+  er selbst per Market-Order verkauft - sonst bliebe eine verwaiste
+  Sell-Order an der Börse zurück. Ein Stornierungsfehler (z.B. Order war
+  zwischenzeitlich bereits gefüllt) wird nur geloggt, nicht als Fehler
+  behandelt.
+- **Erkennung einer bereits gefüllten Stop-Order:** vor jeder normalen
+  Zyklus-Entscheidung fragt der Bot den Order-Status der hinterlegten
+  Stop-Loss-Order ab. Ist sie bereits `FILLED` (die Börse hat also schon
+  verkauft, z.B. während einer Downtime), markiert der Bot die Position
+  im Ledger anhand der tatsächlichen Order-Fülldaten als geschlossen,
+  OHNE selbst nochmal zu verkaufen.
+- **Reconciliation beim Bot-Start:** bevor der erste reguläre Zyklus
+  läuft, gleicht der Bot eine im Ledger offene Position gegen den
+  tatsächlichen Order-Status bei Binance ab und korrigiert den Ledger
+  sofort, falls die Stop-Order während der Downtime gefüllt wurde -
+  klar geloggt als `[REKONZILIATION]`.
+- **Race Condition zwischen Status-Check und Stornierung:** füllt sich
+  die Stop-Order genau zwischen der letzten Status-Abfrage und dem
+  Cancel-Aufruf, schlägt das Stornieren fehl. Der Bot verlässt sich dann
+  NICHT auf den Cancel-Fehlercode, sondern fragt den Order-Status erneut
+  ab: ist sie tatsächlich `FILLED`, wird die Position anhand der echten
+  Fülldaten geschlossen (kein zweiter Verkaufsversuch); bleibt der
+  Status trotz Cancel-Fehlschlag unklar (z.B. echter Netzwerkfehler),
+  verkauft der Bot in diesem Zyklus bewusst NICHT (Risiko einer
+  Doppel-Order) und markiert die Position auch nicht als geschlossen -
+  ein Zähler (`uncertain_cycles`) löst ab 3 aufeinanderfolgenden unklaren
+  Zyklen eine `[TREND-WARNUNG]`-Telegram-Meldung aus (manuelle Prüfung
+  empfohlen).
+- **Fill-Analyse-Logging:** bei jedem Exit über eine gefüllte
+  Exchange-Stop-Order loggt der Bot eine eigene, leicht auffindbare
+  Zeile `[STOP-FILL-ANALYSE] Limit: X, gefüllt bei: Y, Differenz: Z%` -
+  sammelt über die Paper-Trade-Phase automatisch reale Daten zur
+  Zuverlässigkeit von `TREND_STOP_LIMIT_OFFSET_PCT`, ohne dass das
+  manuell nachgehalten werden muss (siehe Einschränkung unten).
+- **Dry-Run** (`TREND_BOT_ENABLE_TRADING=false`): es wird KEINE echte
+  Stop-Order platziert, nur geloggt ("[DRY-RUN] Würde
+  Stop-Loss-Order platzieren..."). Die Position bleibt dann wie bisher
+  ausschließlich software-intern überwacht - gleiches Sicherheitsprinzip
+  wie bei der Entry-Order (kein Trading ohne Opt-in).
+- **Bekannte Einschränkung (TODO vor Echtgeld):** Stop-/Limit-Preis
+  werden aktuell nur auf 2 Nachkommastellen gerundet, nicht gegen die
+  echte `PRICE_FILTER`-Tick-Size des Symbols validiert (siehe TODO-
+  Kommentar in `binance_client.py`) - vor dem Live-Start durch eine
+  echte `exchangeInfo`-Abfrage ersetzen.
+- **Bekannte Einschränkung: `TREND_STOP_LIMIT_OFFSET_PCT`-Default (0,5%)
+  basiert auf einer zu kleinen historischen Stichprobe** (Backtest-
+  Analyse über die drei Referenz-Zeiträume ergab nur 2 simulierte
+  Stop-Loss-Exits insgesamt, siehe trading-bot-projekt.md) - wird
+  während der monatelangen Paper-Trade-Phase anhand echter Fill-Daten
+  (siehe Fill-Analyse-Logging oben) überprüft, bevor der Wert für den
+  Live-Gang final bestätigt wird.
 
 ## 10. Kapital-Allocator (vierter, übergeordneter Baustein)
 
