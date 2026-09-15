@@ -273,6 +273,31 @@ Umgesetzt (nur lokaler Code, noch nicht deployed/committet zum Zeitpunkt dieses 
 
 **Tests:** `tests/test_trend_stop_loss.py`, erster committeter Test im Projekt (bewusste Abweichung vom bisherigen Ad-hoc-Skript-Muster, siehe Docstring dort – erster Code, der eine echte Order platzieren kann, die ohne Bot-Zutun Geld bewegt).
 
+## 6g. Sicherheitsreview-Fixes (ab 15.09.2026)
+
+Laufendes Log der Behebung der im Sicherheitsreview (Claude Opus 5, 15.09.2026) gefundenen Punkte. Vollständiger Befund als Referenz: siehe Review-Ausgabe im Chat-Verlauf.
+
+### K5: Telegram-Bot-Token-Leak behoben (15.09.2026)
+
+Drei Leak-Pfade in notifier.py gefunden und behoben: `logger.exception()` mit vollständigem Traceback, `raise_for_status()`-Fehlermeldung mit eingebetteter URL, sowie latentes urllib3-DEBUG-Logging. Alle drei geschlossen, 6 neue Tests inkl. Negativ-Kontrolle gegen den alten Code (3 von 6 Tests fallen gegen den alten Code korrekt um). Geprüft: Git-Historie und bisher committete Logs enthalten keinen geleakten Token. Homeserver-Logs geprüft (`grep "api.telegram.org" logs/*.log`): 2 Treffer, beide mit dem alten `.env.example`-Platzhaltertext aus der Zeit vor dem Eintragen des echten Tokens, kein echter Leak. **Noch zu prüfen:** dieselbe Prüfung auf dem VPS, da dort mindestens ein realer Telegram-Sendefehler mit dem echten Token dokumentiert ist (siehe 6b).
+
+### K1 + K4: Verkaufsseite von Grid und Trend abgesichert (16.09.2026)
+
+Gemeinsam behoben, da beide denselben Ursprung haben: `place_market_sell()` gibt in ZWEI völlig verschiedenen Fällen `None` zurück - im Dry-Run **und** bei einem echten API-Fehler. Auf der Kaufseite wurde das immer schon unterschieden (`strategy.py`, `grid_strategy.py`, `trend_strategy.py`), auf der Verkaufsseite in beiden Bots nicht.
+
+- **K1 (fehlgeschlagener echter Verkauf wurde als Erfolg verbucht):** Der Code rechnete bei `None` einen fiktiven Erlös aus `quantity * price` aus und markierte die Position trotzdem als geschlossen - die Assets lagen danach weiter an der Börse, das Ledger behauptete das Gegenteil. Jetzt: kein erfundener Erlös, Position bleibt **offen**, klare `[GRID-VERKAUF-FEHLGESCHLAGEN]`- bzw. `[TREND-VERKAUF-FEHLGESCHLAGEN]`-Warnung plus Telegram, automatischer erneuter Versuch im nächsten Zyklus.
+- **K4 (Dry-Run-Positionen wären beim Umschalten auf Live real verkauft worden):** Keine der beiden Verkaufsfunktionen prüfte das `dry_run`-Flag des Ledger-Eintrags. Jetzt wird es vor jedem Verkauf geprüft; für eine Dry-Run-Position wird `place_market_sell()` **gar nicht erst aufgerufen** (die Methode prüft nur `config.trading_enabled`, ein Aufruf wäre also eine echte Order für nie gekaufte Assets). Der Verkauf bleibt simuliert und wird explizit als `[DRY-RUN-POSITION]` geloggt - sichtbar bewusst simuliert, statt zufällig funktionierend.
+
+**Trend-spezifische Zusatzarbeit:** `_resolve_stop_order_before_close()` storniert die exchange-seitige Stop-Order, BEVOR verkauft wird. Schlug der Verkauf danach fehl, wäre die weiterhin offene Position komplett ungeschützt gewesen. Der Bot platziert deshalb sofort eine **neue** Stop-Loss-Order mit derselben Schwelle und hinterlegt sie im Ledger (neue Methode `TrendLedger.set_stop_loss_order`). Scheitert auch das, wird der doppelt kritische Zustand als `ERROR` + Telegram gemeldet und die stornierte Order-ID aus dem Ledger entfernt, statt eine tote Order als Absicherung auszuweisen.
+
+**Warum es bei Grid diese Zusatzarbeit nicht braucht** (explizit geprüft, nicht übersehen): Der Grid-Bot platziert nie eine exchange-seitige Stop-Order und storniert vor einem Verkauf entsprechend auch keine. Eine Grid-Position ist nach einem fehlgeschlagenen Verkauf exakt so abgesichert wie eine Sekunde davor - es wurde nichts abgebaut. Der 5-Minuten-Zyklus wiederholt den Verkauf von selbst. Eine Stop-Order-Mechanik für Grid nachzurüsten wäre eine eigene Architekturentscheidung (18 parallele Orders, Kapitalbindung, Reconciliation für n Positionen) und bewusst nicht Teil dieses Fixes.
+
+**Über die Vorgabe hinaus ergänzt:** Fehlt einem Ledger-Eintrag das `dry_run`-Feld komplett (praktisch nur durch manuelles Editieren möglich), wird der Modus **nicht geraten** - beide Bots verweigern dann jeden Verkaufsversuch und loggen `[GRID-POSITION-UNKLAR]`/`[TREND-POSITION-UNKLAR]`. Auf "echt" zu raten hieße, nie gekaufte Assets verkaufen zu wollen; auf "Dry-Run" zu raten hieße, eine echte Position mit erfundenem Erlös zu schließen. Außerdem meldet Grid einen dauerhaft fehlschlagenden Verkauf pro Position nur einmal je Prozesslauf per Telegram (sonst im 5-Minuten-Takt) - ins Log geht weiterhin jeder Fehlschlag.
+
+**Auflösung des konkreten Homeserver-Zustands:** Die dort offenen Positionen (6 Grid, 1 Trend) sind laut Ledger **alle** `dry_run: true`. Nach dem Fix kann für sie kein Codepfad mehr eine echte Verkaufsorder auslösen, unabhängig von `*_BOT_ENABLE_TRADING` - ein Bereinigen der Ledger-Dateien ist deshalb nicht nötig, das Wiederfreischalten per Notaus-Entfernung ist ungefährlich. Neu dafür: `python -m dca_bot.audit_positions` listet alle offenen Positionen beider Bots mit Dry-Run-Status auf, rein lesend, ohne API-Keys (siehe README Abschnitt 11). Gegen die echten Ledger-Dateien verifiziert.
+
+**Tests:** 16 neue Tests - `tests/test_grid_sell_safety.py` (7, eigener Fake-Client; Dateiname bewusst nicht `test_grid_stop_loss.py`, da der Grid-Stop-Loss der Trendbruch-KAUF-Blocker und ein völlig anderer Mechanismus ist) und eine neue Klasse `TrendSellSafetyTestCase` in `tests/test_trend_stop_loss.py` (9, inkl. Neuplatzierung der Stop-Order nach fehlgeschlagenem Verkauf und dem doppelten Fehlerfall). Die geteilte Testumgebung wurde dafür in eine Basisklasse ohne eigene Testmethoden extrahiert. Gesamtstand: 36 Tests, alle grün.
+
 ---
 
 *Diese Datei dient als lebendes Projektdokument und sollte bei neuen Entscheidungen und Recherche-Ergebnissen aktualisiert werden. Stand 13.09.2026: zusammengeführt aus zwei parallel gepflegten Versionen (Chat-Artefakt + lokale Claude-Code-Fortschreibung).*

@@ -109,6 +109,7 @@ trading-bot/
 │   ├── allocator.py         # Allocator-Kernlogik (Berechnung + State-Datei)
 │   ├── allocator_backtest.py # Backtest: kombiniert vs. isoliert DCA/Trend
 │   ├── main_allocator.py    # Einstiegspunkt Allocator
+│   ├── audit_positions.py         # CLI: offene Grid-/Trend-Positionen auflisten (nur lesend)
 │   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
 │   └── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
@@ -268,10 +269,30 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   Latched wie der DCA-Stop-Loss: kein automatischer Reset, manuell mit
   `python -m dca_bot.reset_grid_stop_loss` oder durch Löschen der Datei
   unter `GRID_STOP_LOSS_STATE_FILE`.
+- **Dry-Run-Positionen werden nie real verkauft:** Vor jedem Verkauf
+  prüft der Bot das `dry_run`-Flag der jeweiligen Position im Ledger,
+  nicht nur den aktuellen Trading-Modus. Eine im Dry-Run "gekaufte"
+  Position existiert an der Börse gar nicht - sie bleibt deshalb auch
+  nach einem Umschalten auf `GRID_BOT_ENABLE_TRADING=true` simuliert und
+  wird dabei explizit als `[DRY-RUN-POSITION]` geloggt. Ohne diese
+  Prüfung würde der Bot versuchen, nie gekaufte Assets zu verkaufen.
+- **Fehlgeschlagener echter Verkauf schließt die Position nicht:**
+  `place_market_sell()` gibt in zwei völlig verschiedenen Fällen `None`
+  zurück - im Dry-Run UND bei einem echten API-Fehler. Beide werden
+  unterschieden: bei einem echten Fehler wird **kein** Erlös aus
+  `quantity * price` erfunden, die Position bleibt **offen** im Ledger
+  (`[GRID-VERKAUF-FEHLGESCHLAGEN]` im Log und per Telegram) und der
+  nächste Zyklus versucht den Verkauf automatisch erneut, da ihr
+  Sell-Target weiterhin erreicht ist. Anders als beim Trend-Bot muss
+  dabei keine Absicherung wiederhergestellt werden - der Grid-Bot
+  platziert nie eine exchange-seitige Stop-Order und storniert vor einem
+  Verkauf entsprechend auch keine. Die Telegram-Meldung kommt pro
+  Position nur einmal je Prozesslauf (sonst im 5-Minuten-Takt), ins Log
+  geht jeder Fehlschlag.
 - **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
   `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (mit realisiertem
-  Gewinn/Verlust dieser Position), `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`,
-  `[GRID-FEHLER]`.
+  Gewinn/Verlust dieser Position), `[GRID-VERKAUF-FEHLGESCHLAGEN]`,
+  `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`.
 
 ### 8.5 Backtest
 
@@ -372,8 +393,9 @@ bei Null anfangen müssen.
   die Strategie ggf. einen Großteil einer nachfolgenden Erholung.
 - **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
   `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`, `[TREND-AUSSTIEG]` (mit
-  realisiertem Gewinn/Verlust und Ausstiegsgrund), `[TREND-STOP-LOSS]`,
-  `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
+  realisiertem Gewinn/Verlust und Ausstiegsgrund),
+  `[TREND-VERKAUF-FEHLGESCHLAGEN]`, `[TREND-STOP-LOSS]`,
+  `[TREND-WARNUNG]`, `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
 
 ### 9.5 Echter, exchange-seitiger Stop-Loss
 
@@ -427,6 +449,28 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   sammelt über die Paper-Trade-Phase automatisch reale Daten zur
   Zuverlässigkeit von `TREND_STOP_LIMIT_OFFSET_PCT`, ohne dass das
   manuell nachgehalten werden muss (siehe Einschränkung unten).
+- **Dry-Run-Positionen werden nie real verkauft:** Vor jedem Verkauf
+  prüft der Bot das `dry_run`-Flag des Ledger-Eintrags, nicht nur den
+  aktuellen Trading-Modus. Eine im Dry-Run "gekaufte" Position existiert
+  an der Börse gar nicht - sie bleibt deshalb auch nach einem Umschalten
+  auf `TREND_BOT_ENABLE_TRADING=true` simuliert und wird dabei explizit
+  als `[DRY-RUN-POSITION]` geloggt.
+- **Fehlgeschlagener echter Verkauf schließt die Position nicht:**
+  `place_market_sell()` gibt in zwei völlig verschiedenen Fällen `None`
+  zurück - im Dry-Run UND bei einem echten API-Fehler. Beide werden
+  unterschieden: bei einem echten Fehler wird **kein** Erlös aus
+  `quantity * price` erfunden, die Position bleibt **offen** im Ledger
+  und es wird **kein** Stop-Loss-Latch gesetzt (es hat ja kein Ausstieg
+  stattgefunden). Geloggt als `[TREND-VERKAUF-FEHLGESCHLAGEN]`, zusätzlich
+  per Telegram. Da die exchange-seitige Stop-Order zu diesem Zeitpunkt
+  bereits storniert ist (siehe Exit-Reihenfolge oben), wäre die weiterhin
+  offene Position sonst ungeschützt - der Bot platziert deshalb sofort
+  eine **neue** Stop-Loss-Order mit derselben Schwelle
+  (`entry_price * (1 - TREND_STOP_LOSS_PCT/100)`) und hinterlegt sie im
+  Ledger. Schlägt auch das fehl, wird der doppelt kritische Zustand
+  (weder verkauft noch exchange-seitig abgesichert) als `ERROR` geloggt
+  und per Telegram gemeldet; die stornierte Order-ID wird aus dem Ledger
+  entfernt, statt eine tote Order als Absicherung auszuweisen.
 - **Dry-Run** (`TREND_BOT_ENABLE_TRADING=false`): es wird KEINE echte
   Stop-Order platziert, nur geloggt ("[DRY-RUN] Würde
   Stop-Loss-Order platzieren..."). Die Position bleibt dann wie bisher
@@ -536,7 +580,41 @@ Trend-Bot).
 - **Telegram-Benachrichtigungen**: `[ALLOCATION-UPDATE]` (bei
   signifikanter Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
 
-## 11. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
+## 11. Positions-Audit (offene Positionen prüfen)
+
+```bash
+python -m dca_bot.audit_positions
+```
+
+Listet alle offenen Positionen von Grid- und Trend-Bot auf, jeweils mit
+ihrem **Dry-Run-Status**. Rein informativ: das Skript liest nur, ändert
+nichts an den Ledger-Dateien und platziert keine Orders. Es braucht
+bewusst auch keine API-Keys.
+
+Gedacht als Überblick, bevor ein pausierter Bot wieder freigeschaltet
+oder `*_BOT_ENABLE_TRADING` umgestellt wird - dann ist auf einen Blick
+sichtbar, welche offenen Positionen an der Börse tatsächlich existieren
+(`ECHT`) und welche nur simuliert wurden (`DRY-RUN`, werden nie real
+verkauft, siehe Abschnitt 8.4/9.5).
+
+Pfade kommen aus `GRID_STATE_FILE`/`TREND_STATE_FILE` bzw. den üblichen
+Defaults, alternativ über `--grid-file` / `--trend-file`.
+
+## 12. Tests
+
+```bash
+python -m unittest tests.test_notifier tests.test_trend_stop_loss tests.test_grid_sell_safety -v
+```
+
+Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
+(Fake-Clients mit derselben Schnittstelle wie `binance_client.py`,
+temporäre Ledger-Dateien). Abgedeckt sind die sicherheitskritischen
+Pfade: Token-Hygiene der Telegram-Benachrichtigungen, der echte
+exchange-seitige Stop-Loss inkl. Race Conditions, sowie die
+Verkaufs-Sicherheit von Grid und Trend (Dry-Run-Positionen, fehl-
+geschlagene echte Verkäufe).
+
+## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
 - [ ] Konfiguration vollständig über `.env` statt Code-Defaults
 - [x] Persistente Speicherung der Trade-Historie (`data/trade_ledger.json`)

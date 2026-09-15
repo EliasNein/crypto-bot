@@ -123,6 +123,33 @@ class TrendLedger:
                 break
         self._write(records)
 
+    def set_stop_loss_order(
+        self, trade_id: str, order_id: str | None, limit_price: float | None
+    ) -> None:
+        """
+        Aktualisiert die einer offenen Position zugeordnete, exchange-
+        seitige Stop-Loss-Order. Gebraucht, wenn die ursprüngliche Order
+        bereits storniert wurde, der anschließende Verkauf aber
+        fehlschlug und die weiterhin offene Position durch eine NEUE
+        Stop-Order wieder abgesichert werden musste (siehe
+        trend_strategy.py, _handle_failed_real_sell).
+
+        `order_id=None`/`limit_price=None` löscht die Zuordnung - damit im
+        Ledger keine längst stornierte Order-ID stehen bleibt, falls auch
+        die Neuplatzierung fehlschlägt.
+
+        Eigene Methode statt record_entry/record_exit mitzunutzen, aus
+        demselben Grund wie bei set_uncertain_cycles: hier entsteht weder
+        ein neuer Trade noch ein Exit.
+        """
+        records = self._read()
+        for r in records:
+            if r["id"] == trade_id:
+                r["stop_loss_order_id"] = order_id
+                r["stop_limit_price"] = limit_price
+                break
+        self._write(records)
+
     def record_exit(
         self, trade_id: str, exit_price: float, exit_time: str, exit_reason: str, realized_pnl: float
     ) -> None:

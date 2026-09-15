@@ -263,13 +263,64 @@ class TrendFollowingStrategy:
             )
 
     def _close_position(self, open_trade: dict, price: float, reason: str) -> None:
+        """
+        Schließt die offene Position per eigenem Market-Sell (Signal-Exit
+        oder interner Stop-Loss-Trigger).
+
+        Ob dabei tatsächlich eine echte Order platziert wird, hängt NICHT
+        nur am aktuellen Trading-Modus, sondern zusätzlich am `dry_run`-Flag
+        des Ledger-Eintrags (siehe README.md Abschnitt 9.5): eine im
+        Dry-Run "gekaufte" Position existiert an der Börse gar nicht und
+        darf deshalb auch nach einem Umschalten auf echtes Trading niemals
+        real verkauft werden.
+        """
+        position_dry_run = open_trade.get("dry_run")
+        if position_dry_run is None:
+            # Ledger-Eintrag ohne dry_run-Feld (praktisch nur durch
+            # manuelles Editieren möglich - TrendTrade schreibt es immer).
+            # Hier wird bewusst NICHT geraten, gleiche Begründung wie in
+            # grid_strategy.py._process_sells.
+            logger.warning(
+                "[TREND-POSITION-UNKLAR] Position %s hat kein dry_run-Feld im "
+                "Ledger - Ausstieg (%s) wird NICHT ausgeführt, Position bleibt "
+                "offen. Bitte manuell prüfen "
+                "(python -m dca_bot.audit_positions).",
+                open_trade["id"],
+                reason,
+            )
+            return
+
         outcome = self._resolve_stop_order_before_close(open_trade)
         if outcome == "already_closed":
             return  # per _close_from_filled_stop_order bereits erledigt
         if outcome == "uncertain":
             return  # nichts tun, naechster Zyklus prueft erneut
 
-        order = self._client.place_market_sell(self._config.symbol, open_trade["quantity"])
+        if position_dry_run and self._config.trading_enabled:
+            # place_market_sell() prüft nur config.trading_enabled, NICHT
+            # das Positions-Flag - ein Aufruf wäre hier also eine echte
+            # Order für eine nie gekaufte Position. Deshalb gar nicht erst
+            # aufrufen, sondern direkt simulieren. (Eine Dry-Run-Position
+            # hat per Konstruktion auch keine stop_loss_order_id, der
+            # _resolve_stop_order_before_close-Aufruf oben ist für sie ein
+            # No-op ohne API-Zugriff.)
+            logger.warning(
+                "[DRY-RUN-POSITION] Position %s wurde im Dry-Run eröffnet, "
+                "Verkauf bleibt simuliert, unabhängig vom aktuellen "
+                "Trading-Modus.",
+                open_trade["id"],
+            )
+            order = None
+        else:
+            order = self._client.place_market_sell(self._config.symbol, open_trade["quantity"])
+            if order is None and self._config.trading_enabled:
+                # Echter Verkaufsversuch bei der Börse fehlgeschlagen -
+                # anders als im Dry-Run (wo None der Normalfall ist).
+                # Kein erfundener Erlös, kein record_exit(): die Position
+                # bleibt OFFEN und wird im nächsten Zyklus erneut versucht.
+                self._handle_failed_real_sell(open_trade, price)
+                return
+
         if order is not None:
             proceeds = float(order.get("cummulativeQuoteQty", open_trade["quantity"] * price))
         else:
@@ -298,6 +349,85 @@ class TrendFollowingStrategy:
         if reason == "stop_loss":
             loss_pct = (1 - price / open_trade["entry_price"]) * 100
             self._stop_loss.pause(self._config.symbol, open_trade["entry_price"], price, loss_pct)
+
+    def _handle_failed_real_sell(self, open_trade: dict, price: float) -> None:
+        """
+        Behandelt einen fehlgeschlagenen ECHTEN Market-Sell (siehe
+        _close_position): die Position bleibt OFFEN im Ledger, es wird
+        KEIN Erlös aus quantity*price erfunden und KEIN Stop-Loss-Latch
+        gesetzt - es hat schlicht kein Ausstieg stattgefunden.
+
+        Zusätzlich muss hier die Absicherung wiederhergestellt werden:
+        _resolve_stop_order_before_close() hat die exchange-seitige
+        Stop-Loss-Order bereits storniert, BEVOR dieser Verkauf versucht
+        wurde. Ohne eine neue Order bliebe die weiterhin offene Position
+        also komplett ungeschützt, sobald der Bot-Prozess ausfällt - genau
+        der Zustand, den die Stop-Order verhindern soll.
+
+        Die Stop-Schwelle wird wie beim Entry aus entry_price berechnet
+        (siehe _open_position), ist also identisch zur ursprünglichen. Der
+        limit_price entsteht mit dem AKTUELLEN stop_limit_offset_pct und
+        wird auch so im Ledger hinterlegt: für eine neu platzierte Order
+        ist der aktuelle Config-Wert die Wahrheit. Das widerspricht nicht
+        dem Kommentar zu TrendTrade.stop_limit_price in trend_risk.py -
+        dort geht es darum, eine BESTEHENDE Order nicht rückwirkend mit
+        einem geänderten Config-Wert zu verfälschen.
+        """
+        logger.warning(
+            "[TREND-VERKAUF-FEHLGESCHLAGEN] Echter Verkauf für %s "
+            "fehlgeschlagen (Position %s, Preis ~%.2f) - Position bleibt "
+            "OFFEN im Ledger, kein Erlös verbucht, kein Stop-Loss-Latch. "
+            "Der nächste Zyklus versucht es erneut.",
+            self._config.symbol,
+            open_trade["id"],
+            price,
+        )
+
+        stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
+        limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
+        stop_order = self._client.place_stop_loss_limit_sell(
+            self._config.symbol, open_trade["quantity"], stop_price, limit_price
+        )
+
+        if stop_order is not None:
+            self._ledger.set_stop_loss_order(
+                open_trade["id"], str(stop_order["orderId"]), limit_price
+            )
+            logger.warning(
+                "Neue Stop-Loss-Order %s für die weiterhin offene Position "
+                "platziert (Stop %.2f, Limit %.2f) - die vor dem "
+                "fehlgeschlagenen Verkauf stornierte Absicherung ist damit "
+                "wiederhergestellt.",
+                stop_order["orderId"],
+                stop_price,
+                limit_price,
+            )
+            send_notification(
+                f"[TREND-VERKAUF-FEHLGESCHLAGEN] {self._config.symbol}: echter "
+                f"Verkauf @ {price:.2f} fehlgeschlagen. Position bleibt offen, "
+                "wurde aber durch eine NEUE Stop-Loss-Order wieder "
+                "abgesichert. Siehe Bot-Log."
+            )
+            return
+
+        # Die alte ID zeigt auf die bereits stornierte Order - sie stehen
+        # zu lassen wäre eine Falschangabe im Ledger (und würde beim
+        # nächsten Zyklus einen Status-Check auf eine tote Order auslösen).
+        self._ledger.set_stop_loss_order(open_trade["id"], None, None)
+        logger.error(
+            "[TREND-VERKAUF-FEHLGESCHLAGEN] Zusätzlich konnte auch KEINE neue "
+            "Stop-Loss-Order platziert werden: Position %s ist jetzt weder "
+            "verkauft noch exchange-seitig abgesichert - nur noch "
+            "software-intern, und das auch nur, solange dieser Prozess "
+            "läuft. Manueller Eingriff dringend empfohlen.",
+            open_trade["id"],
+        )
+        send_notification(
+            f"[TREND-FEHLER] {self._config.symbol}: echter Verkauf @ {price:.2f} "
+            "fehlgeschlagen UND keine neue Stop-Loss-Order platzierbar - "
+            "Position weder verkauft noch exchange-seitig abgesichert. "
+            "Manuelle Prüfung nötig."
+        )
 
     def _close_from_filled_stop_order(
         self, open_trade: dict, order_status: dict, log_prefix: str = ""
