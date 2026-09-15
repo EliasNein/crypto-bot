@@ -20,6 +20,7 @@ from .notifier import init as init_notifier
 from .notifier import send_notification
 from .risk import BotHalted, KillSwitch, PortfolioStopLoss, TradeLedger
 from .strategy import DCAStrategy
+from .version import get_code_version
 
 # Wie oft während der Wartezeit zwischen zwei Zyklen geprüft wird, ob der
 # Notaus ausgelöst wurde - kurz genug, um "sofort" zu wirken, aber ohne
@@ -78,6 +79,7 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("DCA-Bot startet")
+    logger.info("Code-Version: %s", get_code_version())
     logger.info("Symbol: %s | Betrag pro Kauf: %.2f | Intervall: %.2fh",
                 config.symbol, config.quote_amount, config.interval_hours)
     logger.info("Trading aktiv (kein Dry-Run): %s", config.trading_enabled)
