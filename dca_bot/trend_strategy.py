@@ -38,6 +38,14 @@ logger = logging.getLogger("trend_bot")
 # mehrere in Folge deuten auf ein anhaltendes Problem hin.
 UNCERTAIN_CYCLES_WARNING_THRESHOLD = 3
 
+# Ab wie vielen aufeinanderfolgenden Zyklen gewarnt wird, in denen eine
+# offene Position keine exchange-seitige Stop-Loss-Order hatte und auch
+# keine neue platziert werden konnte (siehe
+# _ensure_stop_loss_protection). Gleiche Schwelle und gleiche Begruendung
+# wie oben: ein einzelner Fehlschlag kann transient sein, mehrere in
+# Folge deuten auf ein anhaltendes Problem hin.
+UNPROTECTED_CYCLES_WARNING_THRESHOLD = 3
+
 
 class TrendFollowingStrategy:
     def __init__(self, config: TrendConfig, client: TradingClient):
@@ -148,11 +156,19 @@ class TrendFollowingStrategy:
             # (is_stop_loss_hit in execute_once), also genau der Zustand,
             # den diese Funktion eigentlich vermeiden soll. Muss sichtbar
             # sein, nicht nur im Log verschwinden.
+            #
+            # "Bis zum nächsten erfolgreichen Versuch" ist seit
+            # _ensure_stop_loss_protection() auch tatsächlich eingelöst:
+            # jeder folgende Zyklus (und der Reconciliation-Schritt beim
+            # Start) versucht die fehlende Order neu zu platzieren und
+            # eskaliert per unprotected_cycles, falls das dauerhaft
+            # scheitert. Vorher behauptete dieser Text einen
+            # Wiederholungsversuch, den es im Code nirgends gab.
             logger.warning(
                 "Stop-Loss-Order für %s konnte nicht platziert werden - "
                 "Position ist bis zum nächsten erfolgreichen Versuch nur "
                 "noch software-intern abgesichert (kein Schutz bei "
-                "Bot-Ausfall).",
+                "Bot-Ausfall). Der nächste Zyklus versucht es erneut.",
                 self._config.symbol,
             )
             send_notification(
@@ -429,6 +445,118 @@ class TrendFollowingStrategy:
             "Manuelle Prüfung nötig."
         )
 
+    def _ensure_stop_loss_protection(self, open_trade: dict, log_prefix: str = "") -> None:
+        """
+        Stellt sicher, dass eine offene, echte Position eine exchange-
+        seitige Stop-Loss-Order hat - und platziert sonst eine neue.
+
+        Ohne diesen Schritt konnte eine Position dauerhaft ungeschützt
+        bleiben, ohne dass es jemals auffiel. Es gibt genau zwei Wege in
+        diesen Zustand, und beide waren bisher Sackgassen:
+
+        1. Die Stop-Order konnte schon beim Entry nicht platziert werden
+           (siehe _open_position). Der Kommentar dort sprach von "bis zum
+           nächsten erfolgreichen Versuch" - einen solchen Versuch gab es
+           aber nirgends im Code.
+        2. Der eigene Market-Sell schlug fehl, nachdem die Stop-Order
+           dafür bereits storniert war, UND die sofortige Neuplatzierung
+           schlug ebenfalls fehl (siehe _handle_failed_real_sell). Dreht
+           `confirmed_direction` danach zurück auf "up", entfällt der
+           Exit-Grund - der Bot hätte die Position dann nie wieder
+           angefasst und damit auch nie wieder abgesichert.
+
+        In beiden Fällen wirkte nur noch der software-interne Stop-Loss,
+        also genau so lange, wie der Bot-Prozess läuft - der Schutz bei
+        Bot-/Internet-/Stromausfall, der der ganze Sinn der
+        exchange-seitigen Order ist, fehlte.
+
+        Die Stop-Schwelle entsteht wie beim Entry aus `entry_price`, ist
+        also identisch zur ursprünglich vorgesehenen. Schlägt auch dieser
+        Versuch fehl, zählt `unprotected_cycles` hoch; ab
+        UNPROTECTED_CYCLES_WARNING_THRESHOLD aufeinanderfolgenden Zyklen
+        gibt es eine explizite Telegram-Warnung (gleiches Muster wie
+        `uncertain_cycles`). Bei Erfolg wird der Zähler zurückgesetzt.
+
+        Bewusst NICHT betroffen: Dry-Run-Positionen (existieren an der
+        Börse nicht, siehe K4) und der Dry-Run-Modus selbst (dort wird nie
+        eine echte Order platziert).
+        """
+        if not self._config.trading_enabled or open_trade.get("dry_run"):
+            return
+        if open_trade.get("stop_loss_order_id"):
+            return  # bereits abgesichert, nichts zu tun
+
+        previous_count = open_trade.get("unprotected_cycles", 0)
+
+        stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
+        limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
+        stop_order = self._client.place_stop_loss_limit_sell(
+            self._config.symbol, open_trade["quantity"], stop_price, limit_price
+        )
+
+        if stop_order is not None:
+            order_id = str(stop_order["orderId"])
+            self._ledger.set_stop_loss_order(open_trade["id"], order_id, limit_price)
+            # Den uebergebenen Dict mitziehen, damit der laufende Zyklus
+            # (und die aufrufende Seite) nicht mit einem veralteten Stand
+            # weiterarbeitet.
+            open_trade["stop_loss_order_id"] = order_id
+            open_trade["stop_limit_price"] = limit_price
+            if previous_count:
+                self._ledger.set_unprotected_cycles(open_trade["id"], 0)
+                open_trade["unprotected_cycles"] = 0
+
+            logger.info(
+                "%s[TREND-ABSICHERUNG-WIEDERHERGESTELLT] Offene Position %s "
+                "hatte keine exchange-seitige Stop-Loss-Order - neue Order %s "
+                "platziert (Stop %.2f, Limit %.2f).",
+                log_prefix,
+                open_trade["id"],
+                order_id,
+                stop_price,
+                limit_price,
+            )
+            if previous_count >= UNPROTECTED_CYCLES_WARNING_THRESHOLD:
+                # Es ging bereits eine Warnung raus - dann gehoert auch die
+                # Entwarnung in denselben Kanal, sonst bleibt der letzte
+                # Stand dort "ungeschuetzt".
+                send_notification(
+                    f"{log_prefix}[TREND-ABSICHERUNG-WIEDERHERGESTELLT] "
+                    f"{self._config.symbol}: die offene Position hat wieder "
+                    f"eine exchange-seitige Stop-Loss-Order (Stop {stop_price:.2f})."
+                )
+            return
+
+        count = previous_count + 1
+        self._ledger.set_unprotected_cycles(open_trade["id"], count)
+        open_trade["unprotected_cycles"] = count
+
+        logger.warning(
+            "%sOffene Position %s hat KEINE exchange-seitige Stop-Loss-Order "
+            "und eine neue konnte nicht platziert werden (%d. Zyklus in "
+            "Folge) - sie ist nur software-intern abgesichert, also nur "
+            "solange dieser Prozess laeuft.",
+            log_prefix,
+            open_trade["id"],
+            count,
+        )
+
+        if count >= UNPROTECTED_CYCLES_WARNING_THRESHOLD:
+            logger.warning(
+                "%sPosition fuer %s seit %d Zyklen in Folge ohne exchange-"
+                "seitige Absicherung - manuelle Pruefung empfohlen.",
+                log_prefix,
+                self._config.symbol,
+                count,
+            )
+            send_notification(
+                f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: offene "
+                f"Position seit {count} Zyklen ohne exchange-seitige "
+                "Stop-Loss-Order (kein Schutz bei Bot-Ausfall), "
+                "Neuplatzierung schlaegt weiterhin fehl. Manuelle Pruefung "
+                "empfohlen."
+            )
+
     def _close_from_filled_stop_order(
         self, open_trade: dict, order_status: dict, log_prefix: str = ""
     ) -> None:
@@ -557,6 +685,13 @@ class TrendFollowingStrategy:
             self._config.symbol,
         )
 
+        # Falls gar keine Stop-Order hinterlegt ist (z.B. weil sie beim
+        # Entry nicht platziert werden konnte oder nach einem
+        # fehlgeschlagenen Verkauf nicht wiederhergestellt wurde), wird
+        # das hier direkt beim Start repariert - nicht erst beim nächsten
+        # Exit-Signal, das u.U. nie kommt.
+        self._ensure_stop_loss_protection(open_trade, log_prefix="[REKONZILIATION] ")
+
     def execute_once(self) -> None:
         """
         Führt genau einen Trend-Following-Zyklus aus. Der aktuell
@@ -597,6 +732,17 @@ class TrendFollowingStrategy:
             action = decide_action(confirmed, has_open_position=True, stop_loss_paused=False)
             if action == "EXIT_SIGNAL":
                 self._close_position(open_trade, price, reason="signal")
+                return
+
+            # Die Position bleibt diesen Zyklus offen - also sicherstellen,
+            # dass sie exchange-seitig abgesichert ist. Bewusst erst HIER
+            # und nicht am Anfang des Zyklus: wird die Position ohnehin
+            # gerade geschlossen, waere eine neue Stop-Order sofort wieder
+            # zu stornieren, und bei einem ausgeloesten Stop-Loss laege der
+            # Preis bereits unter der Stop-Schwelle - die Boerse wuerde eine
+            # solche Order zurueckweisen ("would immediately trigger") und
+            # der Zaehler unten fehlerhaft hochlaufen.
+            self._ensure_stop_loss_protection(open_trade)
             return
 
         if self._stop_loss.is_paused():

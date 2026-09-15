@@ -26,7 +26,11 @@ from pathlib import Path
 from unittest import mock
 
 from dca_bot.trend_config import TrendConfig
-from dca_bot.trend_strategy import UNCERTAIN_CYCLES_WARNING_THRESHOLD, TrendFollowingStrategy
+from dca_bot.trend_strategy import (
+    UNCERTAIN_CYCLES_WARNING_THRESHOLD,
+    UNPROTECTED_CYCLES_WARNING_THRESHOLD,
+    TrendFollowingStrategy,
+)
 
 
 class FakeTradingClient:
@@ -730,6 +734,235 @@ class TrendSellSafetyTestCase(TrendStrategyTestBase):
             any("[TREND-POSITION-UNKLAR]" in line for line in captured.output),
             "Der unklare Zustand muss sichtbar geloggt werden",
         )
+
+
+class TrendStopLossProtectionTestCase(TrendStrategyTestBase):
+    """
+    Tests dafür, dass eine offene, echte Position nicht dauerhaft ohne
+    exchange-seitige Stop-Loss-Order bleiben kann (siehe
+    trend_strategy.py._ensure_stop_loss_protection).
+
+    Zwei Wege führen in diesen Zustand, beide waren vorher Sackgassen:
+    die Stop-Order konnte schon beim Entry nicht platziert werden, oder
+    ein fehlgeschlagener Verkauf konnte seine stornierte Absicherung
+    nicht ersetzen und der Exit-Grund entfiel danach (Trend dreht zurück
+    auf "up"). In beiden Fällen hätte nie wieder etwas eine neue Order
+    platziert - die Position wäre bei Bot-/Stromausfall ungeschützt
+    gewesen, ohne dass es jemals eskaliert.
+    """
+
+    def _open_position_without_stop_order(self, price: float = 50_000.0):
+        """
+        Erzeugt genau den kritischen Zustand: echte Position (dry_run=False),
+        aber ohne stop_loss_order_id, weil die Order beim Entry scheiterte.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=price)
+        client.force_stop_order_failure = True
+        strategy._open_position(price)
+
+        open_trade = strategy._ledger.open_position()
+        self.assertFalse(open_trade["dry_run"], "Vorbedingung: echte Position")
+        self.assertIsNone(open_trade["stop_loss_order_id"], "Vorbedingung: ungeschützt")
+        return strategy, client
+
+    # -- Wiederherstellung im regulaeren Zyklus --
+
+    def test_execute_once_places_missing_stop_order(self):
+        strategy, client = self._open_position_without_stop_order()
+        client.force_stop_order_failure = False
+        # Preis deutlich ueber der Stop-Schwelle (45.000), damit kein
+        # Exit ausgeloest wird - die Position soll den Zyklus ueberleben.
+        client.price = 51_000.0
+
+        with self.assertLogs("trend_bot", level="INFO") as captured:
+            strategy.execute_once()
+
+        # Zwei Versuche insgesamt: der gescheiterte beim Entry, der neue hier.
+        self.assertEqual(len(client.stop_order_calls), 2)
+        _, quantity, stop_price, limit_price = client.stop_order_calls[1]
+        self.assertAlmostEqual(stop_price, 45_000.0, places=2)
+        self.assertAlmostEqual(limit_price, 45_000.0 * (1 - 0.005), places=2)
+
+        open_trade = strategy._ledger.open_position()
+        self.assertIsNotNone(open_trade["stop_loss_order_id"])
+        self.assertEqual(client.orders[open_trade["stop_loss_order_id"]]["status"], "NEW")
+        self.assertAlmostEqual(open_trade["stop_limit_price"], limit_price, places=2)
+        self.assertEqual(open_trade["unprotected_cycles"], 0)
+        self.assertAlmostEqual(quantity, open_trade["quantity"], places=10)
+
+        self.assertTrue(
+            any("[TREND-ABSICHERUNG-WIEDERHERGESTELLT]" in line for line in captured.output)
+        )
+
+    def test_already_protected_position_gets_no_second_order(self):
+        """Regression: eine abgesicherte Position wird nicht angefasst."""
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        client.price = 51_000.0
+
+        strategy.execute_once()
+
+        self.assertEqual(len(client.stop_order_calls), 1, "Nur die Order vom Entry")
+
+    # -- Eskalation bei wiederholtem Fehlschlag --
+
+    def test_repeated_failures_increment_counter_and_warn_at_threshold(self):
+        strategy, client = self._open_position_without_stop_order()
+        client.price = 51_000.0  # kein Exit, Position ueberlebt jeden Zyklus
+        # force_stop_order_failure bleibt True: die Neuplatzierung scheitert weiter.
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            for expected_count in range(1, UNPROTECTED_CYCLES_WARNING_THRESHOLD):
+                strategy.execute_once()
+                self.assertEqual(
+                    strategy._ledger.open_position()["unprotected_cycles"], expected_count
+                )
+                mock_notify.assert_not_called()
+
+            strategy.execute_once()
+
+        self.assertEqual(
+            strategy._ledger.open_position()["unprotected_cycles"],
+            UNPROTECTED_CYCLES_WARNING_THRESHOLD,
+        )
+        mock_notify.assert_called_once()
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-WARNUNG]", text)
+        self.assertIn(str(UNPROTECTED_CYCLES_WARNING_THRESHOLD), text)
+        self.assertIn("ohne exchange-seitige", text)
+
+    def test_counter_resets_and_all_clear_after_successful_recovery(self):
+        strategy, client = self._open_position_without_stop_order()
+        client.price = 51_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            for _ in range(UNPROTECTED_CYCLES_WARNING_THRESHOLD):
+                strategy.execute_once()
+            self.assertEqual(mock_notify.call_count, 1, "Warnung ist raus")
+
+            # Ursache behoben (z.B. API wieder erreichbar).
+            client.force_stop_order_failure = False
+            strategy.execute_once()
+
+        open_trade = strategy._ledger.open_position()
+        self.assertIsNotNone(open_trade["stop_loss_order_id"])
+        self.assertEqual(open_trade["unprotected_cycles"], 0)
+        # Nach einer gesendeten Warnung gehoert die Entwarnung in denselben Kanal.
+        self.assertEqual(mock_notify.call_count, 2)
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-ABSICHERUNG-WIEDERHERGESTELLT]", text)
+
+    def test_no_all_clear_notification_without_prior_warning(self):
+        """
+        Ein einzelner Fehlschlag, der sich sofort wieder einrenkt, ist
+        kein Telegram-Ereignis - nur das Log haelt ihn fest.
+        """
+        strategy, client = self._open_position_without_stop_order()
+        client.price = 51_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            strategy.execute_once()          # 1 Fehlschlag, unter der Schwelle
+            client.force_stop_order_failure = False
+            strategy.execute_once()          # erholt sich
+
+        self.assertIsNotNone(strategy._ledger.open_position()["stop_loss_order_id"])
+        mock_notify.assert_not_called()
+
+    # -- Der zweite Eintrittsweg: nach fehlgeschlagenem Verkauf dreht der Trend zurueck --
+
+    def test_recovers_after_failed_sell_when_exit_reason_disappears(self):
+        """
+        Genau die gefundene Luecke: Verkauf UND Neuplatzierung scheitern,
+        danach entfaellt der Exit-Grund (kein Stop-Loss-Treffer, kein
+        Abwaertssignal). Vorher haette nie wieder etwas die Position
+        abgesichert - jetzt repariert der naechste Zyklus das.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        client.force_market_sell_failure = True
+        client.force_stop_order_failure = True
+
+        strategy._close_position(open_trade, price=52_000.0, reason="signal")
+        self.assertIsNone(
+            strategy._ledger.open_position()["stop_loss_order_id"],
+            "Vorbedingung: Position ist jetzt ungeschuetzt offen",
+        )
+
+        # Naechster Zyklus: kein Exit-Grund mehr, Ursache behoben.
+        client.force_stop_order_failure = False
+        client.price = 51_000.0
+        strategy.execute_once()
+
+        open_trade = strategy._ledger.open_position()
+        self.assertIsNotNone(open_trade["stop_loss_order_id"])
+        self.assertEqual(client.orders[open_trade["stop_loss_order_id"]]["status"], "NEW")
+        self.assertEqual(open_trade["unprotected_cycles"], 0)
+
+    # -- Wiederherstellung beim Neustart --
+
+    def test_reconcile_on_startup_places_missing_stop_order(self):
+        strategy, client = self._open_position_without_stop_order()
+        client.force_stop_order_failure = False
+
+        restarted = TrendFollowingStrategy(self._make_config(True), client)
+        restarted._seeded = True
+        with self.assertLogs("trend_bot", level="INFO") as captured:
+            restarted.reconcile_on_startup()
+
+        open_trade = restarted._ledger.open_position()
+        self.assertIsNotNone(open_trade["stop_loss_order_id"])
+        self.assertEqual(open_trade["unprotected_cycles"], 0)
+        self.assertTrue(
+            any(
+                "[REKONZILIATION] [TREND-ABSICHERUNG-WIEDERHERGESTELLT]" in line
+                for line in captured.output
+            ),
+            "Der Reconciliation-Pfad muss eigens markiert sein",
+        )
+
+    def test_reconcile_on_startup_counts_failure(self):
+        strategy, client = self._open_position_without_stop_order()
+        # force_stop_order_failure bleibt True
+
+        restarted = TrendFollowingStrategy(self._make_config(True), client)
+        restarted._seeded = True
+        restarted.reconcile_on_startup()
+
+        self.assertIsNone(restarted._ledger.open_position()["stop_loss_order_id"])
+        self.assertEqual(restarted._ledger.open_position()["unprotected_cycles"], 1)
+
+    # -- Abgrenzung: Dry-Run wird nicht angefasst --
+
+    def test_dry_run_position_gets_no_stop_order(self):
+        """
+        Eine Dry-Run-Position existiert an der Boerse nicht - fuer sie darf
+        auch keine echte Stop-Order platziert werden (gleiche Logik wie K4).
+        """
+        dry_strategy, _ = self._make_strategy(trading_enabled=False, price=50_000.0)
+        dry_strategy._open_position(50_000.0)
+
+        live_client = FakeTradingClient(trading_enabled=True, price=51_000.0)
+        live_strategy = TrendFollowingStrategy(self._make_config(True), live_client)
+        live_strategy._seeded = True
+
+        live_strategy.execute_once()
+
+        self.assertEqual(live_client.stop_order_calls, [], "Keine echte Order fuer Dry-Run")
+        self.assertEqual(live_strategy._ledger.open_position()["unprotected_cycles"], 0)
+
+    def test_dry_run_mode_places_no_stop_order(self):
+        """Im Dry-Run-Modus wird ohnehin nie eine echte Order platziert."""
+        strategy, client = self._open_position_without_stop_order()
+
+        dry_client = FakeTradingClient(trading_enabled=False, price=51_000.0)
+        dry_strategy = TrendFollowingStrategy(self._make_config(False), dry_client)
+        dry_strategy._seeded = True
+
+        dry_strategy.execute_once()
+
+        self.assertEqual(dry_client.stop_order_calls, [])
+        self.assertEqual(dry_strategy._ledger.open_position()["unprotected_cycles"], 0)
 
 
 if __name__ == "__main__":
