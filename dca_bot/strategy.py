@@ -19,6 +19,7 @@ from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fract
 from .binance_client import TradingClient
 from .config import Config
 from .notifier import send_notification
+from .order_utils import net_executed_quantity, quantize_quantity
 from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord
 
 logger = logging.getLogger("dca_bot")
@@ -99,6 +100,13 @@ class DCAStrategy:
         # noch verhindert statt erst im nächsten Zyklus zu greifen.
         self._kill_switch.check()
 
+        # Handelsregeln bewusst VOR dem Kauf holen (danach aus dem Cache):
+        # schlägt der Abruf fehl, bricht der Zyklus ab, ohne dass eine
+        # Order existiert. Würde man sie erst nach dem Kauf brauchen,
+        # könnte ein Fehler hier einen real ausgeführten Kauf unverbucht
+        # lassen - siehe get_symbol_trading_rules in binance_client.py.
+        rules = self._client.get_symbol_trading_rules(symbol)
+
         order = self._client.place_market_buy(symbol, amount)
 
         if order is None and self._config.trading_enabled:
@@ -122,10 +130,19 @@ class DCAStrategy:
         if order is not None:
             # Echte Order: tatsächlich ausgeführte Menge/Betrag verwenden,
             # falls die Börse abweichend vom angefragten Betrag gefüllt hat.
-            quantity = float(order.get("executedQty", amount / price))
+            # Die Menge wird dabei um die in BTC abgezogene Handelsgebühr
+            # bereinigt (siehe order_utils). Der DCA-Bot verkauft zwar nie,
+            # aber PortfolioStopLoss bewertet die Position mit
+            # `quantity * current_price` - eine zu hohe Menge würde den
+            # Portfoliowert überschätzen und den Stop-Loss zu spät auslösen.
+            quantity = net_executed_quantity(order, rules, fallback=amount / price)
             quote_spent = float(order.get("cummulativeQuoteQty", amount))
         else:
-            quantity = amount / price
+            # Im Dry-Run gibt es keinen Fill und damit keine bekannte Gebühr -
+            # sie wird bewusst NICHT geschätzt (das wäre erfundene Zahl),
+            # die Menge aber trotzdem quantisiert, damit simulierte und
+            # echte Werte vergleichbar bleiben.
+            quantity = quantize_quantity(amount / price, rules.step_size)
             quote_spent = amount
 
         self._ledger.record(

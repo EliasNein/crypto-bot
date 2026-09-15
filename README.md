@@ -87,7 +87,8 @@ Beenden mit `Strg+C`.
 trading-bot/
 ├── dca_bot/
 │   ├── config.py         # Zentrale Konfiguration DCA-Bot (liest .env)
-│   ├── binance_client.py # Wrapper um die Binance-API (Testnet, Buy+Sell)
+│   ├── binance_client.py # Wrapper um die Binance-API (Testnet, Buy+Sell, Handelsregeln)
+│   ├── order_utils.py    # Quantisierung auf tickSize/stepSize + Gebührenkorrektur (geteilt)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
 │   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss (DCA)
 │   ├── notifier.py       # Telegram-Benachrichtigungen (optional, geteilt)
@@ -140,6 +141,30 @@ trading-bot/
   `DCA_BOT_STOP_LOSS_STATE_FILE` (Default `data/stop_loss_paused.json`).
 - **Fehlerbehandlung pro Zyklus**: Ein einzelner Fehler (z.B. API-Timeout)
   beendet nicht den ganzen Bot, sondern wird geloggt; der nächste Zyklus läuft normal weiter.
+- **Echte Handelsregeln statt Annahmen** (`dca_bot/order_utils.py`,
+  `binance_client.get_symbol_trading_rules`): Vor jeder Order werden Menge
+  und Preise gegen die tatsächlichen Filter des Symbols quantisiert
+  (`LOT_SIZE`/`stepSize`, `PRICE_FILTER`/`tickSize`), und der Kaufbetrag
+  gegen das Mindestvolumen (`NOTIONAL`/`minNotional`) geprüft. Die Regeln
+  werden einmalig pro Bot-Prozess von der Börse geholt und danach
+  gecacht - nicht bei jedem Zyklus neu. Schlägt der Abruf fehl, wird der
+  Fehler **weitergereicht** statt auf Default-Werte auszuweichen: eine
+  still falsch gerundete Order wäre schlimmer als ein abgebrochener
+  Zyklus. Alle Bots holen die Regeln deshalb, **bevor** sie eine Order
+  platzieren - ein Fehlschlag bricht dann folgenlos ab, statt eine
+  bereits ausgeführte Order unverbucht zu lassen.
+- **Gebührenbereinigte Mengen**: Binance zieht die Handelsgebühr bei
+  einem Spot-Kauf vom erhaltenen Base-Asset ab (bei BTCUSDT also in BTC).
+  `executedQty` ist der Betrag **vor** diesem Abzug - ins Ledger kommt
+  deshalb die tatsächlich verfügbare Menge (`executedQty` minus der in
+  BTC abgerechneten Gebühr aus `fills[]`, abgerundet auf die `stepSize`).
+  Ohne das würde jeder spätere Verkauf und jede Stop-Loss-Order über eine
+  Menge laufen, die gar nicht mehr da ist. Spiegelbildlich wird beim
+  Verkauf die in USDT abgerechnete Gebühr vom Erlös abgezogen, damit der
+  realisierte Gewinn nicht systematisch zu optimistisch ist. Im Dry-Run
+  gibt es keinen Fill und damit keine bekannte Gebühr - sie wird bewusst
+  **nicht** geschätzt, die Menge aber trotzdem quantisiert, damit
+  simulierte und echte Werte vergleichbar bleiben.
 
 ## 7. Telegram-Benachrichtigungen (optional)
 
@@ -495,11 +520,13 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   Stop-Loss-Order platzieren..."). Die Position bleibt dann wie bisher
   ausschließlich software-intern überwacht - gleiches Sicherheitsprinzip
   wie bei der Entry-Order (kein Trading ohne Opt-in).
-- **Bekannte Einschränkung (TODO vor Echtgeld):** Stop-/Limit-Preis
-  werden aktuell nur auf 2 Nachkommastellen gerundet, nicht gegen die
-  echte `PRICE_FILTER`-Tick-Size des Symbols validiert (siehe TODO-
-  Kommentar in `binance_client.py`) - vor dem Live-Start durch eine
-  echte `exchangeInfo`-Abfrage ersetzen.
+- **Erledigt (war: TODO vor Echtgeld):** Stop-/Limit-Preis wurden früher
+  nur auf 2 Nachkommastellen gerundet, nicht gegen die echte
+  `PRICE_FILTER`-Tick-Size des Symbols validiert. Seit dem K3-Fix werden
+  beide Preise und die Menge gegen die tatsächlichen `exchangeInfo`-Filter
+  quantisiert (siehe Abschnitt 6) - die Menge zusätzlich um die beim Kauf
+  abgezogene Handelsgebühr bereinigt, sonst würde die Stop-Order über eine
+  nicht mehr vorhandene Menge laufen und von der Börse abgelehnt.
 - **Bekannte Einschränkung: `TREND_STOP_LIMIT_OFFSET_PCT`-Default (0,5%)
   basiert auf einer zu kleinen historischen Stichprobe** (Backtest-
   Analyse über die drei Referenz-Zeiträume ergab nur 2 simulierte
@@ -622,7 +649,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_trend_stop_loss tests.test_grid_sell_safety -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -631,7 +658,8 @@ temporäre Ledger-Dateien). Abgedeckt sind die sicherheitskritischen
 Pfade: Token-Hygiene der Telegram-Benachrichtigungen, der echte
 exchange-seitige Stop-Loss inkl. Race Conditions, sowie die
 Verkaufs-Sicherheit von Grid und Trend (Dry-Run-Positionen, fehl-
-geschlagene echte Verkäufe).
+geschlagene echte Verkäufe), sowie die Anbindung an die echten
+Handelsregeln inklusive Gebührenkorrektur.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

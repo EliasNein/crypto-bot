@@ -25,11 +25,25 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from dca_bot.order_utils import SymbolTradingRules
 from dca_bot.trend_config import TrendConfig
 from dca_bot.trend_strategy import (
     UNCERTAIN_CYCLES_WARNING_THRESHOLD,
     UNPROTECTED_CYCLES_WARNING_THRESHOLD,
     TrendFollowingStrategy,
+)
+
+
+# Handelsregeln nahe an dem, was Binance fuer BTCUSDT meldet - damit die
+# Tests dieselbe Quantisierung durchlaufen wie der Live-Betrieb.
+FAKE_TRADING_RULES = SymbolTradingRules(
+    symbol="BTCUSDT",
+    tick_size=0.01,
+    step_size=0.00001,
+    min_notional=5.0,
+    base_asset="BTC",
+    quote_asset="USDT",
+    quote_precision=8,
 )
 
 
@@ -75,6 +89,20 @@ class FakeTradingClient:
         # fehlschlaegt - fuer den doppelt kritischen Fall "weder verkauft
         # noch abgesichert".
         self.force_stop_order_failure = False
+        # Handelsgebuehr, die Binance beim KAUF vom erhaltenen Base-Asset
+        # abzieht. Default 0.0 - exakt das Verhalten, das auf dem Testnet
+        # beobachtet wurde (commission 0.00000000). Tests, die die
+        # Gebuehrenkorrektur pruefen, setzen einen realistischen Wert
+        # (0.001 = 0,1%, der Live-Standardsatz).
+        self.commission_rate = 0.0
+        # Gebuehren-Waehrung: normalerweise das Base-Asset (BTC), bei
+        # aktivem BNB-Rabatt stattdessen "BNB" - dann darf die Menge NICHT
+        # gekuerzt werden.
+        self.commission_asset = "BTC"
+        # Laesst get_symbol_trading_rules() scheitern, um zu pruefen, dass
+        # das nicht stillschweigend ignoriert wird.
+        self.force_trading_rules_failure = False
+        self.trading_rules_calls = 0
 
     def _new_order_id(self) -> str:
         self._next_order_id += 1
@@ -83,13 +111,32 @@ class FakeTradingClient:
     def get_current_price(self, symbol: str) -> float:
         return self.price
 
+    def get_symbol_trading_rules(self, symbol: str):
+        self.trading_rules_calls += 1
+        if self.force_trading_rules_failure:
+            # Wie der echte Client: der Fehler wird weitergereicht, statt
+            # auf stille Default-Werte auszuweichen.
+            raise RuntimeError("exchangeInfo nicht erreichbar (Testfall)")
+        return FAKE_TRADING_RULES
+
     def place_market_buy(self, symbol: str, quote_order_qty: float) -> dict | None:
         self.market_buy_calls.append((symbol, quote_order_qty))
         if not self.trading_enabled:
             return None
+        executed_qty = quote_order_qty / self.price
         return {
-            "executedQty": quote_order_qty / self.price,
+            "executedQty": executed_qty,
             "cummulativeQuoteQty": quote_order_qty,
+            # Wie eine echte Binance-Antwort: die Gebuehr steht in den
+            # Fills, nicht in einem Top-Level-Feld.
+            "fills": [
+                {
+                    "price": self.price,
+                    "qty": executed_qty,
+                    "commission": executed_qty * self.commission_rate,
+                    "commissionAsset": self.commission_asset,
+                }
+            ],
         }
 
     def place_market_sell(self, symbol: str, quantity: float) -> dict | None:
@@ -99,7 +146,20 @@ class FakeTradingClient:
             return None
         if self.force_market_sell_failure:
             return None
-        return {"cummulativeQuoteQty": quantity * self.price}
+        gross = quantity * self.price
+        return {
+            "cummulativeQuoteQty": gross,
+            # Beim Verkauf rechnet Binance die Gebuehr in der
+            # Quote-Waehrung ab (USDT), nicht im Base-Asset.
+            "fills": [
+                {
+                    "price": self.price,
+                    "qty": quantity,
+                    "commission": gross * self.commission_rate,
+                    "commissionAsset": "USDT",
+                }
+            ],
+        }
 
     def place_stop_loss_limit_sell(
         self, symbol: str, quantity: float, stop_price: float, limit_price: float
@@ -963,6 +1023,125 @@ class TrendStopLossProtectionTestCase(TrendStrategyTestBase):
 
         self.assertEqual(dry_client.stop_order_calls, [])
         self.assertEqual(dry_strategy._ledger.open_position()["unprotected_cycles"], 0)
+
+
+class TrendTradingRulesTestCase(TrendStrategyTestBase):
+    """
+    Tests für die Anbindung an die echten Handelsregeln und die
+    Gebührenkorrektur (Sicherheitsreview-Punkt K3, siehe order_utils.py).
+
+    Der eigentliche Live-Schaden bei diesem Bot: die beim Kauf gespeicherte
+    Menge wird direkt für die exchange-seitige Stop-Loss-Order verwendet.
+    Ist sie um die Gebühr zu hoch, lehnt die Börse die Order ab - und die
+    Position steht ohne Absicherung da, genau das, was der Stop-Loss
+    verhindern soll.
+    """
+
+    def test_buy_with_btc_commission_reduces_stored_quantity(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.commission_rate = 0.001  # 0,1%, Live-Standardsatz
+        client.commission_asset = "BTC"
+
+        strategy._open_position(50_000.0)
+
+        open_trade = strategy._ledger.open_position()
+        gross_quantity = 15.0 / 50_000.0  # 0.0003
+        self.assertLess(
+            open_trade["quantity"],
+            gross_quantity,
+            "Die gespeicherte Menge muss um die BTC-Gebühr gekürzt sein",
+        )
+        # 0.0003 - 0.0000003 = 0.0002997 -> auf stepSize 0.00001 abgerundet
+        self.assertAlmostEqual(open_trade["quantity"], 0.00029, places=10)
+
+    def test_stop_order_uses_fee_adjusted_quantity(self):
+        """
+        Der Kern von K3 für den Trend-Bot: die Stop-Loss-Order darf nur
+        über die tatsächlich verfügbare Menge laufen.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.commission_rate = 0.001
+
+        strategy._open_position(50_000.0)
+
+        open_trade = strategy._ledger.open_position()
+        _, stop_quantity, _, _ = client.stop_order_calls[0]
+        self.assertAlmostEqual(stop_quantity, open_trade["quantity"], places=12)
+        self.assertLess(stop_quantity, 15.0 / 50_000.0)
+
+    def test_buy_with_bnb_commission_leaves_quantity_unchanged(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.commission_rate = 0.001
+        client.commission_asset = "BNB"  # BNB-Rabatt aktiv
+
+        strategy._open_position(50_000.0)
+
+        self.assertAlmostEqual(
+            strategy._ledger.open_position()["quantity"], 15.0 / 50_000.0, places=10
+        )
+
+    def test_sell_proceeds_are_net_of_quote_commission(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+
+        client.commission_rate = 0.001  # gilt ab jetzt auch für den Verkauf
+        strategy._close_position(open_trade, price=50_000.0, reason="signal")
+
+        closed = strategy._ledger._read()[0]
+        gross = open_trade["quantity"] * client.price
+        expected_pnl = gross * (1 - 0.001) - open_trade["quote_spent"]
+        self.assertAlmostEqual(closed["realized_pnl"], expected_pnl, places=8)
+        self.assertLess(
+            closed["realized_pnl"],
+            gross - open_trade["quote_spent"],
+            "Bruttoerlös wäre zu optimistisch",
+        )
+
+    def test_trading_rules_failure_is_not_silently_ignored(self):
+        """
+        Ohne tickSize/stepSize lässt sich keine Order sicher runden - der
+        Fehler muss durchschlagen statt auf stille Defaults auszuweichen.
+        Entscheidend: er passiert VOR jeder Order, es bleibt also nichts
+        Halbfertiges zurück.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.force_trading_rules_failure = True
+
+        with self.assertRaises(RuntimeError):
+            strategy._open_position(50_000.0)
+
+        self.assertEqual(client.market_buy_calls, [], "Keine Order ohne gültige Regeln")
+        self.assertIsNone(strategy._ledger.open_position(), "Kein halber Ledger-Eintrag")
+
+    def test_rules_are_fetched_before_the_buy_order(self):
+        """
+        Reihenfolge ist sicherheitsrelevant: würden die Regeln erst NACH
+        dem Kauf gebraucht, könnte ein Fehler dort einen real ausgeführten
+        Kauf unverbucht lassen.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+
+        strategy._open_position(50_000.0)
+
+        self.assertGreaterEqual(client.trading_rules_calls, 1)
+
+    def test_dry_run_quantity_is_quantized_but_not_fee_adjusted(self):
+        """
+        Im Dry-Run gibt es keinen Fill und damit keine bekannte Gebühr -
+        sie wird bewusst nicht geschätzt. Quantisiert wird trotzdem, damit
+        simulierte und echte Werte vergleichbar bleiben.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=51_234.0)
+        client.commission_rate = 0.001  # darf im Dry-Run keine Wirkung haben
+
+        strategy._open_position(51_234.0)
+
+        quantity = strategy._ledger.open_position()["quantity"]
+        raw = 15.0 / 51_234.0
+        self.assertLessEqual(quantity, raw)
+        steps = quantity / FAKE_TRADING_RULES.step_size
+        self.assertAlmostEqual(steps, round(steps), places=6)
 
 
 if __name__ == "__main__":

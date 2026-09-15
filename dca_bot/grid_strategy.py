@@ -22,6 +22,7 @@ from .grid_config import GridConfig
 from .grid_risk import GridLedger, GridPosition, GridStopLoss
 from .grid_signals import compute_grid_levels, find_triggered_buy_levels, is_sell_target_hit
 from .notifier import send_notification
+from .order_utils import net_executed_quantity, net_proceeds, quantize_quantity
 from .risk import KillSwitch
 
 logger = logging.getLogger("grid_bot")
@@ -70,7 +71,20 @@ class GridTradingStrategy:
         nicht und darf deshalb auch nach einem Umschalten auf echtes
         Trading niemals real verkauft werden.
         """
-        for record in self._ledger.open_positions():
+        open_positions = self._ledger.open_positions()
+        if not any(
+            is_sell_target_hit(price, r["target_sell_price"]) for r in open_positions
+        ):
+            return
+
+        # Handelsregeln bewusst VOR dem ersten Verkaufsversuch holen
+        # (danach aus dem Cache): schlägt der Abruf fehl, bricht der
+        # Zyklus ab, ohne dass eine Order existiert. Nach einem
+        # ausgeführten Verkauf hier eine Exception zu riskieren, würde die
+        # Position unverkauft im Ledger stehen lassen, obwohl sie weg ist.
+        rules = self._client.get_symbol_trading_rules(self._config.symbol)
+
+        for record in open_positions:
             if not is_sell_target_hit(price, record["target_sell_price"]):
                 continue
 
@@ -120,7 +134,9 @@ class GridTradingStrategy:
                     continue
 
             if order is not None:
-                proceeds = float(order.get("cummulativeQuoteQty", record["quantity"] * price))
+                # Netto, also abzüglich der in USDT abgerechneten
+                # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
+                proceeds = net_proceeds(order, rules, fallback=record["quantity"] * price)
             else:
                 proceeds = record["quantity"] * price
             realized_pnl = proceeds - record["quote_spent"]
@@ -193,6 +209,13 @@ class GridTradingStrategy:
         triggered_levels = find_triggered_buy_levels(
             self._levels, self._last_seen_price, price, occupied_levels
         )
+        if not triggered_levels:
+            return
+
+        # Siehe _process_sells: Regeln vor der ersten Order holen, damit
+        # ein Fehlschlag folgenlos abbricht statt einen bereits
+        # ausgeführten Kauf unverbucht zu lassen.
+        rules = self._client.get_symbol_trading_rules(self._config.symbol)
 
         for level_index in triggered_levels:
             order = self._client.place_market_buy(self._config.symbol, self._config.amount_per_level)
@@ -212,10 +235,19 @@ class GridTradingStrategy:
                 continue
 
             if order is not None:
-                quantity = float(order.get("executedQty", self._config.amount_per_level / price))
+                # Menge abzüglich der in BTC abgezogenen Kaufgebühr - genau
+                # diese Menge steht später für den Verkauf zur Verfügung.
+                quantity = net_executed_quantity(
+                    order, rules, fallback=self._config.amount_per_level / price
+                )
                 quote_spent = float(order.get("cummulativeQuoteQty", self._config.amount_per_level))
             else:
-                quantity = self._config.amount_per_level / price
+                # Dry-Run: keine echte Gebühr bekannt, deshalb keine
+                # geschätzte abgezogen - die Menge wird aber quantisiert,
+                # damit simulierte und echte Werte vergleichbar bleiben.
+                quantity = quantize_quantity(
+                    self._config.amount_per_level / price, rules.step_size
+                )
                 quote_spent = self._config.amount_per_level
 
             position = GridPosition.new(
