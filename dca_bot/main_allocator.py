@@ -24,6 +24,7 @@ from .binance_client import TradingClient
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .risk import BotHalted, KillSwitch
+from .version import get_code_version
 
 KILL_SWITCH_POLL_SECONDS = 5
 
@@ -61,6 +62,7 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("Kapital-Allocator startet")
+    logger.info("Code-Version: %s", get_code_version())
     logger.info(
         "Symbol: %s | EMA %d/%d | Anker %.1f%%-%.1f%% | Glättung: %d Zyklen | "
         "Intervall: %dmin",

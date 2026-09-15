@@ -20,6 +20,7 @@ from .grid_strategy import GridTradingStrategy
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .risk import BotHalted, KillSwitch
+from .version import get_code_version
 
 # Wie oft während der Wartezeit zwischen zwei Zyklen geprüft wird, ob der
 # Notaus ausgelöst wurde - kurz genug, um "sofort" zu wirken.
@@ -59,6 +60,7 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("Grid-Trading-Bot startet")
+    logger.info("Code-Version: %s", get_code_version())
     logger.info(
         "Symbol: %s | Grid: %.2f - %.2f | Abstand: %.2f%% | Betrag/Stufe: %.2f | Intervall: %dmin",
         config.symbol,

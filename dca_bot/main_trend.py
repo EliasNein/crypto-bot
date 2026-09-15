@@ -21,6 +21,7 @@ from .notifier import send_notification
 from .risk import BotHalted, KillSwitch
 from .trend_config import load_trend_config
 from .trend_strategy import TrendFollowingStrategy
+from .version import get_code_version
 
 # Wie oft während der Wartezeit zwischen zwei Zyklen geprüft wird, ob der
 # Notaus ausgelöst wurde - kurz genug, um "sofort" zu wirken.
@@ -60,6 +61,7 @@ def main() -> None:
 
     logger.info("=" * 60)
     logger.info("Trend-Following-Bot startet")
+    logger.info("Code-Version: %s", get_code_version())
     logger.info(
         "Symbol: %s | EMA %d/%d | Mindestabstand: %.2f%% | Betrag/Trade: %.2f | "
         "Stop-Loss: %.1f%% | Intervall: %dh",
