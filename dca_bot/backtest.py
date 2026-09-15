@@ -75,6 +75,12 @@ def fetch_historical_klines(
                 {
                     "open_time": candle[0],
                     "close_price": float(candle[4]),
+                    # Zusätzlich zum Schlusskurs: Low der Kerze - additiv,
+                    # bestehende Konsumenten (DCA/Grid/Trend/Allocator)
+                    # nutzen weiterhin nur close_price. Wird aktuell nur
+                    # von trend_backtest.py (Stop-Limit-Zuverlässigkeits-
+                    # Analyse, Low-basierter Fill-Proxy) genutzt.
+                    "low_price": float(candle[3]),
                 }
             )
 

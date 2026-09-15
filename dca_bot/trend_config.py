@@ -37,6 +37,12 @@ class TrendConfig:
     trading_enabled: bool = False        # Muss explizit auf True gesetzt werden
     kill_switch_file: str = "STOP_TREND"  # Eigene Notaus-Datei, unabhängig von DCA/Grid
     stop_loss_pct: float = 10.0     # Fixer Stop-Loss unterhalb des Einstiegspreises in %
+    # Abstand zwischen Stop-Preis und Limit-Preis der echten, exchange-
+    # seitigen Stop-Loss-Order in %: limit_price = stop_price * (1 -
+    # stop_limit_offset_pct/100). Ohne diesen Puffer könnte die Order bei
+    # einem schnellen Kurssturz durch den Limit-Preis "durchrutschen" und
+    # ungefüllt im Orderbuch hängen bleiben.
+    stop_limit_offset_pct: float = 0.5
     state_file: str = "data/trend_ledger.json"
     stop_loss_state_file: str = "data/trend_stop_loss_paused.json"
 
@@ -87,6 +93,7 @@ def load_trend_config() -> TrendConfig:
         trading_enabled=os.getenv("TREND_BOT_ENABLE_TRADING", "false").lower() == "true",
         kill_switch_file=os.getenv("TREND_KILL_SWITCH_FILE", "STOP_TREND"),
         stop_loss_pct=float(os.getenv("TREND_STOP_LOSS_PCT", "10.0")),
+        stop_limit_offset_pct=float(os.getenv("TREND_STOP_LIMIT_OFFSET_PCT", "0.5")),
         state_file=os.getenv("TREND_STATE_FILE", "data/trend_ledger.json"),
         stop_loss_state_file=os.getenv(
             "TREND_STOP_LOSS_STATE_FILE", "data/trend_stop_loss_paused.json"

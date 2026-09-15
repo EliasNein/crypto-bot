@@ -101,6 +101,119 @@ def compute_sharpe_like_ratio(daily_pnl_changes: list[float]) -> float:
     return (mean / stdev) * (365 ** 0.5)
 
 
+@dataclass
+class StopLimitReliabilityResult:
+    """
+    NÄHERUNG basierend auf Tageskerzen-Low, KEIN exaktes Intraday-Ergebnis
+    (siehe analyze_stop_limit_reliability für die Methodik) - nur zur
+    groben Einordnung, wie zuverlässig die echte, exchange-seitige
+    STOP_LOSS_LIMIT-Order (siehe trend_strategy.py/binance_client.py) im
+    Vergleich zum bisher simulierten Market-Sell-Exit gewesen wäre.
+    """
+    num_stop_loss_exits: int
+    # offset_pct -> Anzahl Fälle, in denen die Order NICHT am Exit-Tag
+    # selbst gefüllt worden wäre (Low der Exit-Kerze über dem Limit-Preis).
+    unfilled_counts: dict[float, int]
+    # offset_pct -> größter einzelner Zusatzverlust unter den ungefüllten
+    # Fällen (kann rechnerisch auch negativ sein = ein Vorteil, falls sich
+    # der Kurs bis zur tatsächlichen Füllung erholt hat).
+    worst_extra_loss: dict[float, float]
+    worst_extra_loss_detail: dict[float, str | None]
+
+
+def analyze_stop_limit_reliability(
+    trade_log: list[dict],
+    klines: list[dict],
+    stop_loss_pct: float,
+    offsets_pct: list[float],
+    fee_pct: float,
+) -> StopLimitReliabilityResult:
+    """
+    NÄHERUNG basierend auf Tageskerzen-Low - der Bot prüft/handelt live
+    alle 24h auf Tageskerzen (siehe trend_strategy.py), Tageskerzen zeigen
+    aber nicht den exakten Intraday-Verlauf. KEIN Ersatz für ein echtes
+    Orderbuch-/Tick-Backtest, nur eine grobe erste Einordnung.
+
+    Für jeden simulierten Stop-Loss-Exit in `trade_log` (exit_reason ==
+    "stop_loss"): berechnet stop_price = entry_price * (1 -
+    stop_loss_pct/100) (exakt wie beim echten Entry, siehe
+    trend_strategy.py._open_position) und für jeden offset_pct den
+    zugehörigen limit_price = stop_price * (1 - offset_pct/100).
+
+    Eine echte STOP_LOSS_LIMIT-Order gilt als am Exit-Tag gefüllt, wenn
+    das Low dieser Kerze auf/unter limit_price fällt (die Order kann bei
+    einem Limit-Sell nie schlechter als der Limit-Preis gefüllt werden -
+    berührt/unterschreitet der Kurs ihn, wäre sie dort gefüllt worden).
+    Falls nicht: sucht die nächste spätere Kerze, deren Low unter
+    limit_price fällt (dort angenommener Füllpreis = limit_price selbst)
+    und vergleicht das mit dem ursprünglich simulierten Exit-Preis
+    (Zusatzverlust = wie viel schlechter/besser der spätere Fill
+    gegenüber dem sofortigen Market-Sell gewesen wäre). Bleibt die Order
+    bis zum Ende der verfügbaren Daten ungefüllt, wird ersatzweise der
+    letzte verfügbare Schlusskurs verwendet (klar als Näherung markiert -
+    kann auch einen "negativen Zusatzverlust", also einen Vorteil,
+    ergeben, falls sich der Kurs bis dahin erholt hätte).
+    """
+    by_date_low: dict[str, float] = {}
+    by_date_close: dict[str, float] = {}
+    for candle in klines:
+        date_str = datetime.fromtimestamp(candle["open_time"] / 1000).strftime("%Y-%m-%d")
+        by_date_low[date_str] = candle["low_price"]
+        by_date_close[date_str] = candle["close_price"]
+    sorted_dates = sorted(by_date_low.keys())
+    last_date = sorted_dates[-1] if sorted_dates else None
+    last_close = by_date_close[last_date] if last_date is not None else None
+
+    stop_loss_trades = [t for t in trade_log if t["exit_reason"] == "stop_loss"]
+
+    unfilled_counts = {offset: 0 for offset in offsets_pct}
+    worst_extra_loss = {offset: 0.0 for offset in offsets_pct}
+    worst_extra_loss_detail: dict[float, str | None] = {offset: None for offset in offsets_pct}
+
+    for trade in stop_loss_trades:
+        stop_price = trade["entry_price"] * (1 - stop_loss_pct / 100)
+        exit_date = trade["exit_date"]
+        exit_low = by_date_low.get(exit_date)
+
+        for offset in offsets_pct:
+            limit_price = stop_price * (1 - offset / 100)
+
+            if exit_low is not None and exit_low <= limit_price:
+                continue  # gilt als am Exit-Tag selbst gefüllt, kein Zusatzverlust
+
+            unfilled_counts[offset] += 1
+
+            fill_date = None
+            for date_str in sorted_dates:
+                if date_str <= exit_date:
+                    continue
+                if by_date_low[date_str] <= limit_price:
+                    fill_date = date_str
+                    break
+
+            if fill_date is not None:
+                fallback_price = limit_price
+                note = f"gefüllt am {fill_date}"
+            else:
+                fallback_price = last_close
+                note = f"bis Datenende ({last_date}) ungefüllt, Näherung mit letztem Schlusskurs"
+
+            if fallback_price is None:
+                continue  # keine Daten vorhanden - überspringen
+
+            extra_loss = (trade["exit_price"] - fallback_price) * trade["quantity"] * (1 - fee_pct / 100)
+            if extra_loss > worst_extra_loss[offset]:
+                worst_extra_loss[offset] = extra_loss
+                worst_extra_loss_detail[offset] = f"Einstieg {trade['entry_date']}, Exit {exit_date} ({note})"
+
+    return StopLimitReliabilityResult(
+        num_stop_loss_exits=len(stop_loss_trades),
+        unfilled_counts=unfilled_counts,
+        worst_extra_loss=worst_extra_loss,
+        worst_extra_loss_detail=worst_extra_loss_detail,
+    )
+
+
 def run_trend_backtest(
     klines: list[dict],
     symbol: str,
@@ -180,6 +293,7 @@ def run_trend_backtest(
                     "exit_price": price,
                     "exit_reason": "stop_loss",
                     "pnl": pnl,
+                    "quantity": open_trade["quantity"],
                 }
             )
             open_trade = None
@@ -199,6 +313,7 @@ def run_trend_backtest(
                         "exit_price": price,
                         "exit_reason": "signal",
                         "pnl": pnl,
+                        "quantity": open_trade["quantity"],
                     }
                 )
                 open_trade = None
@@ -319,6 +434,22 @@ def main() -> None:
             "dass ein Mensch periodisch manuell zurücksetzt."
         ),
     )
+    parser.add_argument(
+        "--analyze-stop-limit-reliability",
+        action="store_true",
+        help=(
+            "NUR Analyse, NICHT das Live-Verhalten: prüft näherungsweise "
+            "(Tageskerzen-Low als Fill-Proxy), wie oft die echte, "
+            "exchange-seitige STOP_LOSS_LIMIT-Order (siehe "
+            "TREND_STOP_LIMIT_OFFSET_PCT) am simulierten Exit-Tag NICHT "
+            "gefüllt worden wäre, für mehrere Offset-Werte."
+        ),
+    )
+    parser.add_argument(
+        "--stop-limit-offsets",
+        default="0.5,1.0,2.0",
+        help="Kommagetrennte Offset-Werte in %% für --analyze-stop-limit-reliability.",
+    )
     args = parser.parse_args()
 
     if args.simulate_reset_after_days is not None:
@@ -334,6 +465,17 @@ def main() -> None:
         periods = [(f"{args.start} bis {args.end}", args.start, args.end)]
     else:
         periods = DEFAULT_PERIODS
+
+    if args.analyze_stop_limit_reliability:
+        print(
+            "\n*** ANALYSE-MODUS: Stop-Limit-Zuverlässigkeit (NÄHERUNG "
+            "basierend auf Tageskerzen-Low, KEIN exaktes Intraday-"
+            "Ergebnis). Prüft für die Offsets "
+            f"{args.stop_limit_offsets}%, wie oft die echte STOP_LOSS_LIMIT-"
+            "Order am simulierten Exit-Tag NICHT gefüllt worden wäre. ***"
+        )
+    stop_limit_offsets = [float(v) for v in args.stop_limit_offsets.split(",")]
+    reliability_rows: list[tuple[str, StopLimitReliabilityResult]] = []
 
     for label, start, end in periods:
         print(f"\n\n{'#' * 60}")
@@ -359,8 +501,72 @@ def main() -> None:
                 reset_cooldown_days=args.simulate_reset_after_days,
             )
             print_report(result, label)
+
+            if args.analyze_stop_limit_reliability:
+                reliability = analyze_stop_limit_reliability(
+                    result.trade_log, klines, args.stop_loss_pct, stop_limit_offsets, args.fee_pct
+                )
+                reliability_rows.append((label, reliability))
         except ValueError as exc:
             print(f"Übersprungen: {exc}")
+
+    if args.analyze_stop_limit_reliability:
+        print_stop_limit_reliability_table(reliability_rows, stop_limit_offsets)
+
+
+def print_stop_limit_reliability_table(
+    rows: list[tuple[str, "StopLimitReliabilityResult"]], offsets_pct: list[float]
+) -> None:
+    print(f"\n\n{'#' * 70}")
+    print("# Stop-Limit-Zuverlässigkeit - NÄHERUNG basierend auf Tageskerzen-Low")
+    print(f"{'#' * 70}")
+    print(
+        "ACHTUNG: Näherung, KEIN exaktes Intraday-Ergebnis. Eine Order gilt als\n"
+        "am Exit-Tag gefüllt, wenn das Low dieser Tageskerze auf/unter den\n"
+        "Limit-Preis fällt - Tageskerzen zeigen aber nicht den echten\n"
+        "Intraday-Verlauf (z.B. ein kurzes Unterschreiten, das die Tageskerze\n"
+        "nicht auflöst, oder umgekehrt ein Low, das nur für Sekunden erreicht\n"
+        "wurde). Nur zur groben ersten Einordnung, kein Ersatz für ein echtes\n"
+        "Orderbuch-/Tick-Backtest."
+    )
+
+    header = (
+        f"{'Zeitraum':<32} | {'Exits':>5} | "
+        + " | ".join(f"ungef. {o:g}%".rjust(11) for o in offsets_pct)
+        + " | Größter Zusatzverlust"
+    )
+    print(f"\n{header}")
+    print("-" * len(header))
+
+    worst_overall: dict[float, tuple[float, str, str]] = {}  # offset -> (loss, period, detail)
+    for label, reliability in rows:
+        unfilled_str = " | ".join(
+            str(reliability.unfilled_counts[o]).rjust(11) for o in offsets_pct
+        )
+        worst_offset = max(offsets_pct, key=lambda o: reliability.worst_extra_loss[o])
+        worst_value = reliability.worst_extra_loss[worst_offset]
+        print(
+            f"{label:<32} | {reliability.num_stop_loss_exits:>5} | {unfilled_str} | "
+            f"{worst_value:+,.2f} (@ {worst_offset:g}%)"
+        )
+
+        for o in offsets_pct:
+            loss = reliability.worst_extra_loss[o]
+            if o not in worst_overall or loss > worst_overall[o][0]:
+                detail = reliability.worst_extra_loss_detail[o] or "-"
+                worst_overall[o] = (loss, label, detail)
+
+    print(f"\n{'-' * 70}")
+    print("Details zum jeweils größten Zusatzverlust je Offset (über alle Zeiträume):")
+    for o in offsets_pct:
+        loss, label, detail = worst_overall[o]
+        print(f"  {o:g}%: {loss:+,.2f} in '{label}' - {detail}")
+    print(
+        "\nHinweis: Ein Zusatzverlust von 0,00 heißt entweder 'immer am Exit-Tag\n"
+        "selbst gefüllt' ODER 'kein einziger ungefüllter Fall in diesem\n"
+        "Zeitraum/Offset' - siehe die 'ungef.'-Spalten für die genaue Anzahl."
+    )
+    print(f"{'#' * 70}")
 
 
 if __name__ == "__main__":

@@ -93,3 +93,99 @@ class TradingClient:
         except (BinanceAPIException, BinanceOrderException) as exc:
             logger.error("Fehler beim Platzieren der Sell-Order: %s", exc)
             return None
+
+    def place_stop_loss_limit_sell(
+        self, symbol: str, quantity: float, stop_price: float, limit_price: float
+    ) -> dict | None:
+        """
+        Platziert eine echte, exchange-seitige STOP_LOSS_LIMIT-Sell-Order:
+        löst aus, sobald der Marktpreis `stop_price` erreicht, wird dann
+        als Limit-Order zu `limit_price` (leicht unter `stop_price`, siehe
+        TREND_STOP_LIMIT_OFFSET_PCT) ins Orderbuch gelegt. Anders als der
+        software-interne Stop-Loss (der nur wirkt, solange der Bot-Prozess
+        läuft) übernimmt die Börse selbst die Überwachung - schützt eine
+        offene Position auch bei Bot-/Internet-/Stromausfall.
+
+        Gleiche Sicherheits-/Fehlerlogik wie die übrigen place_*-Methoden:
+        Dry-Run-Schalter und niemals ein Absturz wegen eines API-Fehlers.
+        """
+        # TODO vor echtem Geld: stop_price/limit_price werden hier nur auf
+        # 2 Nachkommastellen gerundet, nicht gegen die tatsächliche
+        # PRICE_FILTER-Tick-Size des Symbols validiert. Vor dem Live-Start
+        # unbedingt durch eine echte Abfrage von Client.get_symbol_info()
+        # /exchangeInfo (PRICE_FILTER.tickSize) ersetzen - sonst kann die
+        # Order von der Börse mit "Filter failure: PRICE_FILTER" abgelehnt
+        # werden, je nach Symbol.
+        stop_price = round(stop_price, 2)
+        limit_price = round(limit_price, 2)
+
+        if not self._config.trading_enabled:
+            logger.info(
+                "[DRY-RUN] Würde Stop-Loss-Order platzieren: %s, Menge %.8f, "
+                "Stop %.2f, Limit %.2f",
+                symbol,
+                quantity,
+                stop_price,
+                limit_price,
+            )
+            return None
+
+        try:
+            order = self._client.create_order(
+                symbol=symbol,
+                side=Client.SIDE_SELL,
+                type=Client.ORDER_TYPE_STOP_LOSS_LIMIT,
+                timeInForce=Client.TIME_IN_FORCE_GTC,
+                quantity=quantity,
+                stopPrice=stop_price,
+                price=limit_price,
+            )
+            logger.info("Stop-Loss-Order erfolgreich platziert: %s", order)
+            return order
+        except (BinanceAPIException, BinanceOrderException) as exc:
+            logger.error("Fehler beim Platzieren der Stop-Loss-Order: %s", exc)
+            return None
+
+    def cancel_order(self, symbol: str, order_id: str) -> dict | None:
+        """
+        Storniert eine offene Order (z.B. eine Stop-Loss-Order vor einem
+        Signal-basierten Exit). Ein Fehlschlag - z.B. weil die Order
+        zwischenzeitlich bereits gefüllt oder storniert wurde (Binance
+        liefert dafür typischerweise Fehlercode -2011 "Unknown order
+        sent"), aber auch ein echter transienter Fehler - wird hier
+        bewusst NICHT unterschieden (jeder Fehler wird einheitlich als
+        Warnung geloggt, nicht als Fehler, und gibt None zurück). Der
+        Grund: der numerische Fehlercode allein ist keine zuverlässige
+        Grundlage für eine Sell/Nicht-Sell-Entscheidung (z.B. ob die
+        Position bereits verkauft ist) - das übernimmt die aufrufende
+        Seite (trend_strategy.py, _resolve_stop_order_before_close)
+        robuster per erneuter get_order_status()-Abfrage der tatsächlichen
+        Order-Ground-Truth statt Code-Interpretation hier. Der Code wird
+        hier nur mitgeloggt, für die Fehlersuche im Log.
+        """
+        try:
+            result = self._client.cancel_order(symbol=symbol, orderId=order_id)
+            logger.info("Order %s storniert: %s", order_id, result)
+            return result
+        except (BinanceAPIException, BinanceOrderException) as exc:
+            logger.warning(
+                "Stornieren der Order %s fehlgeschlagen (Code %s, evtl. "
+                "bereits gefüllt/storniert, evtl. transient): %s",
+                order_id,
+                getattr(exc, "code", "?"),
+                exc,
+            )
+            return None
+
+    def get_order_status(self, symbol: str, order_id: str) -> dict | None:
+        """
+        Fragt den aktuellen Status einer Order ab (z.B. um zu prüfen, ob
+        eine Stop-Loss-Order zwischenzeitlich - auch während einer
+        Bot-Downtime - gefüllt wurde). Gibt None zurück statt einer
+        Exception, falls die Abfrage fehlschlägt.
+        """
+        try:
+            return self._client.get_order(symbol=symbol, orderId=order_id)
+        except (BinanceAPIException, BinanceOrderException) as exc:
+            logger.error("Fehler beim Abfragen des Order-Status für %s: %s", order_id, exc)
+            return None
