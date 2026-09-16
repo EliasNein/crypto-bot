@@ -18,6 +18,7 @@ import time
 from .binance_client import TradingClient
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch
 from .trend_config import load_trend_config
 from .trend_strategy import TrendFollowingStrategy
@@ -81,16 +82,36 @@ def main() -> None:
         )
     logger.info("=" * 60)
 
+    # Schutz gegen einen versehentlichen doppelten Bot-Start (siehe
+    # process_lock.py): zwei Prozesse auf demselben Zustand wuerden sich
+    # gegenseitig Eintraege ueberschreiben. Bewusst ganz am Anfang, noch
+    # vor dem Lesen von Zustand oder dem Verbindungsaufbau.
+    lock = ProcessLock(config.lock_file, "trend")
+    try:
+        lock.acquire()
+    except BotAlreadyRunning as exc:
+        logger.error("%s", exc)
+        return
+
     init_notifier(config)
 
     client = TradingClient(config)
     strategy = TrendFollowingStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="TREND_BOT_HALT")
 
-    # Reconciliation VOR dem ersten Zyklus: gleicht eine im Ledger offene
-    # Position gegen den tatsächlichen Stop-Loss-Order-Status bei Binance
-    # ab, damit eine während der Downtime gefüllte Stop-Loss-Order sofort
-    # erkannt wird statt erst im nächsten regulären Zyklus.
+    # Zwei Reconciliation-Schritte, und die Reihenfolge ist bewusst so:
+    #
+    # 1. Offene Order-Fragen aus dem letzten Lauf auflösen (K2, siehe
+    #    pending_orders.py). Ein hier nachgetragener Einstieg erzeugt
+    #    eine offene Position OHNE exchange-seitige Stop-Loss-Order.
+    # 2. Den bestehenden Abgleich der Stop-Loss-Order laufen lassen: er
+    #    erkennt eine während der Downtime gefüllte Stop-Order UND
+    #    platziert über _ensure_stop_loss_protection() die Absicherung,
+    #    die der gerade nachgetragenen Position noch fehlt.
+    #
+    # Andersherum liefe Schritt 2 ins Leere - zu seinem Zeitpunkt gäbe
+    # es die nachgetragene Position noch gar nicht.
+    strategy.reconcile_pending_orders()
     strategy.reconcile_on_startup()
 
     interval_seconds = config.interval_hours * 60 * 60

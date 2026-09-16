@@ -44,6 +44,11 @@ class FakeDCAClient:
         self.commission_asset = "BTC"
         self.force_trading_rules_failure = False
         self.market_buy_calls: list[tuple] = []
+        # Siehe FakeTradingClient in tests/test_trend_stop_loss.py: seit
+        # dem K2-Fix reicht jede place_*-Methode einen `context` durch
+        # und jede Order-Antwort traegt eine clientOrderId.
+        self.order_contexts: list[dict | None] = []
+        self._next_client_order_id = 0
 
     def get_current_price(self, symbol: str) -> float:
         return self.price
@@ -53,12 +58,17 @@ class FakeDCAClient:
             raise RuntimeError("exchangeInfo nicht erreichbar (Testfall)")
         return FAKE_TRADING_RULES
 
-    def place_market_buy(self, symbol: str, quote_order_qty: float) -> dict | None:
+    def place_market_buy(
+        self, symbol: str, quote_order_qty: float, context: dict | None = None
+    ) -> dict | None:
         self.market_buy_calls.append((symbol, quote_order_qty))
+        self.order_contexts.append(context)
         if not self.trading_enabled:
             return None
+        self._next_client_order_id += 1
         executed_qty = quote_order_qty / self.price
         return {
+            "clientOrderId": f"dca-test-{self._next_client_order_id}",
             "executedQty": executed_qty,
             "cummulativeQuoteQty": quote_order_qty,
             "fills": [

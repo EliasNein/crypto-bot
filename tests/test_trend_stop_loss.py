@@ -103,10 +103,21 @@ class FakeTradingClient:
         # das nicht stillschweigend ignoriert wird.
         self.force_trading_rules_failure = False
         self.trading_rules_calls = 0
+        # Seit dem K2-Fix reicht jede place_*-Methode einen `context` an
+        # die Pending-Orders-Ablage durch (siehe binance_client.py) und
+        # jede Order-Antwort traegt eine clientOrderId. Der Fake bildet
+        # beides nach, damit die Tests denselben Codepfad durchlaufen wie
+        # der Live-Betrieb.
+        self.order_contexts: list[dict | None] = []
+        self._next_client_order_id = 0
 
     def _new_order_id(self) -> str:
         self._next_order_id += 1
         return str(self._next_order_id)
+
+    def _new_client_order_id(self) -> str:
+        self._next_client_order_id += 1
+        return f"trend-test-{self._next_client_order_id}"
 
     def get_current_price(self, symbol: str) -> float:
         return self.price
@@ -119,12 +130,16 @@ class FakeTradingClient:
             raise RuntimeError("exchangeInfo nicht erreichbar (Testfall)")
         return FAKE_TRADING_RULES
 
-    def place_market_buy(self, symbol: str, quote_order_qty: float) -> dict | None:
+    def place_market_buy(
+        self, symbol: str, quote_order_qty: float, context: dict | None = None
+    ) -> dict | None:
         self.market_buy_calls.append((symbol, quote_order_qty))
+        self.order_contexts.append(context)
         if not self.trading_enabled:
             return None
         executed_qty = quote_order_qty / self.price
         return {
+            "clientOrderId": self._new_client_order_id(),
             "executedQty": executed_qty,
             "cummulativeQuoteQty": quote_order_qty,
             # Wie eine echte Binance-Antwort: die Gebuehr steht in den
@@ -139,8 +154,11 @@ class FakeTradingClient:
             ],
         }
 
-    def place_market_sell(self, symbol: str, quantity: float) -> dict | None:
+    def place_market_sell(
+        self, symbol: str, quantity: float, context: dict | None = None
+    ) -> dict | None:
         self.market_sell_calls.append((symbol, quantity))
+        self.order_contexts.append(context)
         self.call_log.append("place_market_sell")
         if not self.trading_enabled:
             return None
@@ -148,6 +166,7 @@ class FakeTradingClient:
             return None
         gross = quantity * self.price
         return {
+            "clientOrderId": self._new_client_order_id(),
             "cummulativeQuoteQty": gross,
             # Beim Verkauf rechnet Binance die Gebuehr in der
             # Quote-Waehrung ab (USDT), nicht im Base-Asset.
@@ -162,9 +181,15 @@ class FakeTradingClient:
         }
 
     def place_stop_loss_limit_sell(
-        self, symbol: str, quantity: float, stop_price: float, limit_price: float
+        self,
+        symbol: str,
+        quantity: float,
+        stop_price: float,
+        limit_price: float,
+        context: dict | None = None,
     ) -> dict | None:
         self.stop_order_calls.append((symbol, quantity, stop_price, limit_price))
+        self.order_contexts.append(context)
         if not self.trading_enabled:
             return None
         if self.force_stop_order_failure:
@@ -172,6 +197,7 @@ class FakeTradingClient:
         order_id = self._new_order_id()
         order = {
             "orderId": order_id,
+            "clientOrderId": self._new_client_order_id(),
             "status": "NEW",
             "executedQty": "0",
             "cummulativeQuoteQty": "0",

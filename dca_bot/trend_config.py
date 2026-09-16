@@ -46,6 +46,14 @@ class TrendConfig:
     state_file: str = "data/trend_ledger.json"
     stop_loss_state_file: str = "data/trend_stop_loss_paused.json"
 
+    # Siehe config.py (DCA) für die Begründung dieser drei Felder -
+    # Präfix der selbstvergebenen Order-IDs, offene Order-Fragen (K2)
+    # und Schutz gegen doppelten Bot-Start. Jeweils eigene Dateien,
+    # komplett getrennt von DCA/Grid.
+    bot_name: str = "trend"
+    pending_orders_file: str = "data/pending_orders_trend.json"
+    lock_file: str = "data/trend_bot.lock"
+
     # --- Kapital-Allocator (optional, siehe allocator.py) ---
     # Leer = deaktiviert (Default): der Bot verhält sich dann exakt wie
     # ohne Allocator, unverändertes Standardverhalten. Nur wenn explizit
@@ -98,6 +106,10 @@ def load_trend_config() -> TrendConfig:
         stop_loss_state_file=os.getenv(
             "TREND_STOP_LOSS_STATE_FILE", "data/trend_stop_loss_paused.json"
         ),
+        pending_orders_file=os.getenv(
+            "TREND_PENDING_ORDERS_FILE", "data/pending_orders_trend.json"
+        ),
+        lock_file=os.getenv("TREND_LOCK_FILE", "data/trend_bot.lock"),
         allocator_state_file=os.getenv("TREND_ALLOCATOR_STATE_FILE", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),

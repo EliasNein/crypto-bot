@@ -63,6 +63,23 @@ class TradeRecord:
     quantity: float
     price: float
     dry_run: bool
+    # Die von uns selbst vergebene `newClientOrderId` der zugehörigen
+    # Börsen-Order (siehe pending_orders.py) - None im Dry-Run und bei
+    # allen Einträgen aus der Zeit vor dem K2-Fix.
+    #
+    # Dieses Feld ist hier der IDEMPOTENZSCHLÜSSEL, und das ist der
+    # Grund, warum es überhaupt existiert: Grid und Trend führen pro
+    # Trade eine eigene `id` plus ein `status`-Feld, ein doppeltes
+    # Nachtragen fällt dort von selbst auf ("ist schon geschlossen").
+    # Das DCA-Ledger ist dagegen eine reine append-only Liste ohne
+    # Status - stürzt der Bot zwischen Ledger-Eintrag und dem Entfernen
+    # des Pending-Eintrags ab, würde die Reconciliation beim nächsten
+    # Start denselben Kauf ein zweites Mal anhängen und damit Tageslimit
+    # und Stop-Loss-Kostenbasis verfälschen. Genau der Schaden, den K2
+    # verhindern soll, nur mit umgekehrtem Vorzeichen. Über dieses Feld
+    # lässt sich "kenne ich schon" beantworten, ohne das append-only-
+    # Modell aufzugeben.
+    client_order_id: str | None = None
 
 
 class TradeLedger:
@@ -102,6 +119,17 @@ class TradeLedger:
         records = self._read()
         records.append(asdict(trade))
         self._write(records)
+
+    def has_client_order_id(self, client_order_id: str) -> bool:
+        """
+        Ob zu dieser Börsen-Order bereits ein Eintrag existiert.
+
+        Basis der Idempotenz beim Nachtragen aus der Pending-Orders-Datei
+        (siehe TradeRecord.client_order_id und
+        strategy.py.reconcile_pending_orders). Alte Einträge ohne das
+        Feld liefern None und können deshalb nie versehentlich matchen.
+        """
+        return any(r.get("client_order_id") == client_order_id for r in self._read())
 
     def spent_on_day(self, symbol: str, day: date) -> float:
         """Summe aller (auch simulierten) Käufe eines Symbols an einem Tag."""

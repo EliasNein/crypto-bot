@@ -31,6 +31,15 @@ class TrendTrade:
     quantity: float
     quote_spent: float
     dry_run: bool
+    # Selbstvergebene `newClientOrderId` der EINSTIEGS-Order (siehe
+    # pending_orders.py) - None im Dry-Run und bei Trades aus der Zeit
+    # vor dem K2-Fix. Erlaubt beim Nachtragen aus der
+    # Pending-Orders-Datei die Frage "kenne ich diese Order schon?";
+    # die lokale `id` oben taugt dafür nicht, die hat die Börse nie
+    # gesehen. Bewusst nur für den Einstieg: Exit-Order und
+    # Stop-Loss-Order hängen über die Trade-ID am selben Eintrag und
+    # sind über `status` bzw. `stop_loss_order_id` schon eindeutig.
+    client_order_id: str | None = None
     # ID der echten, exchange-seitigen STOP_LOSS_LIMIT-Order (siehe
     # binance_client.place_stop_loss_limit_sell) - None im Dry-Run (dort
     # wird nie eine echte Order platziert, siehe trend_strategy.py).
@@ -66,7 +75,13 @@ class TrendTrade:
     realized_pnl: float | None = None
 
     @staticmethod
-    def new(entry_price: float, quantity: float, quote_spent: float, dry_run: bool) -> "TrendTrade":
+    def new(
+        entry_price: float,
+        quantity: float,
+        quote_spent: float,
+        dry_run: bool,
+        client_order_id: str | None = None,
+    ) -> "TrendTrade":
         return TrendTrade(
             id=str(uuid.uuid4()),
             entry_price=entry_price,
@@ -74,6 +89,7 @@ class TrendTrade:
             quantity=quantity,
             quote_spent=quote_spent,
             dry_run=dry_run,
+            client_order_id=client_order_id,
         )
 
 
@@ -111,6 +127,21 @@ class TrendLedger:
             if r["status"] == "open":
                 return r
         return None
+
+    def trade_by_id(self, trade_id: str) -> dict | None:
+        """Ein Trade (offen oder geschlossen) über seine lokale ID."""
+        for r in self._read():
+            if r["id"] == trade_id:
+                return r
+        return None
+
+    def has_client_order_id(self, client_order_id: str) -> bool:
+        """
+        Ob zu dieser Börsen-Einstiegs-Order bereits ein Trade existiert -
+        Basis der Idempotenz beim Nachtragen aus der Pending-Orders-Datei
+        (siehe TrendTrade.client_order_id).
+        """
+        return any(r.get("client_order_id") == client_order_id for r in self._read())
 
     def record_entry(self, trade: TrendTrade) -> None:
         records = self._read()

@@ -19,7 +19,12 @@ from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fract
 from .binance_client import TradingClient
 from .config import Config
 from .notifier import send_notification
-from .order_utils import net_executed_quantity, quantize_quantity
+from .order_utils import average_fill_price, net_executed_quantity, quantize_quantity
+from .pending_orders import (
+    RECONCILIATION_PREFIX,
+    PendingOrder,
+    reconcile_pending_orders,
+)
 from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord
 
 logger = logging.getLogger("dca_bot")
@@ -49,6 +54,104 @@ class DCAStrategy:
             )
             return False
         return True
+
+    def reconcile_pending_orders(self) -> None:
+        """
+        Trägt beim Bot-Start Käufe nach, deren Ausgang beim letzten Lauf
+        offen geblieben ist (Sicherheitsreview-Punkt K2, Teil B - siehe
+        pending_orders.py und main.py, das diese Methode vor der
+        Hauptschleife aufruft).
+
+        Ohne diesen Schritt fehlte die gekaufte Menge dauerhaft im
+        Ledger: Tageslimit und Stop-Loss-Kostenbasis wären für immer zu
+        niedrig, und zwar ohne dass irgendetwas darauf hinweist.
+        """
+        reconcile_pending_orders(
+            client=self._client,
+            store=self._client.pending_orders,
+            bot_logger=logger,
+            apply_confirmed=self._record_reconciled_buy,
+        )
+
+    def _record_reconciled_buy(self, pending: PendingOrder, order: dict) -> None:
+        """
+        Schreibt einen nachträglich bestätigten Kauf ins Ledger.
+
+        Idempotent über `client_order_id`: stirbt der Prozess zwischen
+        diesem Ledger-Eintrag und dem Entfernen des Pending-Eintrags,
+        landet derselbe Kauf beim nächsten Start sonst ein zweites Mal
+        im append-only Ledger - und verfälscht damit genau die beiden
+        Größen, die der Eintrag eigentlich korrigieren soll (siehe
+        TradeRecord.client_order_id in risk.py).
+        """
+        if self._ledger.has_client_order_id(pending.client_order_id):
+            logger.info(
+                "%sKauf zu Order %s ist bereits im Ledger - nichts nachzutragen.",
+                RECONCILIATION_PREFIX,
+                pending.client_order_id,
+            )
+            return
+
+        if pending.side != "BUY":
+            # Der DCA-Bot verkauft nie. Ein SELL-Eintrag kann hier nur
+            # durch eine manuell veränderte Datei entstehen - dann lieber
+            # laut abbrechen als etwas Erfundenes verbuchen (die
+            # Exception hält den Pending-Eintrag fest, siehe
+            # reconcile_pending_orders).
+            raise ValueError(
+                f"Unerwartete Order-Seite '{pending.side}' in der "
+                "Pending-Orders-Datei des DCA-Bots - er platziert nur Käufe."
+            )
+
+        symbol = pending.symbol or self._config.symbol
+        amount = float(pending.context.get("amount", self._config.quote_amount))
+
+        rules = self._client.get_symbol_trading_rules(symbol)
+        # get_order()-Antworten enthalten keine Fills und damit keine
+        # Gebühren - ohne diesen Schritt käme die BRUTTO-Menge ins
+        # Ledger und würde den Portfoliowert überschätzen (K3).
+        order = self._client.get_order_with_fills(symbol, order)
+
+        price = average_fill_price(
+            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
+        )
+        if price <= 0:
+            raise ValueError(
+                f"Kein brauchbarer Preis für Order {pending.client_order_id} "
+                "ermittelbar - Ledger-Eintrag wäre wertlos."
+            )
+
+        quantity = net_executed_quantity(order, rules, fallback=amount / price)
+        quote_spent = float(order.get("cummulativeQuoteQty", amount))
+
+        self._ledger.record(
+            TradeRecord(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                symbol=symbol,
+                quote_spent=quote_spent,
+                quantity=quantity,
+                price=price,
+                dry_run=False,
+                client_order_id=pending.client_order_id,
+            )
+        )
+
+        logger.warning(
+            "%sKauf nachgetragen: %.2f %s @ %.2f (Menge %.8f, Order %s). Der "
+            "Trade wurde beim letzten Lauf ausgeführt, konnte aber nicht mehr "
+            "verbucht werden.",
+            RECONCILIATION_PREFIX,
+            quote_spent,
+            symbol,
+            price,
+            quantity,
+            pending.client_order_id,
+        )
+        send_notification(
+            f"[REKONZILIATION] Nachgetragener DCA-Kauf: {quote_spent:.2f} "
+            f"{symbol} @ {price:.2f} (Menge: {quantity:.8f}). Die Order lief "
+            "beim letzten Bot-Lauf durch, ihr Ergebnis kam aber nicht mehr an."
+        )
 
     def execute_once(self) -> None:
         """Führt genau einen DCA-Kaufzyklus aus."""
@@ -107,7 +210,14 @@ class DCAStrategy:
         # lassen - siehe get_symbol_trading_rules in binance_client.py.
         rules = self._client.get_symbol_trading_rules(symbol)
 
-        order = self._client.place_market_buy(symbol, amount)
+        # `context` landet VOR dem Netzwerk-Call in der
+        # Pending-Orders-Datei (siehe binance_client._place_order) und
+        # enthält genau das, was reconcile_pending_orders() braucht, um
+        # diesen Kauf später nachzutragen, falls die Antwort der Börse
+        # nie ankommt oder der Prozess dazwischen stirbt.
+        order = self._client.place_market_buy(
+            symbol, amount, context={"price": price, "amount": amount}
+        )
 
         if order is None and self._config.trading_enabled:
             # Echter Kaufversuch, der bei der Börse fehlgeschlagen ist
@@ -153,6 +263,10 @@ class DCAStrategy:
                 quantity=quantity,
                 price=price,
                 dry_run=not self._config.trading_enabled,
+                # Ohne diese ID könnte die Reconciliation beim nächsten
+                # Start nicht erkennen, dass dieser Kauf bereits
+                # verbucht ist (siehe TradeRecord in risk.py).
+                client_order_id=order.get("clientOrderId") if order else None,
             )
         )
 

@@ -18,6 +18,7 @@ from .binance_client import TradingClient
 from .config import Config, load_config
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch, PortfolioStopLoss, TradeLedger
 from .strategy import DCAStrategy
 from .version import get_code_version
@@ -90,11 +91,29 @@ def main() -> None:
         )
     logger.info("=" * 60)
 
+    # Schutz gegen einen versehentlichen doppelten Bot-Start (siehe
+    # process_lock.py): zwei Prozesse auf demselben Zustand wuerden sich
+    # gegenseitig Eintraege ueberschreiben. Bewusst ganz am Anfang, noch
+    # vor dem Lesen von Zustand oder dem Verbindungsaufbau.
+    lock = ProcessLock(config.lock_file, "dca")
+    try:
+        lock.acquire()
+    except BotAlreadyRunning as exc:
+        logger.error("%s", exc)
+        return
+
     init_notifier(config)
 
     client = TradingClient(config)
     strategy = DCAStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file)
+
+    # Reconciliation VOR der ersten Kaufentscheidung: falls beim letzten
+    # Lauf eine Order ausgeführt, aber nicht mehr verbucht wurde (siehe
+    # pending_orders.py, Sicherheitsreview-Punkt K2), wird sie jetzt
+    # nachgetragen. Sonst rechneten Tageslimit und Stop-Loss-Kostenbasis
+    # in diesem Zyklus mit einer Position, die zu klein ist.
+    strategy.reconcile_pending_orders()
 
     # Eigene, rein lesende Instanzen für die tägliche Zusammenfassung -
     # analog zu reset_stop_loss.py greifen sie auf dieselben Dateien zu wie

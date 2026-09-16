@@ -22,7 +22,17 @@ from .grid_config import GridConfig
 from .grid_risk import GridLedger, GridPosition, GridStopLoss
 from .grid_signals import compute_grid_levels, find_triggered_buy_levels, is_sell_target_hit
 from .notifier import send_notification
-from .order_utils import net_executed_quantity, net_proceeds, quantize_quantity
+from .order_utils import (
+    average_fill_price,
+    net_executed_quantity,
+    net_proceeds,
+    quantize_quantity,
+)
+from .pending_orders import (
+    RECONCILIATION_PREFIX,
+    PendingOrder,
+    reconcile_pending_orders,
+)
 from .risk import KillSwitch
 
 logger = logging.getLogger("grid_bot")
@@ -122,7 +132,18 @@ class GridTradingStrategy:
                 )
                 order = None
             else:
-                order = self._client.place_market_sell(self._config.symbol, record["quantity"])
+                # `context` landet VOR dem Netzwerk-Call in der
+                # Pending-Orders-Datei (siehe
+                # binance_client._place_order): geht die Antwort
+                # verloren, weiß die Reconciliation beim nächsten Start,
+                # WELCHE Position dieser Verkauf geschlossen hat. Ohne
+                # das bliebe die Position offen und der nächste Zyklus
+                # würde ein zweites Mal verkaufen.
+                order = self._client.place_market_sell(
+                    self._config.symbol,
+                    record["quantity"],
+                    context={"position_id": record["id"], "price": price},
+                )
                 if order is None and self._config.trading_enabled:
                     # Echter Verkaufsversuch bei der Börse fehlgeschlagen -
                     # anders als im Dry-Run (wo None der Normalfall ist).
@@ -218,7 +239,15 @@ class GridTradingStrategy:
         rules = self._client.get_symbol_trading_rules(self._config.symbol)
 
         for level_index in triggered_levels:
-            order = self._client.place_market_buy(self._config.symbol, self._config.amount_per_level)
+            order = self._client.place_market_buy(
+                self._config.symbol,
+                self._config.amount_per_level,
+                context={
+                    "level_index": level_index,
+                    "price": price,
+                    "amount": self._config.amount_per_level,
+                },
+            )
 
             if order is None and self._config.trading_enabled:
                 # Echter Kaufversuch bei der Börse fehlgeschlagen - analog
@@ -257,6 +286,7 @@ class GridTradingStrategy:
                 quantity=quantity,
                 quote_spent=quote_spent,
                 dry_run=not self._config.trading_enabled,
+                client_order_id=order.get("clientOrderId") if order else None,
             )
             self._ledger.record_buy(position)
 
@@ -271,6 +301,197 @@ class GridTradingStrategy:
                 f"{tag} Stufe {level_index}: {quantity:.8f} {self._config.symbol} "
                 f"@ {price:.2f} (Ziel-Verkauf @ {position.target_sell_price:.2f})"
             )
+
+    def reconcile_pending_orders(self) -> None:
+        """
+        Trägt beim Bot-Start Käufe/Verkäufe nach, deren Ausgang beim
+        letzten Lauf offen geblieben ist (Sicherheitsreview-Punkt K2,
+        Teil B - siehe pending_orders.py und main_grid.py).
+
+        Für den Grid-Bot sind beide Richtungen kritisch:
+        - Ein unverbuchter KAUF lässt die Stufe "frei" aussehen, und das
+          nächste Crossing kauft sie ein zweites Mal.
+        - Ein unverbuchter VERKAUF lässt die Position offen stehen, ihr
+          Sell-Target ist weiterhin erreicht, und der nächste Zyklus
+          verkauft eine Menge, die es nicht mehr gibt.
+        """
+        reconcile_pending_orders(
+            client=self._client,
+            store=self._client.pending_orders,
+            bot_logger=logger,
+            apply_confirmed=self._apply_reconciled_order,
+        )
+
+    def _apply_reconciled_order(self, pending: PendingOrder, order: dict) -> None:
+        if pending.side == "BUY":
+            self._record_reconciled_buy(pending, order)
+        elif pending.side == "SELL":
+            self._record_reconciled_sell(pending, order)
+        else:
+            raise ValueError(
+                f"Unerwartete Order-Seite '{pending.side}' in der "
+                "Pending-Orders-Datei des Grid-Bots."
+            )
+
+    def _target_sell_price_for(self, level_index: int, buy_price: float) -> float:
+        """
+        Verkaufsziel einer nachgetragenen Position.
+
+        Normalfall ist die nächsthöhere Grid-Stufe, exakt wie beim
+        regulären Kauf. Wurde die Grid-Konfiguration zwischen den beiden
+        Läufen geändert, kann die gespeicherte Stufe aber gar nicht mehr
+        existieren. Die Position dann NICHT zu verbuchen wäre die
+        schlechteste Option (die Assets liegen real an der Börse) -
+        stattdessen wird das Ziel aus dem Kaufpreis und dem aktuellen
+        Stufenabstand abgeleitet und der Sonderfall deutlich geloggt.
+        """
+        if 0 <= level_index < len(self._levels) - 1:
+            return self._levels[level_index + 1]
+
+        fallback = buy_price * (1 + self._config.grid_spacing_pct / 100)
+        logger.error(
+            "%sStufe %s existiert im aktuellen Grid nicht mehr (%d Stufen) - "
+            "die nachgetragene Position bekommt ein aus dem Kaufpreis "
+            "abgeleitetes Verkaufsziel von %.2f. Bitte prüfen, ob die "
+            "Grid-Konfiguration seit dem letzten Lauf geändert wurde.",
+            RECONCILIATION_PREFIX,
+            level_index,
+            len(self._levels),
+            fallback,
+        )
+        return fallback
+
+    def _record_reconciled_buy(self, pending: PendingOrder, order: dict) -> None:
+        if self._ledger.has_client_order_id(pending.client_order_id):
+            logger.info(
+                "%sKauf zu Order %s ist bereits im Ledger - nichts nachzutragen.",
+                RECONCILIATION_PREFIX,
+                pending.client_order_id,
+            )
+            return
+
+        symbol = pending.symbol or self._config.symbol
+        level_index = int(pending.context.get("level_index", -1))
+        amount = float(pending.context.get("amount", self._config.amount_per_level))
+
+        rules = self._client.get_symbol_trading_rules(symbol)
+        order = self._client.get_order_with_fills(symbol, order)
+
+        buy_price = average_fill_price(
+            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
+        )
+        if buy_price <= 0:
+            raise ValueError(
+                f"Kein brauchbarer Kaufpreis für Order {pending.client_order_id} "
+                "ermittelbar - die Position bekäme ein unsinniges Verkaufsziel."
+            )
+
+        existing = self._ledger.open_position_for_level(level_index)
+        if existing is not None:
+            # Verletzt "höchstens eine offene Position pro Stufe". Die
+            # Assets existieren trotzdem - sie zu verschweigen wäre
+            # schlimmer als zwei Einträge auf einer Stufe (beide werden
+            # bei erreichtem Ziel verkauft, die Stufe gilt bis dahin als
+            # belegt).
+            logger.error(
+                "%sStufe %d hat bereits eine offene Position (%s) - die "
+                "nachgetragene Position kommt zusätzlich ins Ledger, damit "
+                "die real gekauften Assets nicht verschwinden. Bitte prüfen.",
+                RECONCILIATION_PREFIX,
+                level_index,
+                existing["id"],
+            )
+
+        quantity = net_executed_quantity(order, rules, fallback=amount / buy_price)
+        quote_spent = float(order.get("cummulativeQuoteQty", amount))
+
+        position = GridPosition.new(
+            level_index=level_index,
+            buy_price=buy_price,
+            target_sell_price=self._target_sell_price_for(level_index, buy_price),
+            quantity=quantity,
+            quote_spent=quote_spent,
+            dry_run=False,
+            client_order_id=pending.client_order_id,
+        )
+        self._ledger.record_buy(position)
+
+        logger.warning(
+            "%sGrid-Kauf nachgetragen: Stufe %d @ %.2f (Menge %.8f, "
+            "Ziel-Verkauf @ %.2f, Order %s).",
+            RECONCILIATION_PREFIX,
+            level_index,
+            buy_price,
+            quantity,
+            position.target_sell_price,
+            pending.client_order_id,
+        )
+        send_notification(
+            f"[REKONZILIATION] Nachgetragener Grid-Kauf: Stufe {level_index}, "
+            f"{quantity:.8f} {symbol} @ {buy_price:.2f} "
+            f"(Ziel-Verkauf @ {position.target_sell_price:.2f}). Die Order lief "
+            "beim letzten Bot-Lauf durch, ihr Ergebnis kam aber nicht mehr an."
+        )
+
+    def _record_reconciled_sell(self, pending: PendingOrder, order: dict) -> None:
+        position_id = pending.context.get("position_id")
+        record = self._ledger.position_by_id(position_id) if position_id else None
+
+        if record is None:
+            raise ValueError(
+                f"Verkaufs-Order {pending.client_order_id} verweist auf die "
+                f"unbekannte Position '{position_id}' - der Verkauf hat real "
+                "stattgefunden, lässt sich aber keiner Position zuordnen."
+            )
+
+        if record["status"] != "open":
+            # Genau der Fall, für den die Idempotenz da ist: der Verkauf
+            # wurde schon verbucht, nur das Aufräumen des Pending-
+            # Eintrags kam nicht mehr dazu.
+            logger.info(
+                "%sPosition %s ist bereits geschlossen - Verkauf zu Order %s "
+                "war schon verbucht.",
+                RECONCILIATION_PREFIX,
+                position_id,
+                pending.client_order_id,
+            )
+            return
+
+        symbol = pending.symbol or self._config.symbol
+        rules = self._client.get_symbol_trading_rules(symbol)
+        order = self._client.get_order_with_fills(symbol, order)
+
+        sell_price = average_fill_price(
+            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
+        )
+        proceeds = net_proceeds(order, rules, fallback=record["quantity"] * sell_price)
+        realized_pnl = proceeds - record["quote_spent"]
+
+        self._ledger.record_sell(
+            record["id"],
+            sell_price,
+            datetime.now(timezone.utc).isoformat(),
+            realized_pnl,
+        )
+        self._failed_sell_notified.discard(record["id"])
+
+        logger.warning(
+            "%sGrid-Verkauf nachgetragen: Stufe %s, Kauf @ %.2f -> Verkauf "
+            "@ %.2f, realisiert %.2f (Order %s).",
+            RECONCILIATION_PREFIX,
+            record.get("level_index", "?"),
+            record["buy_price"],
+            sell_price,
+            realized_pnl,
+            pending.client_order_id,
+        )
+        send_notification(
+            f"[REKONZILIATION] Nachgetragener Grid-Verkauf: Stufe "
+            f"{record.get('level_index', '?')} @ {sell_price:.2f} "
+            f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}. "
+            "Die Order lief beim letzten Bot-Lauf durch, ihr Ergebnis kam aber "
+            "nicht mehr an."
+        )
 
     def execute_once(self) -> None:
         """Führt genau einen Grid-Zyklus aus: Preis holen, Verkäufe prüfen,

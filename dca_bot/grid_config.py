@@ -43,6 +43,14 @@ class GridConfig:
     state_file: str = "data/grid_positions.json"
     stop_loss_state_file: str = "data/grid_stop_loss_paused.json"
 
+    # Siehe config.py (DCA) für die Begründung dieser drei Felder -
+    # Präfix der selbstvergebenen Order-IDs, offene Order-Fragen (K2)
+    # und Schutz gegen doppelten Bot-Start. Jeweils eigene Dateien,
+    # komplett getrennt von DCA/Trend.
+    bot_name: str = "grid"
+    pending_orders_file: str = "data/pending_orders_grid.json"
+    lock_file: str = "data/grid_bot.lock"
+
     # --- Benachrichtigungen (optional, gleiche Zugangsdaten wie der DCA-Bot) ---
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -91,6 +99,10 @@ def load_grid_config() -> GridConfig:
         stop_loss_state_file=os.getenv(
             "GRID_STOP_LOSS_STATE_FILE", "data/grid_stop_loss_paused.json"
         ),
+        pending_orders_file=os.getenv(
+            "GRID_PENDING_ORDERS_FILE", "data/pending_orders_grid.json"
+        ),
+        lock_file=os.getenv("GRID_LOCK_FILE", "data/grid_bot.lock"),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )

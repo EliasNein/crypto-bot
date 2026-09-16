@@ -211,6 +211,27 @@ def net_executed_quantity(order: dict, rules: SymbolTradingRules, fallback: floa
     return quantized
 
 
+def average_fill_price(order: dict, fallback: float) -> float:
+    """
+    Tatsächlicher Durchschnitts-Füllpreis einer ausgeführten Order:
+    `cummulativeQuoteQty / executedQty`.
+
+    Genauer als der zum Zeitpunkt der Entscheidung abgefragte Ticker-
+    Preis - und vor allem der einzig sinnvolle Wert, wenn eine Order
+    nachträglich verbucht wird (Reconciliation nach einem verlorenen
+    Antwortweg, siehe pending_orders.py): dort liegt die eigentliche
+    Kaufentscheidung u.U. Stunden zurück, der damals gesehene Preis wäre
+    reine Behauptung.
+
+    `fallback` greift, wenn eine der beiden Zahlen fehlt oder 0 ist.
+    """
+    executed_qty = _safe_float(order.get("executedQty"), 0.0)
+    cumulative_quote = _safe_float(order.get("cummulativeQuoteQty"), 0.0)
+    if executed_qty > 0 and cumulative_quote > 0:
+        return cumulative_quote / executed_qty
+    return fallback
+
+
 def net_proceeds(order: dict, rules: SymbolTradingRules, fallback: float) -> float:
     """
     Tatsächlich erhaltener Quote-Betrag aus einer ausgeführten
