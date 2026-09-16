@@ -26,6 +26,7 @@ Ausfuehren mit:  python -m unittest tests.test_pending_orders -v
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,7 @@ from dca_bot.pending_orders import (
     classify_order_status,
     new_client_order_id,
     resolve_pending_order,
+    safe_startup_reconciliation,
 )
 
 
@@ -822,6 +824,88 @@ class OrderFillsEnrichmentTestCase(TradingClientTestBase):
 
         self.assertNotIn("fills", result)
         self.assertTrue(any("myTrades" in line for line in captured.output))
+
+
+class SafeStartupReconciliationTestCase(unittest.TestCase):
+    """
+    Sicherheitsreview-Punkt W18: die Reconciliation-Aufrufe liegen
+    zwangslaeufig VOR der Hauptschleife und damit ausserhalb von deren
+    try/except. Eine Exception dort beendete den Prozess - systemd
+    startete neu, und das Ganze wiederholte sich. Beim DCA-Bot loest
+    jeder dieser Starts ausserdem sofort einen Kauf aus (W2).
+    """
+
+    def setUp(self) -> None:
+        self.logger = logging.getLogger("dca_bot")
+
+    def test_successful_steps_run_in_order(self):
+        calls: list[str] = []
+        safe_startup_reconciliation(
+            self.logger,
+            "[FEHLER]",
+            [("Erster", lambda: calls.append("a")), ("Zweiter", lambda: calls.append("b"))],
+        )
+        self.assertEqual(calls, ["a", "b"])
+
+    def test_failing_step_does_not_propagate(self):
+        """Kern von W18: der Aufruf darf nicht werfen."""
+
+        def boom():
+            raise RuntimeError("Ledger unlesbar")
+
+        with mock.patch("dca_bot.pending_orders.send_notification") as notify:
+            with self.assertLogs("dca_bot", level="ERROR") as captured:
+                safe_startup_reconciliation(
+                    self.logger, "[GRID-FEHLER]", [("Reconciliation", boom)]
+                )
+
+        joined = "\n".join(captured.output)
+        self.assertIn("Reconciliation", joined)
+        self.assertIn("laeuft trotzdem weiter", joined)
+        # Traceback gehoert ins Log, damit die Ursache auffindbar bleibt.
+        self.assertIn("RuntimeError", joined)
+
+        notify.assert_called_once()
+        message = notify.call_args.args[0]
+        self.assertIn("[GRID-FEHLER]", message)
+        self.assertIn("Ledger unlesbar", message)
+
+    def test_second_step_runs_even_if_the_first_fails(self):
+        """
+        Beim Trend-Bot der eigentliche Punkt: Schritt 2 sichert eine
+        bereits offene Position ab und ist gerade dann wertvoll, wenn
+        Schritt 1 nicht durchkam.
+        """
+        calls: list[str] = []
+
+        def boom():
+            calls.append("erster-versucht")
+            raise ValueError("kaputt")
+
+        with mock.patch("dca_bot.pending_orders.send_notification"):
+            with self.assertLogs("dca_bot", level="ERROR"):
+                safe_startup_reconciliation(
+                    self.logger,
+                    "[TREND-FEHLER]",
+                    [("Pending", boom), ("Stop-Order-Abgleich", lambda: calls.append("zweiter"))],
+                )
+
+        self.assertEqual(calls, ["erster-versucht", "zweiter"])
+
+    def test_every_failing_step_is_reported_separately(self):
+        def boom():
+            raise RuntimeError("beide kaputt")
+
+        with mock.patch("dca_bot.pending_orders.send_notification") as notify:
+            with self.assertLogs("dca_bot", level="ERROR"):
+                safe_startup_reconciliation(
+                    self.logger, "[TREND-FEHLER]", [("A", boom), ("B", boom)]
+                )
+
+        self.assertEqual(notify.call_count, 2)
+
+    def test_no_steps_is_harmless(self):
+        safe_startup_reconciliation(self.logger, "[FEHLER]", [])
 
 
 if __name__ == "__main__":

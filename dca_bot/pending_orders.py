@@ -112,6 +112,27 @@ LOOKUP_NOT_FOUND = "not_found"
 LOOKUP_FAILED = "failed"
 
 
+# --- Lebenszyklus einer Order (die gemeinsame Quelle der Wahrheit) -------
+
+# Die Order hat Menge bewegt und ist fertig.
+ORDER_LIFECYCLE_FILLED = "filled"
+
+# Die Order lebt noch an der Boerse (NEW, PARTIALLY_FILLED, ...) und kann
+# sich noch aendern.
+ORDER_LIFECYCLE_LIVE = "live"
+
+# Die Order ist beendet, ohne etwas bewegt zu haben (CANCELED/EXPIRED/
+# REJECTED mit executedQty 0). Fuer eine Stop-Loss-Order heisst das: die
+# Absicherung existiert an der Boerse nicht mehr.
+ORDER_LIFECYCLE_DEAD = "dead"
+
+# Keine oder keine verwertbare Antwort. Bewusst ein eigener Zustand und
+# NICHT mit ORDER_LIFECYCLE_DEAD zusammengelegt: "ich konnte es nicht
+# klaeren" ist etwas anderes als "die Order ist weg", und nur der zweite
+# Fall rechtfertigt eine Reaktion.
+ORDER_LIFECYCLE_UNREADABLE = "unreadable"
+
+
 # Statuswerte, nach denen sich an einer Order nichts mehr aendert.
 # "EXPIRED_IN_MATCH" ist ein neuerer Binance-Status (Order wurde beim
 # Matching verworfen, z.B. wegen Self-Trade-Prevention) - mit
@@ -336,8 +357,10 @@ class PendingOrderStore:
         return result
 
 
-def _executed_quantity(order: dict) -> float:
+def executed_quantity(order: dict) -> float:
     """`executedQty` als float, 0.0 bei fehlendem/unlesbarem Wert."""
+    if not isinstance(order, dict):
+        return 0.0
     try:
         return float(order.get("executedQty", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -349,47 +372,83 @@ def _executed_quantity(order: dict) -> float:
         return 0.0
 
 
+def order_lifecycle_state(order: dict | None) -> str:
+    """
+    Der Lebenszyklus-Zustand einer Order - die EINZIGE Stelle im Projekt,
+    an der ein Binance-Order-Status ausgewertet wird.
+
+    Reine Funktion (kein Netzwerk, kein Zustand); der eigentliche Abruf
+    liegt in binance_client.py.
+
+    Darauf setzen zwei Aufrufer mit ganz unterschiedlichen Fragen auf:
+
+    - `classify_order_status()` (Pending-Pfad) fragt: "ist die Order
+      angekommen und hat sie gewirkt?"
+    - `trend_strategy._check_exchange_stop_loss_fill()` fragt: "hat meine
+      Stop-Loss-Order ausgeloest, lebt sie noch, oder ist sie weg?"
+
+    Beide Fragen brauchen dieselbe Grundlage. Vor diesem Fix hatte der
+    Fill-Check eine eigene, abweichende Regel (`status == "FILLED"`) -
+    `PARTIALLY_FILLED` und ein Ende ohne Fill fielen dort komplett durch,
+    waehrend der Pending-Pfad sie korrekt behandelte
+    (Sicherheitsreview-Punkte W7 und W8). Zwei parallele Regeln fuer
+    denselben Sachverhalt sind genau die Art Divergenz, die spaeter
+    niemand mehr bemerkt.
+
+    Die Einstufung:
+
+    - ORDER_LIFECYCLE_LIVE: Status in LIVE_STATUSES. Die Order kann sich
+      noch aendern - `PARTIALLY_FILLED` gehoert bewusst hierher und nicht
+      zu "gefuellt": sie kann noch vollstaendig fuellen, und eine
+      Momentaufnahme der Teilmenge waere im naechsten Moment falsch.
+    - ORDER_LIFECYCLE_FILLED: terminaler Status UND `executedQty > 0`.
+      Bewusst nicht nur `FILLED`: eine Market-Order, die nicht
+      vollstaendig gefuellt werden kann, endet bei Binance als `EXPIRED`
+      mit einer echten Teilmenge. Auf `FILLED` zu bestehen hiesse, diesen
+      Fall fuer immer als "unklar" zu fuehren, obwohl die Information
+      eindeutig vorliegt.
+    - ORDER_LIFECYCLE_DEAD: terminaler Status ohne ausgefuehrte Menge.
+    - ORDER_LIFECYCLE_UNREADABLE: keine Antwort, kein Status, oder ein
+      Status, den wir nicht kennen. Hier wird NICHT geraten.
+    """
+    if not isinstance(order, dict):
+        return ORDER_LIFECYCLE_UNREADABLE
+
+    status = str(order.get("status", "")).strip().upper()
+    if status in LIVE_STATUSES:
+        return ORDER_LIFECYCLE_LIVE
+    if status in TERMINAL_STATUSES:
+        return (
+            ORDER_LIFECYCLE_FILLED
+            if executed_quantity(order) > 0
+            else ORDER_LIFECYCLE_DEAD
+        )
+    return ORDER_LIFECYCLE_UNREADABLE
+
+
 def classify_order_status(order: dict, kind: str) -> str:
     """
-    Bewertet eine per `get_order()` geholte Order-Antwort.
+    Bewertet eine Order-Antwort aus Sicht des Pending-Pfads: ist die
+    Order angekommen und hat sie gewirkt?
 
-    Reine Funktion (kein Netzwerk, kein Zustand) - der eigentliche Abruf
-    liegt in binance_client.py, hier steht nur die Regel.
+    Reine Uebersetzung von `order_lifecycle_state()` (siehe dort) in die
+    ORDER_*-Ergebnisse, die resolve_pending_order() liefert. Der einzige
+    Unterschied zwischen den beiden Order-Arten steht hier, und nur hier:
 
-    Fuer eine MARKET-Order:
-    - terminaler Status und `executedQty > 0` -> ORDER_CONFIRMED. Bewusst
-      nicht nur `FILLED`: eine Market-Order, die nicht vollstaendig
-      gefuellt werden kann, endet bei Binance als `EXPIRED` mit einer
-      echten Teilmenge. Auf `FILLED` zu bestehen hiesse, diesen Fall fuer
-      immer als "unklar" zu fuehren, obwohl die Information eindeutig
-      vorliegt.
-    - terminaler Status ohne ausgefuehrte Menge -> ORDER_WITHOUT_EFFECT.
-    - alles andere (noch live) -> ORDER_UNCLEAR.
-
-    Fuer eine STOP_LOSS_LIMIT-Order gilt eine ANDERE Regel: dort ist
-    "NEW" der Erfolgsfall. Eine frisch platzierte Stop-Order soll offen
-    im Orderbuch liegen und erst spaeter ausloesen - sie als "unklar" zu
-    behandeln, nur weil sie nicht gefuellt ist, waere genau falsch
-    herum. Entscheidend ist hier allein, ob die Order an der Boerse
-    EXISTIERT; ob sie schon ausgeloest hat, klaert danach der bestehende
-    Weg ueber `_check_exchange_stop_loss_fill` /
-    `reconcile_on_startup()` im Trend-Bot.
+    Fuer eine STOP_LOSS_LIMIT-Order ist ORDER_LIFECYCLE_LIVE ein ERFOLG.
+    Eine frisch platzierte Stop-Order soll offen im Orderbuch liegen und
+    erst spaeter ausloesen - sie als "unklar" zu behandeln, nur weil sie
+    nicht gefuellt ist, waere genau falsch herum. Fuer eine Market-Order
+    dagegen bedeutet "lebt noch" tatsaechlich einen unklaren Zustand.
     """
-    status = str(order.get("status", "")).upper()
-    executed_qty = _executed_quantity(order)
+    state = order_lifecycle_state(order)
 
-    if kind == KIND_STOP_LOSS_LIMIT:
-        if status in LIVE_STATUSES or status == "FILLED" or executed_qty > 0:
-            return ORDER_CONFIRMED
-        if status in TERMINAL_STATUSES:
-            # Storniert/abgelaufen ohne Wirkung: es liegt keine
-            # Absicherung an der Boerse, und es wurde auch nichts
-            # verkauft.
-            return ORDER_WITHOUT_EFFECT
-        return ORDER_UNCLEAR
-
-    if status in TERMINAL_STATUSES:
-        return ORDER_CONFIRMED if executed_qty > 0 else ORDER_WITHOUT_EFFECT
+    if state == ORDER_LIFECYCLE_FILLED:
+        return ORDER_CONFIRMED
+    if state == ORDER_LIFECYCLE_DEAD:
+        return ORDER_WITHOUT_EFFECT
+    if state == ORDER_LIFECYCLE_LIVE:
+        return ORDER_CONFIRMED if kind == KIND_STOP_LOSS_LIMIT else ORDER_UNCLEAR
     return ORDER_UNCLEAR
 
 
@@ -522,3 +581,51 @@ def reconcile_pending_orders(client, store, bot_logger, apply_confirmed) -> None
             f"{pending.client_order_id} ({pending.side}) weiterhin in "
             "unklarem Zustand. Bitte manuell bei Binance nachsehen."
         )
+
+
+def safe_startup_reconciliation(bot_logger, notify_tag: str, steps) -> None:
+    """
+    Fuehrt die Reconciliation-Schritte eines Bots beim Start aus, ohne
+    dass ein Fehler darin den Start verhindern kann
+    (Sicherheitsreview-Punkt W18).
+
+    `steps` ist eine Folge von (Bezeichnung, Funktion)-Paaren, `notify_tag`
+    der Telegram-Marker des jeweiligen Bots ("[FEHLER]",
+    "[GRID-FEHLER]", "[TREND-FEHLER]").
+
+    Warum ueberhaupt: Die Aufrufe liegen zwangslaeufig VOR der
+    Hauptschleife und damit ausserhalb von deren `try/except`. Eine
+    Exception dort beendet den Prozess, systemd startet ihn mit
+    `Restart=on-failure` neu, und das Ganze wiederholt sich - eine
+    Neustartschleife, bei der der DCA-Bot ausserdem in jedem Durchlauf
+    sofort einen Kauf ausloest (W2). Ein Bot, der wegen eines
+    Reconciliation-Problems gar nicht erst laeuft, ist schlechter dran
+    als einer, der mit unvollstaendigem Wissen startet und den Rest im
+    naechsten Zyklus klaert.
+
+    Jeder Schritt wird EINZELN gekapselt: scheitert der erste, laeuft der
+    zweite trotzdem. Beim Trend-Bot ist das der Punkt - der zweite
+    Schritt sichert eine bereits offene Position ab und ist auch dann
+    wertvoll, wenn der erste nicht durchkam.
+
+    Bewusst ein gemeinsamer Helfer statt dreier identischer
+    try/except-Bloecke in den main*.py: die dortige Duplikation von
+    _sleep_with_kill_switch_check() ist ein bekannter Kritikpunkt aus
+    dem Review (N3) und kein Vorbild fuer neuen, sicherheitsrelevanten
+    Code. Als Funktion ist das hier ausserdem direkt testbar.
+    """
+    for label, step in steps:
+        try:
+            step()
+        except Exception as exc:
+            bot_logger.exception(
+                "%s beim Start fehlgeschlagen - der Bot laeuft trotzdem "
+                "weiter. Der Zustand kann unvollstaendig sein, bis der "
+                "naechste Zyklus bzw. ein spaeterer Start ihn klaert.",
+                label,
+            )
+            send_notification(
+                f"{notify_tag} {label} beim Start fehlgeschlagen: {exc}. Der "
+                "Bot laeuft weiter, sein Zustand kann aber unvollstaendig "
+                "sein - siehe Bot-Log."
+            )

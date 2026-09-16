@@ -18,6 +18,7 @@ import time
 from .binance_client import TradingClient
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch
 from .trend_config import load_trend_config
@@ -111,8 +112,19 @@ def main() -> None:
     #
     # Andersherum liefe Schritt 2 ins Leere - zu seinem Zeitpunkt gäbe
     # es die nachgetragene Position noch gar nicht.
-    strategy.reconcile_pending_orders()
-    strategy.reconcile_on_startup()
+    #
+    # Beide Schritte einzeln gekapselt, damit ein Fehler den Bot-Start
+    # nicht verhindert (W18) - und damit Schritt 2 auch dann läuft, wenn
+    # Schritt 1 scheitert: er sichert eine bereits offene Position ab und
+    # ist gerade dann wertvoll.
+    safe_startup_reconciliation(
+        logger,
+        "[TREND-FEHLER]",
+        [
+            ("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders),
+            ("Abgleich der Stop-Loss-Order", strategy.reconcile_on_startup),
+        ],
+    )
 
     interval_seconds = config.interval_hours * 60 * 60
 
