@@ -35,6 +35,13 @@ class GridPosition:
     quote_spent: float
     bought_at: str             # ISO-8601, UTC
     dry_run: bool
+    # Selbstvergebene `newClientOrderId` der Kauf-Order (siehe
+    # pending_orders.py) - None im Dry-Run und bei Positionen aus der
+    # Zeit vor dem K2-Fix. Erlaubt beim Nachtragen aus der
+    # Pending-Orders-Datei die Frage "kenne ich diese Order schon?";
+    # die lokale `id` oben taugt dafür nicht, die hat die Börse nie
+    # gesehen.
+    client_order_id: str | None = None
     status: str = "open"       # "open" | "closed"
     sell_price: float | None = None
     sold_at: str | None = None
@@ -48,6 +55,7 @@ class GridPosition:
         quantity: float,
         quote_spent: float,
         dry_run: bool,
+        client_order_id: str | None = None,
     ) -> "GridPosition":
         return GridPosition(
             id=str(uuid.uuid4()),
@@ -58,6 +66,7 @@ class GridPosition:
             quote_spent=quote_spent,
             bought_at=datetime.now(timezone.utc).isoformat(),
             dry_run=dry_run,
+            client_order_id=client_order_id,
         )
 
 
@@ -100,6 +109,21 @@ class GridLedger:
             if r["level_index"] == level_index and r["status"] == "open":
                 return r
         return None
+
+    def position_by_id(self, position_id: str) -> dict | None:
+        """Eine Position (offen oder geschlossen) über ihre lokale ID."""
+        for r in self._read():
+            if r["id"] == position_id:
+                return r
+        return None
+
+    def has_client_order_id(self, client_order_id: str) -> bool:
+        """
+        Ob zu dieser Börsen-Kauf-Order bereits eine Position existiert -
+        Basis der Idempotenz beim Nachtragen aus der Pending-Orders-Datei
+        (siehe GridPosition.client_order_id).
+        """
+        return any(r.get("client_order_id") == client_order_id for r in self._read())
 
     def record_buy(self, position: GridPosition) -> None:
         records = self._read()

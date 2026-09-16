@@ -43,6 +43,20 @@ class AllocatorConfig:
     kill_switch_file: str = "STOP_ALLOCATOR"
     state_file: str = "data/allocator_state.json"
 
+    bot_name: str = "allocator"
+    # Bewusst LEER: der Allocator platziert nie Orders, es kann also auch
+    # nie eine offene Order-Frage geben (siehe pending_orders.py). Das
+    # Feld existiert trotzdem, und die place_*-Methoden in
+    # binance_client.py weisen einen leeren Wert aktiv zurück - damit
+    # wird "der Allocator handelt nicht" von einer Absichtserklärung im
+    # Docstring zu einer Bedingung, die der Code erzwingt.
+    pending_orders_file: str = ""
+    # Lockfile wie bei den drei Trading-Bots: zwei Allocator-Prozesse
+    # würden sich dieselbe State-Datei überschreiben (Lost Update) -
+    # dieselbe Fehlerklasse wie ein doppelt gestarteter Bot auf einem
+    # Ledger, auch wenn hier keine Order daran hängt.
+    lock_file: str = "data/allocator.lock"
+
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
@@ -91,6 +105,7 @@ def load_allocator_config() -> AllocatorConfig:
         notify_threshold_pp=float(os.getenv("ALLOCATOR_NOTIFY_THRESHOLD_PP", "15.0")),
         kill_switch_file=os.getenv("ALLOCATOR_KILL_SWITCH_FILE", "STOP_ALLOCATOR"),
         state_file=os.getenv("ALLOCATOR_STATE_FILE", "data/allocator_state.json"),
+        lock_file=os.getenv("ALLOCATOR_LOCK_FILE", "data/allocator.lock"),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )

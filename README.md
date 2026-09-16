@@ -89,6 +89,8 @@ trading-bot/
 │   ├── config.py         # Zentrale Konfiguration DCA-Bot (liest .env)
 │   ├── binance_client.py # Wrapper um die Binance-API (Testnet, Buy+Sell, Handelsregeln)
 │   ├── order_utils.py    # Quantisierung auf tickSize/stepSize + Gebührenkorrektur (geteilt)
+│   ├── pending_orders.py # Idempotente Order-Platzierung + Ground-Truth-Abgleich (geteilt)
+│   ├── process_lock.py   # Schutz gegen doppelten Bot-Start (geteilt)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
 │   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss (DCA)
 │   ├── notifier.py       # Telegram-Benachrichtigungen (optional, geteilt)
@@ -141,6 +143,30 @@ trading-bot/
   `DCA_BOT_STOP_LOSS_STATE_FILE` (Default `data/stop_loss_paused.json`).
 - **Fehlerbehandlung pro Zyklus**: Ein einzelner Fehler (z.B. API-Timeout)
   beendet nicht den ganzen Bot, sondern wird geloggt; der nächste Zyklus läuft normal weiter.
+- **Keine Order ohne Ledger-Eintrag** (`dca_bot/pending_orders.py`): Jede
+  echte Order bekommt vorab eine selbstvergebene `newClientOrderId`, die
+  **vor** dem Netzwerk-Call in eine kleine, separate Datei
+  (`data/pending_orders_<bot>.json`) geschrieben wird. Bricht die
+  Verbindung danach ab (`requests`-Timeout, `BinanceRequestException`),
+  gibt der Bot **nicht** einfach "kein Trade" zurück, sondern fragt die
+  Börse per `get_order()` nach dieser ID, was tatsächlich passiert ist:
+  ausgeführt → die echten Order-Daten werden zurückgegeben und regulär
+  verbucht; nie angenommen (Fehlercode −2013) → sauber als "kein Trade"
+  gewertet; unklar → **nicht geraten**, sondern `ERROR` + Telegram, und
+  der Eintrag bleibt für den nächsten Start stehen. Beim Bot-Start
+  arbeitet jeder Bot verbliebene Einträge ab und trägt fehlende
+  Ledger-Einträge als `[REKONZILIATION]` nach. Das schließt auch das
+  Fenster, das ohne jeden Netzwerkfehler durch einen Prozess-Kill
+  zwischen Order und Ledger-Eintrag entstand.
+- **Kein doppelter Bot-Start** (`dca_bot/process_lock.py`): Jeder der vier
+  Prozesse hält beim Start ein exklusives Lock auf einer eigenen
+  `.lock`-Datei (`fcntl`/`msvcrt`). Ein zweiter Start desselben Bots
+  (z.B. manueller Aufruf neben dem laufenden systemd-Service) wird mit
+  klarer Meldung abgelehnt, statt dass beide dasselbe Ledger lesen und
+  schreiben und sich gegenseitig Einträge überschreiben. Bewusst ein
+  Lock auf dem Dateideskriptor und keine PID-Datei: das Betriebssystem
+  gibt es auch bei `kill -9` frei, eine liegengebliebene `.lock`-Datei
+  blockiert also keinen Neustart.
 - **Echte Handelsregeln statt Annahmen** (`dca_bot/order_utils.py`,
   `binance_client.get_symbol_trading_rules`): Vor jeder Order werden Menge
   und Preise gegen die tatsächlichen Filter des Symbols quantisiert
@@ -456,7 +482,13 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   läuft, gleicht der Bot eine im Ledger offene Position gegen den
   tatsächlichen Order-Status bei Binance ab und korrigiert den Ledger
   sofort, falls die Stop-Order während der Downtime gefüllt wurde -
-  klar geloggt als `[REKONZILIATION]`.
+  klar geloggt als `[REKONZILIATION]`. Davor läuft seit dem K2-Fix
+  `reconcile_pending_orders()` (siehe Abschnitt 6), und diese
+  Reihenfolge ist bewusst so: ein dort nachgetragener Einstieg erzeugt
+  eine offene Position **ohne** Stop-Loss-Order, die dieser Schritt
+  unmittelbar danach über `_ensure_stop_loss_protection()` absichert.
+  Umgekehrt liefe er ins Leere - die Position gäbe es zu seinem
+  Zeitpunkt noch gar nicht.
 - **Race Condition zwischen Status-Check und Stornierung:** füllt sich
   die Stop-Order genau zwischen der letzten Status-Abfrage und dem
   Cancel-Aufruf, schlägt das Stornieren fehl. Der Bot verlässt sich dann
@@ -649,7 +681,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -660,6 +692,15 @@ exchange-seitige Stop-Loss inkl. Race Conditions, sowie die
 Verkaufs-Sicherheit von Grid und Trend (Dry-Run-Positionen, fehl-
 geschlagene echte Verkäufe), sowie die Anbindung an die echten
 Handelsregeln inklusive Gebührenkorrektur.
+
+Dazu die idempotente Order-Platzierung (siehe Abschnitt 6):
+`test_pending_orders.py` prüft den Ground-Truth-Abgleich und die drei
+Netzwerkfehler-Szenarien direkt am `TradingClient` (mit einem gefälschten
+**rohen** Binance-Client darunter - der Fehler entsteht genau in der
+Zeile, in der `python-binance` seinen Request absetzt),
+`test_order_reconciliation.py` das Nachtragen beim Bot-Start für alle
+drei Bots inklusive Idempotenz, und `test_process_lock.py` den Schutz
+gegen einen doppelten Bot-Start.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

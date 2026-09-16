@@ -23,6 +23,7 @@ from .allocator_config import load_allocator_config
 from .binance_client import TradingClient
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch
 from .version import get_code_version
 
@@ -76,6 +77,17 @@ def main() -> None:
     )
     logger.info("Hinweis: Der Allocator platziert selbst nie Orders - nur Berechnung + State-Datei.")
     logger.info("=" * 60)
+
+    # Schutz gegen einen versehentlichen doppelten Bot-Start (siehe
+    # process_lock.py): zwei Prozesse auf demselben Zustand wuerden sich
+    # gegenseitig Eintraege ueberschreiben. Bewusst ganz am Anfang, noch
+    # vor dem Lesen von Zustand oder dem Verbindungsaufbau.
+    lock = ProcessLock(config.lock_file, "allocator")
+    try:
+        lock.acquire()
+    except BotAlreadyRunning as exc:
+        logger.error("%s", exc)
+        return
 
     init_notifier(config)
 

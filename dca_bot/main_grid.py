@@ -19,6 +19,7 @@ from .grid_config import load_grid_config
 from .grid_strategy import GridTradingStrategy
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch
 from .version import get_code_version
 
@@ -78,11 +79,30 @@ def main() -> None:
         )
     logger.info("=" * 60)
 
+    # Schutz gegen einen versehentlichen doppelten Bot-Start (siehe
+    # process_lock.py): zwei Prozesse auf demselben Zustand wuerden sich
+    # gegenseitig Eintraege ueberschreiben. Bewusst ganz am Anfang, noch
+    # vor dem Lesen von Zustand oder dem Verbindungsaufbau.
+    lock = ProcessLock(config.lock_file, "grid")
+    try:
+        lock.acquire()
+    except BotAlreadyRunning as exc:
+        logger.error("%s", exc)
+        return
+
     init_notifier(config)
 
     client = TradingClient(config)
     strategy = GridTradingStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="GRID_BOT_HALT")
+
+    # Reconciliation VOR dem ersten Zyklus: eine beim letzten Lauf
+    # ausgeführte, aber nicht mehr verbuchte Order würde sonst eine
+    # Stufe fälschlich als frei (Kauf) oder eine verkaufte Position als
+    # weiterhin offen (Verkauf) erscheinen lassen - beides führt im
+    # ersten Zyklus zu einer doppelten Order. Siehe pending_orders.py
+    # (Sicherheitsreview-Punkt K2).
+    strategy.reconcile_pending_orders()
 
     interval_seconds = config.interval_minutes * 60
 

@@ -37,6 +37,24 @@ class Config:
     state_file: str = "data/trade_ledger.json"  # Persistente Trade-Historie
     stop_loss_state_file: str = "data/stop_loss_paused.json"  # Existiert diese Datei, bleibt der Stop-Loss pausiert
 
+    # Kurzname dieses Bots. Dient als Präfix der selbstvergebenen
+    # `newClientOrderId` jeder echten Order (siehe pending_orders.py) und
+    # als Kennung in der Pending-Orders-Datei. Bewusst KEINE
+    # Env-Variable: das ist eine Identität, keine Einstellung - ein
+    # geänderter Name würde die Zuordnung zu bereits laufenden Orders
+    # zerreißen.
+    bot_name: str = "dca"
+    # Orders, deren Ausgang noch offen ist (siehe pending_orders.py,
+    # Sicherheitsreview-Punkt K2). Wird VOR jedem Order-Request
+    # geschrieben und direkt nach dessen Klärung wieder geleert - im
+    # Normalbetrieb also leer.
+    pending_orders_file: str = "data/pending_orders_dca.json"
+    # Lockfile gegen einen versehentlichen doppelten Bot-Start (z.B.
+    # manueller Aufruf neben dem laufenden systemd-Service, siehe
+    # process_lock.py). Zwei Prozesse auf demselben Ledger würden sich
+    # gegenseitig Einträge überschreiben.
+    lock_file: str = "data/dca_bot.lock"
+
     # --- Kapital-Allocator (optional, siehe allocator.py) ---
     # Leer = deaktiviert (Default): der Bot verhält sich dann exakt wie
     # ohne Allocator, unverändertes Standardverhalten. Nur wenn explizit
@@ -82,6 +100,10 @@ def load_config() -> Config:
         stop_loss_pct=stop_loss_pct,
         state_file=state_file,
         stop_loss_state_file=stop_loss_state_file,
+        pending_orders_file=os.getenv(
+            "DCA_PENDING_ORDERS_FILE", "data/pending_orders_dca.json"
+        ),
+        lock_file=os.getenv("DCA_LOCK_FILE", "data/dca_bot.lock"),
         allocator_state_file=os.getenv("DCA_ALLOCATOR_STATE_FILE", ""),
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,

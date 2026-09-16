@@ -24,7 +24,18 @@ from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fract
 from .backtest import fetch_historical_klines
 from .binance_client import TradingClient
 from .notifier import send_notification
-from .order_utils import net_executed_quantity, net_proceeds, quantize_quantity
+from .order_utils import (
+    average_fill_price,
+    net_executed_quantity,
+    net_proceeds,
+    quantize_quantity,
+)
+from .pending_orders import (
+    KIND_STOP_LOSS_LIMIT,
+    RECONCILIATION_PREFIX,
+    PendingOrder,
+    reconcile_pending_orders,
+)
 from .risk import KillSwitch
 from .trend_config import TrendConfig
 from .trend_risk import TrendLedger, TrendStopLoss, TrendTrade
@@ -46,6 +57,14 @@ UNCERTAIN_CYCLES_WARNING_THRESHOLD = 3
 # wie oben: ein einzelner Fehlschlag kann transient sein, mehrere in
 # Folge deuten auf ein anhaltendes Problem hin.
 UNPROTECTED_CYCLES_WARNING_THRESHOLD = 3
+
+# Platzhalter in Meldungen, wenn der Status einer Order nicht ermittelt
+# werden konnte (siehe _describe_stop_order_status). Bewusst ein
+# eigener, ausformulierter Text statt "?" oder eines weggelassenen
+# Feldes: "nicht abrufbar" heisst "der Bot konnte es nicht klaeren" und
+# ist fuer die manuelle Pruefung eine andere Aussage als jeder echte
+# Order-Status.
+STOP_ORDER_STATUS_UNAVAILABLE = "nicht abrufbar"
 
 
 class TrendFollowingStrategy:
@@ -113,7 +132,9 @@ class TrendFollowingStrategy:
         # zu riskieren, würde den Trade unverbucht lassen.
         rules = self._client.get_symbol_trading_rules(self._config.symbol)
 
-        order = self._client.place_market_buy(self._config.symbol, amount)
+        order = self._client.place_market_buy(
+            self._config.symbol, amount, context={"price": price, "amount": amount}
+        )
 
         if order is None and self._config.trading_enabled:
             logger.error(
@@ -147,7 +168,20 @@ class TrendFollowingStrategy:
             quantity=quantity,
             quote_spent=quote_spent,
             dry_run=not self._config.trading_enabled,
+            client_order_id=order.get("clientOrderId") if order else None,
         )
+
+        # Ledger-Eintrag SOFORT nach dem bestätigten Kauf - bewusst VOR
+        # der Stop-Loss-Order (Sicherheitsreview-Punkt K2). Vorher stand
+        # record_entry() am Ende dieser Methode, und dazwischen lagen ein
+        # kompletter zweiter API-Call plus Telegram-Sendeversuche: ein
+        # Prozess-Kill in diesem Fenster (mehrere Sekunden) hätte einen
+        # real gekauften, ungeschützten Trade hinterlassen, von dem das
+        # Ledger nichts weiß - der nächste Zyklus hätte "keine offene
+        # Position" gesehen und bei weiter bestätigtem Aufwärtstrend
+        # erneut gekauft. Die Stop-Order wird jetzt nachträglich am
+        # bereits bestehenden Eintrag hinterlegt.
+        self._ledger.record_entry(trade)
 
         # Echte, exchange-seitige Stop-Loss-Order (STOP_LOSS_LIMIT) direkt
         # nach dem Entry platzieren - schützt die Position auch, wenn der
@@ -159,11 +193,18 @@ class TrendFollowingStrategy:
         stop_price = price * (1 - self._config.stop_loss_pct / 100)
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
         stop_order = self._client.place_stop_loss_limit_sell(
-            self._config.symbol, quantity, stop_price, limit_price
+            self._config.symbol,
+            quantity,
+            stop_price,
+            limit_price,
+            context={"trade_id": trade.id, "limit_price": limit_price},
         )
         if stop_order is not None:
             trade.stop_loss_order_id = str(stop_order["orderId"])
             trade.stop_limit_price = limit_price
+            self._ledger.set_stop_loss_order(
+                trade.id, trade.stop_loss_order_id, limit_price
+            )
         elif self._config.trading_enabled:
             # Echter Trading-Modus, aber die Stop-Loss-Order konnte nicht
             # platziert werden (siehe Fehler-Log in binance_client.py) -
@@ -191,8 +232,6 @@ class TrendFollowingStrategy:
                 f"{self._config.symbol} konnte NICHT platziert werden - "
                 "Position aktuell nur software-intern abgesichert."
             )
-
-        self._ledger.record_entry(trade)
 
         logger.info("Trend-Einstieg: %s @ %.2f (Menge: %.8f)", self._config.symbol, price, quantity)
         tag = "[TREND-EINSTIEG]" if order is not None else "[TREND-EINSTIEG DRY-RUN]"
@@ -348,7 +387,15 @@ class TrendFollowingStrategy:
             )
             order = None
         else:
-            order = self._client.place_market_sell(self._config.symbol, open_trade["quantity"])
+            order = self._client.place_market_sell(
+                self._config.symbol,
+                open_trade["quantity"],
+                context={
+                    "trade_id": open_trade["id"],
+                    "reason": reason,
+                    "price": price,
+                },
+            )
             if order is None and self._config.trading_enabled:
                 # Echter Verkaufsversuch bei der Börse fehlgeschlagen -
                 # anders als im Dry-Run (wo None der Normalfall ist).
@@ -424,7 +471,11 @@ class TrendFollowingStrategy:
         stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
         stop_order = self._client.place_stop_loss_limit_sell(
-            self._config.symbol, open_trade["quantity"], stop_price, limit_price
+            self._config.symbol,
+            open_trade["quantity"],
+            stop_price,
+            limit_price,
+            context={"trade_id": open_trade["id"], "limit_price": limit_price},
         )
 
         if stop_order is not None:
@@ -513,7 +564,11 @@ class TrendFollowingStrategy:
         stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
         stop_order = self._client.place_stop_loss_limit_sell(
-            self._config.symbol, open_trade["quantity"], stop_price, limit_price
+            self._config.symbol,
+            open_trade["quantity"],
+            stop_price,
+            limit_price,
+            context={"trade_id": open_trade["id"], "limit_price": limit_price},
         )
 
         if stop_order is not None:
@@ -683,6 +738,349 @@ class TrendFollowingStrategy:
             self._close_from_filled_stop_order(open_trade, status, log_prefix=log_prefix)
             return True
         return False
+
+    def reconcile_pending_orders(self) -> None:
+        """
+        Trägt beim Bot-Start Orders nach, deren Ausgang beim letzten Lauf
+        offen geblieben ist (Sicherheitsreview-Punkt K2, Teil B - siehe
+        pending_orders.py).
+
+        Wird von main_trend.py VOR `reconcile_on_startup()` aufgerufen,
+        und diese Reihenfolge ist keine Geschmacksfrage: Ein hier
+        nachgetragener Einstieg erzeugt eine offene Position OHNE
+        exchange-seitige Stop-Loss-Order. `reconcile_on_startup()` findet
+        sie unmittelbar danach vor und lässt `_ensure_stop_loss_protection()`
+        die fehlende Order platzieren. Andersherum liefe die Absicherung
+        ins Leere - zum Zeitpunkt ihres Laufs gäbe es die Position noch
+        gar nicht, und sie bliebe bis zum nächsten Zyklus ungeschützt.
+
+        Der gefährlichste Fall des ganzen Fixes landet damit auf einem
+        bereits vorhandenen Mechanismus: ein real gekaufter, aber
+        unverbuchter Trend-Einstieg wäre sonst eine ungeschützte
+        Position, von der der Bot nichts weiß - und bei weiter
+        bestätigtem Aufwärtstrend hätte der nächste Zyklus ein zweites
+        Mal gekauft.
+        """
+        reconcile_pending_orders(
+            client=self._client,
+            store=self._client.pending_orders,
+            bot_logger=logger,
+            apply_confirmed=self._apply_reconciled_order,
+        )
+
+    def _apply_reconciled_order(self, pending: PendingOrder, order: dict) -> None:
+        if pending.kind == KIND_STOP_LOSS_LIMIT:
+            self._attach_reconciled_stop_order(pending, order)
+        elif pending.side == "BUY":
+            self._record_reconciled_entry(pending, order)
+        elif pending.side == "SELL":
+            self._record_reconciled_exit(pending, order)
+        else:
+            raise ValueError(
+                f"Unerwartete Order-Seite '{pending.side}' in der "
+                "Pending-Orders-Datei des Trend-Bots."
+            )
+
+    def _record_reconciled_entry(self, pending: PendingOrder, order: dict) -> None:
+        if self._ledger.has_client_order_id(pending.client_order_id):
+            logger.info(
+                "%sEinstieg zu Order %s ist bereits im Ledger - nichts "
+                "nachzutragen.",
+                RECONCILIATION_PREFIX,
+                pending.client_order_id,
+            )
+            return
+
+        existing = self._ledger.open_position()
+        if existing is not None:
+            # Der Trend-Bot hat genau EINEN Slot - open_position() gibt
+            # den ersten offenen Eintrag zurück. Einen zweiten
+            # anzulegen würde diese Invariante brechen und den Bot in
+            # einen Zustand bringen, aus dem er allein nicht mehr
+            # herausfindet. Also nicht verbuchen, sondern laut melden:
+            # die Exception hält den Pending-Eintrag fest (siehe
+            # reconcile_pending_orders), damit die Frage nicht verloren
+            # geht, bis ein Mensch sie auflöst.
+            raise ValueError(
+                f"Order {pending.client_order_id} wäre ein zweiter offener "
+                f"Trend-Einstieg neben Position {existing['id']} - der Bot "
+                "hält bewusst nur eine Position gleichzeitig. Bitte manuell "
+                "auflösen (python -m dca_bot.audit_positions)."
+            )
+
+        symbol = pending.symbol or self._config.symbol
+        amount = float(pending.context.get("amount", self._config.amount_per_trade))
+
+        rules = self._client.get_symbol_trading_rules(symbol)
+        order = self._client.get_order_with_fills(symbol, order)
+
+        entry_price = average_fill_price(
+            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
+        )
+        if entry_price <= 0:
+            raise ValueError(
+                f"Kein brauchbarer Einstiegspreis für Order "
+                f"{pending.client_order_id} ermittelbar - Stop-Loss-Schwelle "
+                "und PnL wären daraus nicht berechenbar."
+            )
+
+        quantity = net_executed_quantity(order, rules, fallback=amount / entry_price)
+        quote_spent = float(order.get("cummulativeQuoteQty", amount))
+
+        trade = TrendTrade.new(
+            entry_price=entry_price,
+            quantity=quantity,
+            quote_spent=quote_spent,
+            dry_run=False,
+            client_order_id=pending.client_order_id,
+        )
+        self._ledger.record_entry(trade)
+
+        logger.warning(
+            "%sTrend-Einstieg nachgetragen: %s @ %.2f (Menge %.8f, Order %s). "
+            "Die Position hat noch KEINE exchange-seitige Stop-Loss-Order - "
+            "der anschließende Reconciliation-Schritt platziert sie.",
+            RECONCILIATION_PREFIX,
+            symbol,
+            entry_price,
+            quantity,
+            pending.client_order_id,
+        )
+        send_notification(
+            f"[REKONZILIATION] Nachgetragener Trend-Einstieg: {quantity:.8f} "
+            f"{symbol} @ {entry_price:.2f}. Die Order lief beim letzten "
+            "Bot-Lauf durch, ihr Ergebnis kam aber nicht mehr an - die "
+            "Absicherung wird jetzt nachgeholt."
+        )
+
+    def _record_reconciled_exit(self, pending: PendingOrder, order: dict) -> None:
+        trade_id = pending.context.get("trade_id")
+        open_trade = self._ledger.trade_by_id(trade_id) if trade_id else None
+
+        if open_trade is None:
+            raise ValueError(
+                f"Verkaufs-Order {pending.client_order_id} verweist auf den "
+                f"unbekannten Trade '{trade_id}' - der Verkauf hat real "
+                "stattgefunden, lässt sich aber keiner Position zuordnen."
+            )
+
+        if open_trade["status"] != "open":
+            logger.info(
+                "%sTrade %s ist bereits geschlossen - Verkauf zu Order %s war "
+                "schon verbucht.",
+                RECONCILIATION_PREFIX,
+                trade_id,
+                pending.client_order_id,
+            )
+            return
+
+        symbol = pending.symbol or self._config.symbol
+        reason = str(pending.context.get("reason", "signal"))
+
+        rules = self._client.get_symbol_trading_rules(symbol)
+        order = self._client.get_order_with_fills(symbol, order)
+
+        exit_price = average_fill_price(
+            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
+        )
+        proceeds = net_proceeds(
+            order, rules, fallback=open_trade["quantity"] * exit_price
+        )
+        realized_pnl = proceeds - open_trade["quote_spent"]
+
+        self._ledger.record_exit(
+            open_trade["id"],
+            exit_price,
+            datetime.now(timezone.utc).isoformat(),
+            reason,
+            realized_pnl,
+        )
+
+        reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
+        logger.warning(
+            "%sTrend-Ausstieg nachgetragen (%s): %s @ %.2f (Einstieg @ %.2f), "
+            "realisiert %.2f (Order %s).",
+            RECONCILIATION_PREFIX,
+            reason_label,
+            symbol,
+            exit_price,
+            open_trade["entry_price"],
+            realized_pnl,
+            pending.client_order_id,
+        )
+        send_notification(
+            f"[REKONZILIATION] Nachgetragener Trend-Ausstieg ({reason_label}): "
+            f"{open_trade['quantity']:.8f} {symbol} @ {exit_price:.2f} "
+            f"(Einstieg @ {open_trade['entry_price']:.2f}), realisiert: "
+            f"{realized_pnl:+.2f}."
+        )
+
+        if reason == "stop_loss":
+            # Der Latch gehört zum Ausstieg dazu - ohne ihn würde der Bot
+            # nach einem Stop-Loss-Exit sofort wieder einsteigen dürfen,
+            # obwohl der Exit real stattgefunden hat.
+            loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
+            self._stop_loss.pause(
+                symbol, open_trade["entry_price"], exit_price, loss_pct
+            )
+
+    def _attach_reconciled_stop_order(self, pending: PendingOrder, order: dict) -> None:
+        """
+        Hängt eine Stop-Loss-Order, die an der Börse liegt, im Ledger
+        wieder an ihren Trade.
+
+        Ohne diesen Schritt wüsste das Ledger nichts von der Order, und
+        `_ensure_stop_loss_protection()` würde im nächsten Zyklus eine
+        ZWEITE Stop-Order über dieselbe Menge platzieren - eine davon
+        muss scheitern oder Menge verkaufen, die nach dem Fill der
+        anderen nicht mehr da ist.
+
+        Findet sich am Trade bereits eine ANDERE Order-ID, liegen
+        tatsächlich zwei Stop-Orders an der Börse. Der Bot storniert die
+        verwaiste hier bewusst NICHT: das wäre seine erste autonome,
+        destruktive Aktion auf Basis eines abgeleiteten Zustands, und es
+        widerspräche dem sonst durchgehaltenen Prinzip, bei unklarer
+        Lage nicht zu handeln (siehe den "uncertain"-Pfad in
+        _resolve_stop_order_before_close). Stattdessen: deutlich melden
+        und einen Menschen draufschauen lassen.
+        """
+        trade_id = pending.context.get("trade_id")
+        trade = self._ledger.trade_by_id(trade_id) if trade_id else None
+        order_id = str(order.get("orderId", "")) or None
+        limit_price = pending.context.get("limit_price")
+
+        if trade is None:
+            raise ValueError(
+                f"Stop-Loss-Order {pending.client_order_id} verweist auf den "
+                f"unbekannten Trade '{trade_id}'."
+            )
+
+        if trade["status"] != "open":
+            logger.error(
+                "%sStop-Loss-Order %s (clientOrderId %s) liegt an der Börse, "
+                "ihr Trade %s ist aber bereits geschlossen - es handelt sich "
+                "um eine VERWAISTE Order. Sie wird bewusst nicht automatisch "
+                "storniert; bitte manuell bei Binance prüfen und ggf. "
+                "entfernen.",
+                RECONCILIATION_PREFIX,
+                order_id,
+                pending.client_order_id,
+                trade_id,
+            )
+            send_notification(
+                f"[REKONZILIATION] {self._config.symbol}: verwaiste "
+                f"Stop-Loss-Order {order_id} an der Börse - der zugehörige "
+                "Trade ist bereits geschlossen. Sie wurde NICHT automatisch "
+                "storniert, bitte manuell prüfen."
+            )
+            return
+
+        existing_order_id = trade.get("stop_loss_order_id")
+        if existing_order_id and str(existing_order_id) != order_id:
+            self._report_duplicate_stop_order(
+                trade_id, str(existing_order_id), order_id, pending.client_order_id
+            )
+            return
+
+        if str(existing_order_id or "") == (order_id or ""):
+            logger.info(
+                "%sStop-Loss-Order %s ist bereits am Trade %s hinterlegt.",
+                RECONCILIATION_PREFIX,
+                order_id,
+                trade_id,
+            )
+            return
+
+        self._ledger.set_stop_loss_order(trade["id"], order_id, limit_price)
+        logger.warning(
+            "%sStop-Loss-Order %s wieder an Trade %s gehängt - sie lag an der "
+            "Börse, war dem Ledger aber unbekannt. Ohne diesen Schritt hätte "
+            "der nächste Zyklus eine zweite Order über dieselbe Menge "
+            "platziert.",
+            RECONCILIATION_PREFIX,
+            order_id,
+            trade_id,
+        )
+        send_notification(
+            f"[REKONZILIATION] {self._config.symbol}: exchange-seitige "
+            f"Stop-Loss-Order {order_id} war dem Ledger unbekannt und wurde "
+            "wieder zugeordnet. Die Position ist abgesichert."
+        )
+
+    def _describe_stop_order_status(self, order_id: str | None) -> str:
+        """
+        Aktueller Börsen-Status einer Stop-Order als kurzer Text für
+        Log- und Telegram-Meldungen ("NEW", "FILLED", "CANCELED", ...).
+
+        Schlägt die Abfrage fehl oder liefert sie keinen verwertbaren
+        Status, wird das ausdrücklich als "nicht abrufbar" ausgewiesen -
+        NICHT geraten und nicht weggelassen. Ein fehlender Status ist
+        eine eigene, für die manuelle Prüfung wichtige Information: er
+        bedeutet "der Bot konnte es nicht klären", nicht "die Order ist
+        weg". Genau dieselbe Haltung wie im uncertain-Pfad von
+        _resolve_stop_order_before_close().
+
+        Der Fehlerfall wird hier bewusst nicht noch einmal geloggt -
+        get_order_status() tut das bereits (siehe binance_client.py).
+        """
+        if not order_id:
+            return STOP_ORDER_STATUS_UNAVAILABLE
+
+        status = self._client.get_order_status(self._config.symbol, order_id)
+        if status is None:
+            return STOP_ORDER_STATUS_UNAVAILABLE
+
+        value = str(status.get("status") or "").strip()
+        return value or STOP_ORDER_STATUS_UNAVAILABLE
+
+    def _report_duplicate_stop_order(
+        self,
+        trade_id: str,
+        ledger_order_id: str,
+        pending_order_id: str | None,
+        client_order_id: str,
+    ) -> None:
+        """
+        Meldet zwei exchange-seitige Stop-Orders für dieselbe Position.
+
+        Es wird weiterhin NICHTS automatisch storniert (bewusste
+        Entscheidung, siehe _attach_reconciled_stop_order): das wäre die
+        erste autonome, destruktive Aktion des Bots auf Basis eines
+        abgeleiteten Zustands. Hier wird die Meldung lediglich um den
+        tatsächlichen Börsen-Status BEIDER Orders angereichert - reine
+        Information, kein Verhaltenswechsel.
+
+        Der Nutzen ist praktisch: ohne die beiden Status müsste man nach
+        der Telegram-Nachricht erst manuell nachsehen, ob überhaupt noch
+        beide offen sind. Oft ist eine davon längst CANCELED oder
+        FILLED, und dann ist gar nichts zu tun - das steht jetzt direkt
+        in der Meldung.
+        """
+        ledger_status = self._describe_stop_order_status(ledger_order_id)
+        pending_status = self._describe_stop_order_status(pending_order_id)
+
+        logger.error(
+            "%s[TREND-WARNUNG] Doppelte Stop-Order erkannt für Position %s. "
+            "Ledger-Order %s: Status %s. Pending-Order %s: Status %s "
+            "(clientOrderId %s). Liegen beide noch offen, wird eine davon "
+            "scheitern oder Menge verkaufen wollen, die nach dem Fill der "
+            "anderen nicht mehr da ist. Es wurde nichts automatisch "
+            "storniert - manuelle Prüfung/Stornierung empfohlen.",
+            RECONCILIATION_PREFIX,
+            trade_id,
+            ledger_order_id,
+            ledger_status,
+            pending_order_id,
+            pending_status,
+            client_order_id,
+        )
+        send_notification(
+            f"[TREND-WARNUNG] Doppelte Stop-Order erkannt für Position "
+            f"{trade_id}. Ledger-Order {ledger_order_id}: Status "
+            f"{ledger_status}. Pending-Order {pending_order_id}: Status "
+            f"{pending_status}. Es wurde nichts automatisch storniert - "
+            "manuelle Prüfung/Stornierung empfohlen."
+        )
 
     def reconcile_on_startup(self) -> None:
         """
