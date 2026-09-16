@@ -180,7 +180,7 @@ Nach Abschluss des Laptop-DCA-Tests: DCA-Bot mit Telegram-Integration neu gestar
 
 **Wichtiger Reminder:** Vor dem 12.10. müssen Logs und `data/`-Ordner final gesichert werden (siehe 6c), sonst gehen die Testergebnisse beim Vertragsende verloren.
 
-**Absicherung:** SSH-Key-Login eingerichtet (Ed25519), Passwort-Authentifizierung deaktiviert (`PasswordAuthentication no` in `sshd_config`). Zusätzlich ein separater, passphrasefreier Deploy-Key für Claude-Code-Automatisierung angelegt (getrennt vom Haupt-SSH-Key, der weiterhin für GitHub etc. mit Passphrase geschützt bleibt).
+**Absicherung:** SSH-Key-Login eingerichtet (Ed25519), Passwort-Authentifizierung deaktiviert (`PasswordAuthentication no` in `sshd_config`). *(Korrektur 16.09.2026: Für den VPS traf das faktisch NICHT zu — `sshd_config.d/50-cloud-init.conf` setzte `PasswordAuthentication yes` und wurde alphabetisch vor der Haupteinstellung wirksam. Die Lücke bestand vom 13.09. bis zum 16.09. und ist erst beim SSH-Check behoben worden, siehe „Infrastruktur-Härtung auf beiden Servern" in 6g. Bemerkenswert: Derselbe Cloud-Init-Fallstrick steht seit dem 15.09. in 6e — dort beim Homeserver-Setup bemerkt, aber nie rückwirkend auf den VPS angewendet.)* Zusätzlich ein separater, passphrasefreier Deploy-Key für Claude-Code-Automatisierung angelegt (getrennt vom Haupt-SSH-Key, der weiterhin für GitHub etc. mit Passphrase geschützt bleibt).
 
 **Deployment:** Projekt von GitHub geklont (öffentliches Repo `EliasNein/crypto-bot`), `.env` und `data/`-Ordner manuell übertragen (`scp`, da beide über `.gitignore` ausgeschlossen sind). Alle drei Bots laufen als **systemd-Services** (`dca-bot`, `grid-bot`, `trend-bot`):
 - Automatischer Start bei Server-Neustart (`enabled`)
@@ -610,13 +610,37 @@ Mit W17 sind **alle 18 „wichtigen" Punkte** aus dem Sicherheitsreview (Claude 
 
 **Durchgehaltenes Prinzip:** Für jeden nicht-trivialen Fix wurde die Wirksamkeit der Tests **gemessen** statt behauptet — durch Zurückdrehen der jeweiligen Änderung (Stufen A–C) bzw. durch Mutation der geprüften Regel (Stufe D). Ein Test, der auch gegen den alten Stand grün ist, prüft nichts. In Stufe D war die erste Messung selbst fehlerhaft und musste korrigiert werden, bevor sie etwas aussagte; das ist im dortigen Abschnitt festgehalten, weil die Fehlerart (gleichmäßige Treffer über offensichtlich unbeteiligte Tests) das verlässlichste Warnsignal dafür ist.
 
-**Was der Review NICHT ersetzt.** Drei Dinge bleiben ausdrücklich offen und sind keine Code-Aufgaben:
+**Was der Review NICHT ersetzt.** Zwei Dinge bleiben ausdrücklich offen und sind keine Code-Aufgaben:
 
-1. **Infrastruktur-Punkte**, nur per SSH auf VPS und Homeserver prüfbar — im Repo liegen keine `.service`-Dateien.
-2. **Die zwei Termine am harten VPS-Vertragsende 12.10.2026**: finaler `data/`-Snapshot (sonst gehen die Testergebnisse verloren) und Entfernen des Claude-Code-Deploy-Keys.
-3. **Die Paper-Trade-Phase selbst.** Der Code gilt als review-seitig freigegeben, aber ein freigegebener Code ist keine validierte Strategie. Offen bleiben insbesondere die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` anhand realer Fill-Daten (siehe 6f, bisherige Stichprobe n=2) und die Positionsgrößen-Festlegung inklusive des in W16 gerechneten Grid-Topfs.
+1. **Die zwei Termine am harten VPS-Vertragsende 12.10.2026**: finaler `data/`-Snapshot (sonst gehen die Testergebnisse verloren) und Entfernen des Claude-Code-Deploy-Keys.
+2. **Die Paper-Trade-Phase selbst.** Der Code gilt als review-seitig freigegeben, aber ein freigegebener Code ist keine validierte Strategie. Offen bleiben insbesondere die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` anhand realer Fill-Daten (siehe 6f, bisherige Stichprobe n=2) und die Positionsgrößen-Festlegung inklusive des in W16 gerechneten Grid-Topfs.
 
 **Für den Echtgeld-Schalter heißt das:** Die technischen Voraussetzungen stehen — `USE_TESTNET=false` ist ein Konfigurationsschritt mit lauter Warnung, Pflichtprüfung und erzwungenen expliziten Positionsgrößen (W12). Die verbleibende Absicherung ist nicht mehr der Code, sondern die Beobachtungszeit.
+
+### Infrastruktur-Härtung auf beiden Servern (16.09.2026)
+
+Direkt per SSH durchgeführt, kein Code-Change im Repo.
+
+**SSH/Netzwerk:**
+- Homeserver: `PermitRootLogin no`, `AllowUsers elias` ergänzt (waren zuvor nicht explizit gesetzt). `ufw` aktiviert, nur Port 22 aus dem lokalen Subnetz (192.168.178.0/24) erlaubt.
+- VPS: **Echte Sicherheitslücke gefunden** - `sshd_config.d/50-cloud-init.conf` setzte `PasswordAuthentication yes`, wurde alphabetisch VOR der korrigierenden `60-cloudimg-settings.conf` (mit `no`) eingelesen und damit wirksam, obwohl die Projektdoku (6b) "Passwort-Authentifizierung deaktiviert" behauptete. Per `sshd -T` verifiziert, mit neuer `00-hardening.conf` behoben (`PasswordAuthentication no`, `PermitRootLogin prohibit-password`). `ufw` aktiviert (Port 22 von überall, da kein festes Zugriffsnetz).
+- Beide: `.env`-Berechtigungen von `644`/`664` auf `600` korrigiert (waren zuvor world-readable bzw. group-writable).
+
+**systemd-Härtung (alle Bot-Services):**
+- `WorkingDirectory`, `After=network-online.target`+`Wants=network-online.target`, `StartLimitIntervalSec=600`/`StartLimitBurst=5`, `RestartSec=30`.
+- Härtungsdirektiven: `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=strict` mit `ReadWritePaths` auf `data/`+`logs/`, `CapabilityBoundingSet=` (leer).
+- Homeserver: Services laufen als dedizierter Nutzer `elias` (bereits vorher so, `User=elias` in allen vier inkl. Allocator).
+- VPS: bewusste Entscheidung, Services weiterhin als `root` laufen zu lassen (kein dedizierter Nutzer angelegt) - Begründung: VPS wird zum 12.10. abgeschaltet, Aufwand für Nutzer-Migration (Verzeichnis verschieben, Berechtigungen, SSH-Keys) steht nicht im Verhältnis zur verbleibenden Laufzeit. Härtungsdirektiven wirken trotzdem, auch ohne dedizierten Nutzer.
+- `OnFailure=notify-failure@%n.service` auf allen Services ergänzt: neues Skript `/usr/local/bin/notify-service-failure.sh` + Template-Unit `notify-failure@.service` senden eine Telegram-Nachricht, falls ein Service die Neustart-Grenze erreicht und komplett aufgibt (Fall, in dem der Bot selbst keine Telegram-Nachricht mehr senden könnte). Auf beiden Servern getestet und funktionsfähig.
+
+**Log-Rotation:**
+- `logrotate`-Konfiguration (`/etc/logrotate.d/crypto-bot`) auf beiden Servern: wöchentlich, 8 Wochen Aufbewahrung, `copytruncate` (nötig, da die Bots ihre Log-Dateien durchgehend offen halten).
+
+**Backup/Snapshot:**
+- Homeserver: TrueNAS Periodic Snapshot Task für `volume1/VM/crypto_bot_vm-ipgehi` eingerichtet - täglich um Mitternacht, 4 Wochen Aufbewahrung. Erster manueller Snapshot bereits erstellt.
+- VPS: kein laufendes Snapshot-Äquivalent eingerichtet (Contabo-VPS), stattdessen der bereits geplante finale `data/`-Snapshot vor dem 12.10. (siehe 6c/6e).
+
+Damit sind alle Infrastruktur-Punkte aus dem Sicherheitsreview abgeschlossen. Offen bleiben nur die zwei terminlich an den 12.10. gebundenen Punkte: finaler VPS-Snapshot und Entfernen des Deploy-Keys beim Decommissioning.
 
 ---
 
