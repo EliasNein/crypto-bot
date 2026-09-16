@@ -18,6 +18,7 @@ from .binance_client import TradingClient
 from .config import Config, load_config
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch, PortfolioStopLoss, TradeLedger
 from .strategy import DCAStrategy
@@ -113,7 +114,15 @@ def main() -> None:
     # pending_orders.py, Sicherheitsreview-Punkt K2), wird sie jetzt
     # nachgetragen. Sonst rechneten Tageslimit und Stop-Loss-Kostenbasis
     # in diesem Zyklus mit einer Position, die zu klein ist.
-    strategy.reconcile_pending_orders()
+    #
+    # Gekapselt, damit ein Fehler hier den Bot-Start nicht verhindert
+    # (W18) - der Aufruf liegt zwangsläufig außerhalb des try/except der
+    # Hauptschleife.
+    safe_startup_reconciliation(
+        logger,
+        "[FEHLER]",
+        [("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders)],
+    )
 
     # Eigene, rein lesende Instanzen für die tägliche Zusammenfassung -
     # analog zu reset_stop_loss.py greifen sie auf dieselben Dateien zu wie

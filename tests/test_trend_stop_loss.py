@@ -26,6 +26,16 @@ from pathlib import Path
 from unittest import mock
 
 from dca_bot.order_utils import SymbolTradingRules
+from dca_bot.pending_orders import (
+    KIND_STOP_LOSS_LIMIT,
+    ORDER_CONFIRMED,
+    ORDER_LIFECYCLE_DEAD,
+    ORDER_LIFECYCLE_FILLED,
+    ORDER_LIFECYCLE_LIVE,
+    ORDER_WITHOUT_EFFECT,
+    classify_order_status,
+    order_lifecycle_state,
+)
 from dca_bot.trend_config import TrendConfig
 from dca_bot.trend_strategy import (
     UNCERTAIN_CYCLES_WARNING_THRESHOLD,
@@ -231,6 +241,28 @@ class FakeTradingClient:
         order["status"] = "FILLED"
         order["executedQty"] = executed_qty
         order["cummulativeQuoteQty"] = cumulative_quote
+
+    def end_order_without_fill(self, order_id: str, status: str = "CANCELED") -> None:
+        """
+        Testhilfe fuer W7: die Order ist an der Boerse beendet, OHNE
+        etwas bewegt zu haben - storniert, abgelaufen oder abgelehnt.
+        Die Absicherung existiert damit nicht mehr, obwohl das Ledger
+        weiterhin eine Order-ID fuehrt.
+        """
+        order = self.orders[order_id]
+        order["status"] = status
+        order["executedQty"] = "0"
+        order["cummulativeQuoteQty"] = "0"
+
+    def partially_fill_order(self, order_id: str, executed_qty: float) -> None:
+        """
+        Testhilfe fuer W8: die Order ist teilweise gefuellt und
+        weiterhin offen.
+        """
+        order = self.orders[order_id]
+        order["status"] = "PARTIALLY_FILLED"
+        order["executedQty"] = executed_qty
+        order["cummulativeQuoteQty"] = "0"
 
 
 class TrendStrategyTestBase(unittest.TestCase):
@@ -518,6 +550,57 @@ class TrendStopLossTestCase(TrendStrategyTestBase):
         self.assertEqual(len(fill_analysis_lines), 1)
         self.assertIn(f"Limit: {limit_price:.2f}", fill_analysis_lines[0])
         self.assertIn(f"gefüllt bei: {fill_price:.2f}", fill_analysis_lines[0])
+
+    def test_latch_is_set_even_without_stop_limit_price(self):
+        """
+        Regressionstest zu W6: Der Stop-Loss-Latch darf nicht davon
+        abhaengen, ob die [STOP-FILL-ANALYSE]-Zeile geschrieben werden
+        kann.
+
+        Vor dem Fix stand `self._stop_loss.pause(...)` am Ende von
+        _log_stop_fill_analysis(), hinter dessen `return` fuer einen
+        fehlenden stop_limit_price. Eine ueber einen Exchange-Fill
+        geschlossene Position ohne hinterlegten Limitpreis bekam deshalb
+        KEINEN Latch - der Bot haette im naechsten Zyklus sofort wieder
+        einsteigen duerfen, also genau der Whipsaw, gegen den der Latch
+        gebaut ist.
+
+        Dieser Zustand entsteht real: die Stop-Order wurde erst spaeter
+        nachgereicht (siehe _ensure_stop_loss_protection /
+        _attach_reconciled_stop_order), oder der Ledger-Eintrag stammt
+        aus der Zeit vor Einfuehrung des Feldes.
+
+        Faellt gegen den alten Code um.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        order_id = open_trade["stop_loss_order_id"]
+
+        # Limitpreis gezielt entfernen, Order-ID bleibt - genau die
+        # Kombination, die vorher durchs Raster fiel.
+        strategy._ledger.set_stop_loss_order(open_trade["id"], order_id, None)
+
+        quantity = 15.0 / 50_000.0
+        fill_price = 44_800.0
+        client.fill_order(order_id, executed_qty=quantity, cumulative_quote=quantity * fill_price)
+        client.price = 49_000.0
+
+        with self.assertLogs("trend_bot", level="INFO") as captured:
+            strategy.execute_once()
+
+        closed_trade = strategy._ledger._read()[0]
+        self.assertEqual(closed_trade["status"], "closed")
+        self.assertEqual(closed_trade["exit_reason"], "stop_loss")
+        self.assertTrue(
+            strategy._stop_loss.is_paused(),
+            "Stop-Loss-Latch muss auch ohne stop_limit_price gesetzt werden",
+        )
+        # Die Analyse-Zeile entfaellt mangels Vergleichswert - das ist
+        # korrekt und darf folgenlos bleiben.
+        self.assertEqual(
+            [line for line in captured.output if "[STOP-FILL-ANALYSE]" in line], []
+        )
 
     def test_execute_once_leaves_open_position_when_stop_order_still_new(self):
         strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
@@ -1168,6 +1251,222 @@ class TrendTradingRulesTestCase(TrendStrategyTestBase):
         self.assertLessEqual(quantity, raw)
         steps = quantity / FAKE_TRADING_RULES.step_size
         self.assertAlmostEqual(steps, round(steps), places=6)
+
+
+class DeadStopOrderTestCase(TrendStrategyTestBase):
+    """
+    Sicherheitsreview-Punkte W7 und W8: der Zyklus-Check der
+    exchange-seitigen Stop-Loss-Order kannte vorher nur zwei der vier
+    moeglichen Ausgaenge.
+
+    W7 - eine Order, die an der Boerse beendet wurde, ohne etwas zu
+    bewegen (storniert/abgelaufen/abgelehnt), blieb dem Ledger als
+    gueltige Absicherung erhalten. `_ensure_stop_loss_protection()`
+    steigt bei jeder vorhandenen stop_loss_order_id sofort aus - die
+    Position waere damit dauerhaft ungeschuetzt geblieben, ohne dass es
+    je eskaliert.
+
+    W8 - `PARTIALLY_FILLED` fiel komplett durch: der Bot sah "nicht
+    FILLED" und tat nichts, obwohl ein Teil der Position an der Boerse
+    bereits verkauft war.
+
+    Beide werden jetzt ueber dieselbe Funktion bewertet wie der
+    Pending-Pfad (order_lifecycle_state in pending_orders.py).
+    """
+
+    def _open_protected_position(self, price: float = 50_000.0):
+        strategy, client = self._make_strategy(trading_enabled=True, price=price)
+        strategy._open_position(price)
+        open_trade = strategy._ledger.open_position()
+        self.assertIsNotNone(
+            open_trade["stop_loss_order_id"], "Vorbedingung: abgesichert"
+        )
+        return strategy, client, open_trade["stop_loss_order_id"]
+
+    # -- W7: tote Order --
+
+    def test_dead_stop_order_is_replaced_in_the_same_cycle(self):
+        """
+        Kern von W7: storniert entdeckt -> Zuordnung geloest -> neue
+        Order noch im selben Durchlauf. Faellt gegen den alten Code um
+        (dort blieb die tote ID stehen und blockierte jeden Ersatz).
+        """
+        strategy, client, order_id = self._open_protected_position()
+        client.end_order_without_fill(order_id)
+        client.price = 51_000.0  # ueber der Stop-Schwelle, kein Exit-Grund
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as notify:
+            with self.assertLogs("trend_bot", level="WARNING"):
+                strategy.execute_once()
+
+        open_trade = strategy._ledger.open_position()
+        self.assertIsNotNone(open_trade, "Position bleibt offen")
+        self.assertIsNotNone(
+            open_trade["stop_loss_order_id"], "Neue Absicherung muss stehen"
+        )
+        self.assertNotEqual(
+            open_trade["stop_loss_order_id"], order_id, "Muss eine NEUE Order sein"
+        )
+        # Entry-Order + urspruengliche Stop-Order + Ersatz-Stop-Order.
+        self.assertEqual(len(client.stop_order_calls), 2)
+
+        messages = [call.args[0] for call in notify.call_args_list]
+        self.assertTrue(
+            any("ist beendet" in m for m in messages),
+            f"Verschwundene Order muss gemeldet werden: {messages}",
+        )
+
+    def test_dead_stop_order_is_detected_for_all_terminal_states(self):
+        for status in ("CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"):
+            with self.subTest(status=status):
+                # setUp() laeuft nur einmal pro Testmethode, die
+                # Ledger-Datei ueberlebt also die Subtests. Ohne das
+                # Zuruecksetzen wuerde open_position() ab der zweiten
+                # Runde die Position der ERSTEN zurueckgeben.
+                Path(self.state_file).unlink(missing_ok=True)
+                strategy, client, order_id = self._open_protected_position()
+                client.end_order_without_fill(order_id, status=status)
+                client.price = 51_000.0
+
+                with mock.patch("dca_bot.trend_strategy.send_notification"):
+                    with self.assertLogs("trend_bot", level="WARNING"):
+                        strategy.execute_once()
+
+                open_trade = strategy._ledger.open_position()
+                self.assertNotEqual(open_trade["stop_loss_order_id"], order_id)
+
+    def test_dead_stop_order_is_replaced_on_startup_reconciliation(self):
+        """
+        Derselbe Weg beim Bot-Start: die Order wurde waehrend der
+        Downtime storniert.
+        """
+        strategy, client, order_id = self._open_protected_position()
+        client.end_order_without_fill(order_id)
+
+        restarted = TrendFollowingStrategy(self._make_config(True), client)
+        restarted._seeded = True
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            with self.assertLogs("trend_bot", level="WARNING"):
+                restarted.reconcile_on_startup()
+
+        open_trade = restarted._ledger.open_position()
+        self.assertIsNotNone(open_trade["stop_loss_order_id"])
+        self.assertNotEqual(open_trade["stop_loss_order_id"], order_id)
+
+    def test_dead_stop_order_does_not_close_the_position(self):
+        """
+        Abgrenzung zum FILLED-Pfad: storniert heisst NICHT verkauft. Die
+        Position bleibt offen und es wird nichts als realisiert verbucht.
+        """
+        strategy, client, order_id = self._open_protected_position()
+        client.end_order_without_fill(order_id)
+        client.price = 51_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            with self.assertLogs("trend_bot", level="WARNING"):
+                strategy.execute_once()
+
+        trade = strategy._ledger._read()[0]
+        self.assertEqual(trade["status"], "open")
+        self.assertIsNone(trade["realized_pnl"])
+        self.assertFalse(strategy._stop_loss.is_paused())
+        self.assertEqual(client.market_sell_calls, [])
+
+    def test_unreadable_status_leaves_the_order_id_untouched(self):
+        """
+        Wichtige Gegenprobe: eine GESCHEITERTE Status-Abfrage ist keine
+        Aussage ueber die Order. Die Zuordnung darf dabei nicht geloest
+        werden - sonst wuerde ein Netzwerkhaenger eine zweite Stop-Order
+        ueber dieselbe Menge ausloesen.
+        """
+        strategy, client, order_id = self._open_protected_position()
+        client.orders.pop(order_id)  # get_order_status() liefert None
+        client.price = 51_000.0
+
+        strategy.execute_once()
+
+        open_trade = strategy._ledger.open_position()
+        self.assertEqual(open_trade["stop_loss_order_id"], order_id)
+        self.assertEqual(len(client.stop_order_calls), 1, "Keine zweite Order")
+
+    # -- W8: Teilfuellung --
+
+    def test_partially_filled_stop_order_is_reported_but_not_acted_on(self):
+        strategy, client, order_id = self._open_protected_position()
+        open_trade = strategy._ledger.open_position()
+        client.partially_fill_order(order_id, executed_qty=open_trade["quantity"] / 2)
+        client.price = 51_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as notify:
+            with self.assertLogs("trend_bot", level="WARNING") as captured:
+                strategy.execute_once()
+
+        # Nichts angefasst: Order lebt noch und kann vollstaendig fuellen.
+        trade = strategy._ledger._read()[0]
+        self.assertEqual(trade["status"], "open")
+        self.assertEqual(trade["stop_loss_order_id"], order_id)
+        self.assertEqual(client.market_sell_calls, [])
+        self.assertEqual(len(client.stop_order_calls), 1, "Keine zweite Order")
+
+        self.assertTrue(any("TEILWEISE gefüllt" in line for line in captured.output))
+        messages = [call.args[0] for call in notify.call_args_list]
+        self.assertTrue(any("teilweise gefüllt" in m for m in messages))
+
+    def test_untouched_open_stop_order_stays_silent(self):
+        """
+        Der Regelfall (NEW, nichts gefuellt) darf keine Warnung
+        erzeugen - sonst waere die W8-Meldung wertlos.
+        """
+        strategy, client, order_id = self._open_protected_position()
+        client.price = 51_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as notify:
+            strategy.execute_once()
+
+        self.assertEqual(notify.call_args_list, [])
+        open_trade = strategy._ledger.open_position()
+        self.assertEqual(open_trade["stop_loss_order_id"], order_id)
+
+    # -- Anti-Divergenz --
+
+    def test_fill_check_and_pending_path_share_one_rule(self):
+        """
+        Der eigentliche Punkt hinter W7/W8: es darf nicht zwei
+        Bewertungen desselben Order-Status geben.
+
+        Geprueft wird deshalb nicht nur das Verhalten, sondern die
+        Quelle: fuer jeden relevanten Status muss die Einstufung des
+        Fill-Checks genau der von order_lifecycle_state() entsprechen -
+        derselben Funktion, auf der classify_order_status() (Pending-Pfad)
+        aufsetzt.
+        """
+        cases = {
+            "FILLED": ORDER_LIFECYCLE_FILLED,
+            "PARTIALLY_FILLED": ORDER_LIFECYCLE_LIVE,
+            "NEW": ORDER_LIFECYCLE_LIVE,
+            "CANCELED": ORDER_LIFECYCLE_DEAD,
+            "EXPIRED": ORDER_LIFECYCLE_DEAD,
+            "REJECTED": ORDER_LIFECYCLE_DEAD,
+        }
+
+        for status, expected_state in cases.items():
+            with self.subTest(status=status):
+                executed = "0.0001" if status in ("FILLED", "PARTIALLY_FILLED") else "0"
+                order = {"status": status, "executedQty": executed}
+                self.assertEqual(order_lifecycle_state(order), expected_state)
+
+                # Die Pending-Seite leitet ihre Antwort aus demselben
+                # Zustand ab - fuer eine Stop-Order gilt "lebt noch" dort
+                # als bestaetigt, "beendet ohne Wirkung" als wirkungslos.
+                expected_pending = {
+                    ORDER_LIFECYCLE_FILLED: ORDER_CONFIRMED,
+                    ORDER_LIFECYCLE_LIVE: ORDER_CONFIRMED,
+                    ORDER_LIFECYCLE_DEAD: ORDER_WITHOUT_EFFECT,
+                }[expected_state]
+                self.assertEqual(
+                    classify_order_status(order, KIND_STOP_LOSS_LIMIT), expected_pending
+                )
 
 
 if __name__ == "__main__":

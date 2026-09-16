@@ -32,8 +32,13 @@ from .order_utils import (
 )
 from .pending_orders import (
     KIND_STOP_LOSS_LIMIT,
+    ORDER_LIFECYCLE_DEAD,
+    ORDER_LIFECYCLE_FILLED,
+    ORDER_LIFECYCLE_LIVE,
     RECONCILIATION_PREFIX,
     PendingOrder,
+    executed_quantity,
+    order_lifecycle_state,
     reconcile_pending_orders,
 )
 from .risk import KillSwitch
@@ -663,6 +668,21 @@ class TrendFollowingStrategy:
         exit_time = datetime.now(timezone.utc).isoformat()
         self._ledger.record_exit(open_trade["id"], exit_price, exit_time, "stop_loss", realized_pnl)
 
+        # Der Stop-Loss-Latch gehört zum Ausstieg, nicht zum Logging
+        # (Sicherheitsreview-Punkt W6). Er stand bis hierher am Ende von
+        # _log_stop_fill_analysis() - hinter einem `return`, das greift,
+        # wenn kein stop_limit_price hinterlegt ist. Eine Position, die
+        # über einen Exchange-Fill ohne bekannten Limitpreis geschlossen
+        # wurde, bekam dadurch KEINEN Latch, obwohl es ein regulärer
+        # Stop-Loss-Exit war - der Bot hätte im nächsten Zyklus sofort
+        # wieder einsteigen dürfen, also genau der Whipsaw, gegen den der
+        # Latch gebaut ist. Ob eine Analyse-Zeile geschrieben werden kann,
+        # darf über eine Sicherheitssperre nicht entscheiden.
+        loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
+        self._stop_loss.pause(
+            self._config.symbol, open_trade["entry_price"], exit_price, loss_pct
+        )
+
         logger.warning(
             "%sExchange-seitige Stop-Loss-Order bereits gefüllt: %s @ %.2f "
             "(Einstieg @ %.2f), realisiert %.2f - Position im Ledger als "
@@ -696,6 +716,12 @@ class TrendFollowingStrategy:
         Modus, Stop-Order wurde erfolgreich platziert) - im Dry-Run oder
         nach einem fehlgeschlagenen Order-Platzierungsversuch (siehe
         _open_position) fehlt der Vergleichswert, dann wird nichts geloggt.
+
+        Diese Funktion tut seit dem W6-Fix ausschließlich das, was ihr
+        Name sagt: loggen. Der Stop-Loss-Latch, der früher hier am Ende
+        stand, sitzt jetzt im Exit-Pfad selbst (siehe
+        _close_from_filled_stop_order) und hängt damit nicht mehr daran,
+        ob diese Zeile überhaupt geschrieben werden kann.
         """
         limit_price = open_trade.get("stop_limit_price")
         if limit_price is None:
@@ -709,9 +735,6 @@ class TrendFollowingStrategy:
             exit_price,
             diff_pct,
         )
-
-        loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
-        self._stop_loss.pause(self._config.symbol, open_trade["entry_price"], exit_price, loss_pct)
 
     def _check_exchange_stop_loss_fill(self, open_trade: dict, log_prefix: str = "") -> bool:
         """
@@ -728,16 +751,143 @@ class TrendFollowingStrategy:
         verwendet - `log_prefix` erlaubt Letzterem, dieselbe Logik mit
         einem eigenen, gut auffindbaren Log-Tag ("[REKONZILIATION]") zu
         markieren.
+
+        Die Bewertung des Order-Status kommt seit den Punkten W7/W8 aus
+        `order_lifecycle_state()` (pending_orders.py) - derselben
+        Funktion, auf der auch der Pending-Pfad aufsetzt. Vorher stand
+        hier eine eigene Regel (`status == "FILLED"`), und die kannte nur
+        zwei der vier möglichen Ausgänge:
+
+        - ORDER_LIFECYCLE_FILLED: die Börse hat verkauft -> Position im
+          Ledger schließen, kein eigener Verkaufsversuch. (Wie bisher.)
+        - ORDER_LIFECYCLE_DEAD (W7): die Order ist beendet, ohne etwas
+          bewegt zu haben - storniert, abgelaufen oder abgelehnt. Die
+          Position ist damit UNGESCHÜTZT, aber das Ledger führte
+          weiterhin eine Order-ID; `_ensure_stop_loss_protection()`
+          steigt bei jeder vorhandenen ID sofort aus und hätte deshalb
+          nie Ersatz platziert. Die Position wäre dauerhaft ohne
+          exchange-seitige Absicherung geblieben - genau der Zustand, den
+          der Fix aus 6f/K1-Folgefund verhindern soll, nur über einen
+          anderen Weg hinein.
+        - ORDER_LIFECYCLE_LIVE (W8): die Order lebt noch. Normalfall,
+          nichts zu tun - bei einer TEILFÜLLUNG wird das aber sichtbar
+          gemacht, siehe _warn_on_partially_filled_stop_order().
+        - ORDER_LIFECYCLE_UNREADABLE: die Abfrage hat versagt. Das ist
+          KEINE Aussage über die Order, also wird nichts angefasst.
         """
         order_id = open_trade.get("stop_loss_order_id")
         if not order_id:
             return False
 
         status = self._client.get_order_status(self._config.symbol, order_id)
-        if status is not None and status.get("status") == "FILLED":
+        state = order_lifecycle_state(status)
+
+        if state == ORDER_LIFECYCLE_FILLED:
             self._close_from_filled_stop_order(open_trade, status, log_prefix=log_prefix)
             return True
+
+        if state == ORDER_LIFECYCLE_DEAD:
+            self._forget_dead_stop_order(open_trade, order_id, status, log_prefix)
+            return False
+
+        if state == ORDER_LIFECYCLE_LIVE:
+            self._warn_on_partially_filled_stop_order(
+                open_trade, order_id, status, log_prefix
+            )
         return False
+
+    def _forget_dead_stop_order(
+        self, open_trade: dict, order_id: str, status: dict, log_prefix: str
+    ) -> None:
+        """
+        Löst die Zuordnung einer Stop-Loss-Order, die an der Börse
+        beendet wurde, ohne etwas bewegt zu haben (W7).
+
+        Eine solche Order schützt nichts mehr. Sie im Ledger stehen zu
+        lassen wäre eine Falschangabe - und schlimmer: sie würde
+        `_ensure_stop_loss_protection()` dauerhaft blockieren, das bei
+        jeder vorhandenen `stop_loss_order_id` sofort aussteigt. Nach dem
+        Leeren platziert derselbe Zyklus (bzw. der Reconciliation-Schritt
+        beim Start) automatisch Ersatz.
+
+        Der `open_trade`-Dict wird mitgezogen, damit die aufrufende Seite
+        im laufenden Zyklus nicht mit einem veralteten Stand
+        weiterarbeitet - gleiches Muster wie in
+        _ensure_stop_loss_protection().
+
+        Gemeldet wird das bewusst per Telegram: eine Stop-Order
+        verschwindet nicht von selbst. Entweder hat jemand sie manuell
+        storniert, oder die Börse hat sie abgelehnt/verfallen lassen -
+        beides gehört gesehen.
+        """
+        self._ledger.set_stop_loss_order(open_trade["id"], None, None)
+        open_trade["stop_loss_order_id"] = None
+        open_trade["stop_limit_price"] = None
+
+        order_state = status.get("status") if isinstance(status, dict) else None
+        logger.warning(
+            "%sExchange-seitige Stop-Loss-Order %s existiert nicht mehr "
+            "(Status %s, ohne ausgeführte Menge) - die Position %s ist damit "
+            "aktuell NUR software-intern abgesichert. Die Zuordnung im Ledger "
+            "wurde gelöst, damit noch in diesem Durchlauf eine neue Order "
+            "platziert wird.",
+            log_prefix,
+            order_id,
+            order_state,
+            open_trade["id"],
+        )
+        send_notification(
+            f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: die "
+            f"exchange-seitige Stop-Loss-Order {order_id} ist beendet "
+            f"(Status {order_state}), ohne verkauft zu haben. Der Bot "
+            "platziert automatisch Ersatz - falls die Order manuell "
+            "storniert wurde, bitte beachten."
+        )
+
+    def _warn_on_partially_filled_stop_order(
+        self, open_trade: dict, order_id: str, status: dict, log_prefix: str
+    ) -> None:
+        """
+        Macht eine teilweise gefüllte, noch offene Stop-Loss-Order
+        sichtbar (W8).
+
+        Bewusst OHNE Ledger-Korrektur: die Order lebt noch und kann
+        vollständig füllen, jede jetzt notierte Teilmenge wäre im
+        nächsten Moment falsch. Sobald sie einen terminalen Status
+        erreicht, greift der reguläre FILLED-Pfad mit den echten
+        Fülldaten.
+
+        Was hier zählt, ist die Sichtbarkeit: ein Teil der Position ist an
+        der Börse bereits verkauft, während das Ledger die volle Menge
+        führt. Ein späterer eigener Market-Sell über diese volle Menge
+        würde scheitern. Die Meldung geht bewusst in JEDEM Zyklus raus -
+        beim 24-Stunden-Takt des Trend-Bots ist das höchstens eine
+        Erinnerung pro Tag, dass der Zustand weiter besteht, und keine
+        Spam-Gefahr (anders als bei uncertain_cycles, wo der Takt
+        deutlich kürzer sein kann).
+        """
+        filled_qty = executed_quantity(status)
+        if filled_qty <= 0:
+            return  # normale, unberührte Stop-Order - der Regelfall
+
+        logger.warning(
+            "%sExchange-seitige Stop-Loss-Order %s ist TEILWEISE gefüllt "
+            "(%.8f von %.8f, Status %s) und weiterhin offen. Das Ledger führt "
+            "bis zum Abschluss der Order die volle Menge - ein eigener "
+            "Verkauf über diese Menge würde derzeit scheitern. Es wird "
+            "bewusst nichts korrigiert, solange die Order noch füllen kann.",
+            log_prefix,
+            order_id,
+            filled_qty,
+            open_trade["quantity"],
+            status.get("status"),
+        )
+        send_notification(
+            f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: Stop-Loss-Order "
+            f"{order_id} ist teilweise gefüllt ({filled_qty:.8f} von "
+            f"{open_trade['quantity']:.8f}) und noch offen. Position im Ledger "
+            "unverändert, bitte im Auge behalten."
+        )
 
     def reconcile_pending_orders(self) -> None:
         """
@@ -1100,8 +1250,10 @@ class TrendFollowingStrategy:
         if self._check_exchange_stop_loss_fill(open_trade, log_prefix="[REKONZILIATION] "):
             return
         logger.info(
-            "Reconciliation: offene Position für %s unverändert (Stop-Loss-Order "
-            "nicht gefüllt oder keine Order hinterlegt).",
+            "Reconciliation: offene Position für %s bleibt bestehen (die "
+            "Stop-Loss-Order hat nicht verkauft). Die Absicherung wird jetzt "
+            "geprüft - falls die Order zwischenzeitlich storniert wurde oder "
+            "nie zustande kam, platziert der nächste Schritt Ersatz.",
             self._config.symbol,
         )
 

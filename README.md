@@ -131,7 +131,14 @@ trading-bot/
 - **Notaus**: Läuft die Datei `STOP` (Pfad über `DCA_BOT_KILL_SWITCH_FILE`
   konfigurierbar) im Projektverzeichnis, oder ist `DCA_BOT_HALT=true`
   gesetzt, stoppt der Bot sofort und sauber – auch mitten in einem laufenden
-  Kaufzyklus, nicht erst beim nächsten Intervall.
+  Kaufzyklus, nicht erst beim nächsten Intervall. Geprüft werden drei
+  Quellen: die Notaus-Datei, die Prozess-Umgebung (z.B. aus der
+  systemd-Unit) und die **aktuelle** `.env`. Letzteres wird bei jeder
+  Prüfung neu gelesen – `DCA_BOT_HALT=true` nachträglich in die `.env`
+  zu schreiben wirkt deshalb sofort, ohne Neustart, genau wie das
+  Anlegen der STOP-Datei. Die drei Wege sind mit ODER verknüpft, bewusst
+  asymmetrisch: auslösen soll leicht sein, versehentliches Aufheben
+  schwer – zum Wiederanlaufen müssen alle drei Quellen sauber sein.
 - **Portfolio-Stop-Loss** (`DCA_BOT_STOP_LOSS_PCT`, Default 25%): Fällt der
   aktuelle Wert der bisher gekauften Position mehr als X% unter die Summe
   der Einkaufspreise, pausiert der Bot weitere Käufe und loggt das deutlich.
@@ -477,7 +484,34 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   Stop-Loss-Order ab. Ist sie bereits `FILLED` (die Börse hat also schon
   verkauft, z.B. während einer Downtime), markiert der Bot die Position
   im Ledger anhand der tatsächlichen Order-Fülldaten als geschlossen,
-  OHNE selbst nochmal zu verkaufen.
+  OHNE selbst nochmal zu verkaufen. Der Stop-Loss-Latch wird dabei im
+  Exit-Pfad selbst gesetzt und hängt **nicht** daran, ob die
+  `[STOP-FILL-ANALYSE]`-Zeile geschrieben werden kann – sonst bliebe ein
+  Exit ohne hinterlegten Limitpreis ohne Sperre, und der Bot dürfte
+  sofort wieder einsteigen.
+- **Verschwundene Stop-Order wird erkannt und ersetzt:** ist die Order
+  laut Börse beendet, ohne verkauft zu haben (`CANCELED`/`EXPIRED`/
+  `REJECTED` ohne ausgeführte Menge – z.B. manuell storniert), schützt
+  sie nichts mehr. Der Bot löst die Zuordnung im Ledger und platziert
+  noch im selben Durchlauf Ersatz. Ohne das hätte die tote Order-ID
+  `_ensure_stop_loss_protection()` dauerhaft blockiert, das bei jeder
+  vorhandenen ID sofort aussteigt – die Position wäre unbegrenzt ohne
+  Absicherung geblieben. Eine **fehlgeschlagene** Status-Abfrage gilt
+  ausdrücklich nicht als „Order weg": sie sagt nichts über die Order,
+  und ein Netzwerkhänger würde sonst eine zweite Order über dieselbe
+  Menge auslösen.
+- **Teilweise gefüllte Stop-Order** (`PARTIALLY_FILLED`): wird gemeldet
+  (Log + Telegram), aber bewusst **nicht** korrigiert – die Order lebt
+  noch und kann vollständig füllen, jede jetzt notierte Teilmenge wäre
+  im nächsten Moment falsch. Sobald sie einen Endzustand erreicht,
+  greift der reguläre Pfad mit den echten Fülldaten. Bei 24-Stunden-Takt
+  ist das höchstens eine Erinnerung pro Tag.
+- **Eine einzige Regel für Order-Status:** die Bewertung, ob eine Order
+  gefüllt, noch aktiv, beendet oder unlesbar ist, steht genau einmal im
+  Projekt (`order_lifecycle_state()` in `pending_orders.py`) und wird
+  sowohl vom Zyklus-Check als auch vom Pending-Orders-Pfad (Abschnitt 6)
+  verwendet. Vorher hatten beide eigene, leicht unterschiedliche
+  Regeln.
 - **Reconciliation beim Bot-Start:** bevor der erste reguläre Zyklus
   läuft, gleicht der Bot eine im Ledger offene Position gegen den
   tatsächlichen Order-Status bei Binance ab und korrigiert den Ledger
@@ -681,7 +715,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -700,7 +734,9 @@ Netzwerkfehler-Szenarien direkt am `TradingClient` (mit einem gefälschten
 Zeile, in der `python-binance` seinen Request absetzt),
 `test_order_reconciliation.py` das Nachtragen beim Bot-Start für alle
 drei Bots inklusive Idempotenz, und `test_process_lock.py` den Schutz
-gegen einen doppelten Bot-Start.
+gegen einen doppelten Bot-Start. `test_kill_switch.py` deckt alle drei
+Notaus-Wege ab, insbesondere das Wirken einer nachträglich geänderten
+`.env` ohne Neustart.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

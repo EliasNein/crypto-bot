@@ -19,6 +19,7 @@ from .grid_config import load_grid_config
 from .grid_strategy import GridTradingStrategy
 from .notifier import init as init_notifier
 from .notifier import send_notification
+from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch
 from .version import get_code_version
@@ -102,7 +103,15 @@ def main() -> None:
     # weiterhin offen (Verkauf) erscheinen lassen - beides führt im
     # ersten Zyklus zu einer doppelten Order. Siehe pending_orders.py
     # (Sicherheitsreview-Punkt K2).
-    strategy.reconcile_pending_orders()
+    #
+    # Gekapselt, damit ein Fehler hier den Bot-Start nicht verhindert
+    # (W18) - der Aufruf liegt zwangsläufig außerhalb des try/except der
+    # Hauptschleife.
+    safe_startup_reconciliation(
+        logger,
+        "[GRID-FEHLER]",
+        [("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders)],
+    )
 
     interval_seconds = config.interval_minutes * 60
 

@@ -16,9 +16,17 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 from .notifier import send_notification
 
 logger = logging.getLogger("dca_bot")
+
+# Projektwurzel (ein Verzeichnis über diesem Modul) - Fundort der `.env`
+# für die Notaus-Prüfung, siehe KillSwitch. Gleiche Herleitung wie in
+# version.py: der Pfad soll auch stimmen, wenn der Prozess von woanders
+# gestartet wurde.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class BotHalted(Exception):
@@ -28,23 +36,91 @@ class BotHalted(Exception):
 class KillSwitch:
     """
     Notaus: Der Bot stoppt sofort - auch mitten in einem laufenden
-    Kaufzyklus -, sobald entweder eine bestimmte Datei existiert oder die
-    Umgebungsvariable DCA_BOT_HALT auf "true" gesetzt ist.
+    Kaufzyklus -, sobald einer von drei Wegen ausgelöst wird.
 
-    Zwei Wege bewusst: Die Datei lässt sich auch von außen (Skript,
-    Cronjob, manuell) anlegen, ohne den laufenden Prozess oder dessen
-    Umgebung anzufassen; die Env-Variable ist praktisch, wenn man den Bot
-    direkt im gleichen Terminal steuert.
+    1. Die Notaus-Datei existiert (z.B. `STOP`).
+    2. Die Umgebungsvariable des Prozesses (z.B. `DCA_BOT_HALT`) steht
+       auf "true" - gesetzt beim Start, etwa über die systemd-Unit.
+    3. Die aktuelle `.env` im Projektverzeichnis setzt sie auf "true".
+
+    Weg 3 war der Sicherheitsreview-Punkt W1: `os.getenv()` liest die
+    Umgebung, die beim Prozessstart einmalig aus der `.env` befüllt
+    wurde. `DCA_BOT_HALT=true` nachträglich in die Datei zu schreiben
+    hatte deshalb KEINE Wirkung, bis der Bot neu startete - während
+    README und `.env.example` es als gleichwertige Alternative zur
+    STOP-Datei beschrieben. Ein Notaus, der nicht auslöst, ist die
+    schlechteste Sorte Sicherheitsmechanismus: man verlässt sich darauf.
+
+    Die drei Wege sind mit ODER verknüpft, und das ist bewusst
+    asymmetrisch: Auslösen soll leicht sein, versehentliches Aufheben
+    schwer. Zum Wiederanlaufen müssen alle drei Quellen sauber sein -
+    beim Neustart liest `load_dotenv()` die Datei ohnehin frisch ein.
+
+    Gelesen wird mit `dotenv_values()`, NICHT mit
+    `load_dotenv(override=True)`: Letzteres würde `os.environ`
+    überschreiben und damit auch Werte, die die systemd-Unit bewusst
+    gesetzt hat (z.B. ein dort erzwungenes `*_BOT_ENABLE_TRADING=false`).
+    Ein Notaus-Check darf keine anderen Einstellungen umbiegen.
     """
 
-    def __init__(self, file_path: str, env_var_name: str = "DCA_BOT_HALT"):
+    def __init__(
+        self,
+        file_path: str,
+        env_var_name: str = "DCA_BOT_HALT",
+        env_file: str | Path | None = None,
+    ):
         self._file_path = Path(file_path)
         self._env_var_name = env_var_name
+        # Projektwurzel wie in version.py, damit der Pfad auch stimmt,
+        # wenn der Prozess von woanders gestartet wurde.
+        self._env_file = Path(env_file) if env_file else _PROJECT_ROOT / ".env"
+        # mtime+Größe der zuletzt geparsten Fassung. Neu geparst wird nur
+        # bei Änderung: der Check läuft im Notaus-Polling alle paar
+        # Sekunden, ein `os.stat` kostet dabei rund 15 µs gegenüber
+        # ~570 µs für einen Vollparse der .env. Selbst der Vollparse wäre
+        # bei 5 Sekunden Takt vernachlässigbar (~0,01 % eines Kerns) -
+        # der Wächter ist billige Absicherung dagegen, dass jemand das
+        # Polling-Intervall später deutlich verkürzt.
+        self._env_file_signature: tuple[int, int] | None = None
+        self._env_file_values: dict[str, str | None] = {}
+
+    def _env_file_halts(self) -> bool:
+        """
+        Ob die aktuelle `.env` den Notaus dieses Bots setzt.
+
+        Eine fehlende, unlesbare oder kaputte Datei bedeutet "kein
+        Notaus" - dieser Weg darf nie selbst zur Fehlerquelle werden.
+        Die anderen beiden Wege bleiben davon unberührt.
+        """
+        try:
+            stat = self._env_file.stat()
+        except OSError:
+            return False
+
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if signature != self._env_file_signature:
+            try:
+                self._env_file_values = dict(dotenv_values(self._env_file))
+            except Exception:
+                logger.warning(
+                    "Notaus-Prüfung: '%s' konnte nicht gelesen werden - der "
+                    "Datei-Weg des Notaus (%s) entfällt in diesem Durchlauf. "
+                    "Notaus-Datei und Prozess-Umgebung wirken weiterhin.",
+                    self._env_file,
+                    self._env_var_name,
+                )
+                self._env_file_values = {}
+            self._env_file_signature = signature
+
+        raw = self._env_file_values.get(self._env_var_name)
+        return str(raw or "").strip().lower() == "true"
 
     def is_set(self) -> bool:
         if self._file_path.exists():
             return True
-        return os.getenv(self._env_var_name, "false").lower() == "true"
+        if os.getenv(self._env_var_name, "false").lower() == "true":
+            return True
+        return self._env_file_halts()
 
     def check(self) -> None:
         """Wirft BotHalted, falls der Notaus aktiv ist."""
