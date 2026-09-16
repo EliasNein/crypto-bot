@@ -132,7 +132,7 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 
 **Modellwahl:** Sonnet 5 (high effort) für die Umsetzung. Opus 5 gezielt für den finalen Sicherheitsreview vor Echtgeld reserviert (siehe 6d).
 
-**Status:** Backtest abgeschlossen und verifiziert. Noch kein Live-Dry-Run gestartet (wie gefordert erst nach dem Backtest) – offen für eine spätere Session.
+**Status:** Backtest abgeschlossen und verifiziert. *(Aktualisiert 16.09.2026: Der frühere Satz „Noch kein Live-Dry-Run gestartet – offen für eine spätere Session" ist überholt. Der Dry-Run läuft seit dem 15.09. auf dem Homeserver, siehe „Allocator-Live-Dry-Run gestartet" in 6e; seit dem 16.09. ist dort zusätzlich das Opt-in für DCA und Trend aktiv, das vollständige Vier-Bausteine-System läuft also live im Testnet — siehe 6h.)*
 
 ## 5b. Geplantes Live-Kapital
 
@@ -641,6 +641,14 @@ Direkt per SSH durchgeführt, kein Code-Change im Repo.
 - VPS: kein laufendes Snapshot-Äquivalent eingerichtet (Contabo-VPS), stattdessen der bereits geplante finale `data/`-Snapshot vor dem 12.10. (siehe 6c/6e).
 
 Damit sind alle Infrastruktur-Punkte aus dem Sicherheitsreview abgeschlossen. Offen bleiben nur die zwei terminlich an den 12.10. gebundenen Punkte: finaler VPS-Snapshot und Entfernen des Deploy-Keys beim Decommissioning.
+
+## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
+
+Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
+
+Bewusst nur auf dem Homeserver, nicht auf dem VPS (dort bleibt der Allocator inaktiv, siehe Grundsatzentscheidung in 6e). Beide Bots starten fehlerfrei mit aktiviertem Opt-in, keine Fehler beim Lesen der Allocator-State-Datei.
+
+Damit beginnt jetzt faktisch die geplante, mindestens einmonatige Live-Testphase des vollständigen Systems vor dem Echtgeld-Einstieg (siehe 5b, 6c).
 
 ---
 
