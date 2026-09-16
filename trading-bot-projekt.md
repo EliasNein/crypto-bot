@@ -489,6 +489,49 @@ Der **Trend-Bot ist von W9 nicht betroffen**: Sein Zyklus ist bereits 24 h, er f
 
 **Damit sind alle 18 W-Punkte abgearbeitet** — 15 behoben (W1–W8, W10–W13, W15, W18), W14 bewusst zurückgestellt (eigener Abschnitt unten), W16 als Rechenaufgabe beantwortet (eigener Abschnitt unten), W17 bleibt als Stufe D offen. Dazu weiterhin die Infrastruktur-Punkte, die nur per SSH auf VPS und Homeserver prüfbar sind, sowie die zwei Punkte am harten VPS-Vertragsende 12.10.2026 (finaler `data/`-Snapshot, Entfernen des Deploy-Keys).
 
+### Wichtige Punkte, Stufe D: W17 (16.09.2026)
+
+Der letzte offene W-Punkt: die Testabdeckung des `decide_action`-Entscheidungspfads. Reine Testarbeit, keine Änderung an der Produktivlogik — bis auf zwei optionale Parameter in der Test-Basis (`_make_config`/`_make_strategy` nehmen jetzt `**overrides`), damit ein Testfall kurze EMA-Perioden setzen kann.
+
+**Der Befund, nachgemessen statt behauptet.** Vor dieser Runde wurde `decide_action()` in der gesamten Suite **24-mal** aufgerufen — und zwar ausnahmslos mit `confirmed_direction=None`. Kein einziger Aufruf mit „up" oder „down". Die Ursache steht in der Test-Basis von `test_trend_stop_loss.py`: Sie setzt `strategy._seeded = True`, um den Netzwerkzugriff auf die historischen Tageskerzen zu vermeiden. Nebenwirkung: Der `TrendSignalGenerator` bleibt vollständig leer, `feed()` liefert lauter `None`, und damit gibt `decide_action()` per Konstruktion immer `None` zurück. Getestet wurden die *Folgen* einer Entscheidung (`_open_position`, `_close_position` — beide direkt aufgerufen), nie die Entscheidung selbst. Die Zeile ist jetzt mit einem entsprechenden Warnhinweis versehen, damit der nächste Leser nicht in dieselbe Annahme läuft.
+
+**Neue Datei `tests/test_trend_decide_action.py`** (29 Tests), mit synthetischen Preisreihen, die dieselbe Mechanik vollständig durchlaufen: Seeding-Phase, EMA-Fortschreibung, Crossover, Trendstärke-Filter. Bewusst kurze EMA-Perioden (3/5 statt 20/50) — die getestete Logik ist identisch, nur der Vorlauf ist kurz genug, um jeden Schritt von Hand nachzurechnen.
+
+Abgedeckt sind die sechs geforderten Fälle plus vier, die sich beim Bauen als lohnend herausstellten:
+
+| Situation | Erwartung |
+|---|---|
+| Bestätigt aufwärts, keine Position | `ENTER` |
+| Bestätigt aufwärts, Position offen | nichts tun (kein Doppel-Einstieg) |
+| Bestätigt abwärts, Position offen | `EXIT_SIGNAL` |
+| Bestätigt abwärts, keine Position | nichts tun (long-only, kein Shorting) |
+| Abstand unter der Schwelle | nichts tun, in beiden Positionslagen |
+| Whipsaw (Crossover ohne Bestätigung) | über die **gesamte** Reihe kein Signal |
+| Aufwärts, aber Stop-Loss-Latch gesetzt | nichts tun |
+| Abwärts, Position offen, Latch gesetzt | `EXIT_SIGNAL` (die Sperre gilt nur für Einstiege) |
+| Vollständiger Zyklus auf/ab | genau ein `ENTER`, genau ein `EXIT_SIGNAL`, in dieser Reihenfolge |
+| Seitwärts (flach und gezackt) | nichts tun |
+
+**Jede Preisreihe hat ihren eigenen Prämissen-Test.** Das war die wichtigste Design-Entscheidung an dieser Datei: Ein Test der Form „Signal X führt zu Entscheidung Y" ist auch dann grün, wenn Signal X in Wahrheit nie entstanden ist — und prüft dann nichts. Beim Whipsaw-Fall zählt genau das: Belegt wird, dass die rohen EMAs sich **tatsächlich** kreuzen (Richtung springt von „down" auf „up" und zurück), während der Abstand nie die Schwelle erreicht. Ohne diesen Nachweis würde dieselbe Zusicherung auch von einer Reihe erfüllt, in der sich gar nichts kreuzt. Dasselbe Muster beim Trendstärke-Filter: Die schwache Aufwärtsreihe hat nachweislich die Richtung „up", nur zu wenig Abstand — und eine Gegenprobe zeigt, dass **dieselbe** Reihe mit niedrigerer Schwelle zu einem Einstieg führt. Damit steht fest, dass der Filter gegriffen hat und nicht etwa die Reihe richtungslos war.
+
+**Zweite Hälfte des Befundes: `execute_once()` selbst.** Eine eigene Testklasse lässt den Bot die Reihen Zyklus für Zyklus durchlaufen — ein `execute_once()` pro Kurs, genau wie im Betrieb ein Aufruf pro Tageskerze — ohne den Signalgenerator zu umgehen. Der komplette Pfad Preis → `feed()` → `decide_action()` → `_open_position()`/`_close_position()` läuft damit so, wie er live läuft. Der Vollzyklus führt zu genau einem echten Kauf bei 106,00 und einem echten Verkauf bei 107,00 mit `exit_reason="signal"`; Whipsaw und schwacher Trend erzeugen über alle Zyklen hinweg keine einzige Order.
+
+Dazu drei Fälle, die nur auf diesem Weg prüfbar sind:
+
+- **Interner Stop-Loss schlägt gleichzeitiges Signal.** `execute_once()` prüft `is_stop_loss_hit()` vor `decide_action()`. Damit das überhaupt testbar ist, braucht es einen Kurs, bei dem im **selben** Zyklus beide Bedingungen zutreffen — bei einer langsamen Umkehr feuert der Signal-Exit schon einen Zyklus früher, noch oberhalb der Stop-Schwelle. Gelöst über einen Absturz in einem Schritt (119 → 90 bei Einstieg 106, Schwelle 95,40); dass dort wirklich beides gleichzeitig gilt, ist eigens belegt. Ergebnis: `exit_reason="stop_loss"` und gesetzter Latch.
+- **Der Latch sperrt einen späteren Einstieg.** Nach dem Stop-Loss-Exit folgt eine erneute, bestätigte Aufwärtsbewegung — ohne Sperre gäbe es einen zweiten Kauf.
+- **Gegenprobe dazu:** Nach einem manuellen Reset führt dieselbe Erholung sehr wohl zu einem neuen Einstieg. Damit ist der Latch als Ursache belegt und nicht etwa ein erschöpfter Signalgenerator.
+
+**Mutationsprobe statt Behauptung.** Ob die Tests etwas prüfen, wurde gemessen: Fünf Mutationen, jede bricht genau eine Regel. Kontrolllauf ohne Mutation: 0 Fehlschläge. Long-only aufgehoben → 3 Testmethoden fallen um; Doppel-Einstieg erlaubt → 2; Signal-Exit entfernt → 4; Stop-Loss-Latch in `decide_action` ignoriert → 1; Trendstärke-Filter deaktiviert → 8.
+
+Der erste Anlauf dieser Messung war selbst fehlerhaft und meldete für jede Mutation dieselben ~46 Treffer, darunter Tests für flache und gezackte Seitwärtsmärkte, die von keiner der Mutationen betroffen sein können. Ursache: Die Mutanten-Signaturen verwendeten andere Parameternamen, die Tests rufen aber mit Schlüsselwörtern auf — es waren durchweg `TypeError` statt echter Fehlschläge. Eine Gleichverteilung über offensichtlich unbeteiligte Tests ist das Warnsignal, an dem so etwas auffällt.
+
+**Ein Nebenbefund aus der korrigierten Messung:** Zwei Regeln in `decide_action()` sind gegenüber `execute_once()` redundant. Die Regel „aufwärts + offene Position → nichts tun" wird dort nie gebraucht, weil `execute_once()` im Zweig mit offener Position ohnehin nur auf `EXIT_SIGNAL` reagiert und `_open_position()` gar nicht erst aufruft. Und die Stop-Loss-Sperre in `decide_action()` läuft leer, weil `execute_once()` `stop_loss_paused=False` hart übergibt und die Pause stattdessen mit einem eigenen, früheren `return` behandelt (nachgewiesen: entfernt man diesen Return, fällt der entsprechende Test um). Beides ist kein Fehler, sondern doppelte Absicherung — festgehalten wird es, weil beide Ebenen jetzt getrennt geprüft werden und deshalb auffällt, wenn eine davon wegfällt.
+
+**Tests:** 29 neue in `tests/test_trend_decide_action.py`. Gesamtstand: **324 Tests, alle grün.**
+
+**Damit sind alle 18 W-Punkte abgeschlossen** — 16 behoben (W1–W13, W15, W17, W18), W14 bewusst zurückgestellt, W16 als Rechenaufgabe beantwortet. Offen bleiben nur noch die Infrastruktur-Punkte, die per SSH auf VPS und Homeserver zu prüfen sind, sowie die beiden Punkte am harten VPS-Vertragsende 12.10.2026 (finaler `data/`-Snapshot, Entfernen des Deploy-Keys).
+
 ### W16: Grid-Kapitalbindung gegen den 150-€-Topf gerechnet (16.09.2026)
 
 Keine Code-Änderung und keine Änderung an den Werten — laut 5b ist die Positionsgrößen-Kalibrierung eine bewusste, spätere Entscheidung. Hier steht nur die Rechnung, damit sie vorliegt.
@@ -537,6 +580,43 @@ Nur die erste Zeile skaliert ausschließlich die Größe und lässt das Verhalte
 **Was heute stattdessen wirkt** (bewusst als Zwischenstand benannt, nicht als Ersatz): der Trendbruch-Stop-Loss blockt neue Käufe, solange der Prozess läuft; die maximale Kapitalbindung ist durch Stufenzahl × Betrag/Stufe von vornherein begrenzt und damit der Schaden nach oben gedeckelt (siehe W16); Notaus und Heartbeat (W13) machen einen toten Bot innerhalb von 24 h sichtbar.
 
 **Wieder aufzugreifen** als eigener Arbeitsschritt mit eigenem Design, eigenen Tests und einer bewussten Entscheidung zwischen „eine Sammel-Stop-Order" und „n Einzel-Stop-Orders" — nicht als Teil dieser Review-Fix-Runde.
+
+### Sicherheitsreview vollständig abgearbeitet (16.09.2026)
+
+Mit W17 sind **alle 18 „wichtigen" Punkte** aus dem Sicherheitsreview (Claude Opus 5, 15.09.2026) abgearbeitet — 16 behoben, einer bewusst zurückgestellt, einer als Rechenaufgabe beantwortet. Zusammen mit den fünf kritischen Punkten K1–K5 (abgeschlossen am 16.09., siehe oben) ist der Review damit vollständig aufgearbeitet.
+
+| Punkt | Inhalt | Ergebnis |
+|---|---|---|
+| **W1** | `*_HALT` wirkte erst nach einem Neustart | behoben (Stufe A) |
+| **W2** | Jeder Prozessstart löste sofort einen Kauf aus | behoben (Stufe B) |
+| **W3** | Tageslimit-Fenster in lokaler Zeit statt UTC | behoben (Stufe B) |
+| **W4** | Kein Schutz gegen doppelten Bot-Start | behoben (Lockfile, Nebenprodukt des K2-Fixes) |
+| **W5** | Beschädigtes Ledger setzte Limits still zurück | behoben (Stufe B) |
+| **W6** | Stop-Loss-Latch hing an einem Logging-Detail | behoben (Stufe A) |
+| **W7** | Verschwundene Stop-Order wurde nie erkannt | behoben (Stufe A) |
+| **W8** | `PARTIALLY_FILLED` und eine Regel-Divergenz | behoben (Stufe A) |
+| **W9** | Allocator-Reaktivität wich vom Backtest ab | behoben (Stufe C) |
+| **W10** | Toter Allocator fror die Zuteilung ein | behoben (Stufe B) |
+| **W11** | Geteiltes Konto/Symbol ohne Reservierung | behoben (Stufe C) |
+| **W12** | Kein Live-Schalter, kein Pflichtvariablen-Check | behoben (Stufe C) |
+| **W13** | Kein Lebenszeichen der Bots | behoben (Stufe B) |
+| **W14** | Grid ohne börsenseitigen Stop-Loss | **bewusst zurückgestellt** (eigene Architekturentscheidung) |
+| **W15** | Grid prüfte den Notaus nicht zwischen mehreren Käufen | behoben (Stufe B) |
+| **W16** | Grid-Kapitalbindung gegen den 150-€-Topf | **als Rechnung beantwortet** (keine Wertänderung — bewusste spätere Entscheidung laut 5b) |
+| **W17** | Testabdeckung des `decide_action`-Entscheidungspfads | behoben (Stufe D) |
+| **W18** | Reconciliation außerhalb von `try/except` | behoben (Stufe A) |
+
+**Testabdeckung über die vier Stufen:** 187 → 218 → 295 → **324 Tests**, alle grün. Kein Testlauf braucht Netzwerkzugriff oder Zugangsdaten.
+
+**Durchgehaltenes Prinzip:** Für jeden nicht-trivialen Fix wurde die Wirksamkeit der Tests **gemessen** statt behauptet — durch Zurückdrehen der jeweiligen Änderung (Stufen A–C) bzw. durch Mutation der geprüften Regel (Stufe D). Ein Test, der auch gegen den alten Stand grün ist, prüft nichts. In Stufe D war die erste Messung selbst fehlerhaft und musste korrigiert werden, bevor sie etwas aussagte; das ist im dortigen Abschnitt festgehalten, weil die Fehlerart (gleichmäßige Treffer über offensichtlich unbeteiligte Tests) das verlässlichste Warnsignal dafür ist.
+
+**Was der Review NICHT ersetzt.** Drei Dinge bleiben ausdrücklich offen und sind keine Code-Aufgaben:
+
+1. **Infrastruktur-Punkte**, nur per SSH auf VPS und Homeserver prüfbar — im Repo liegen keine `.service`-Dateien.
+2. **Die zwei Termine am harten VPS-Vertragsende 12.10.2026**: finaler `data/`-Snapshot (sonst gehen die Testergebnisse verloren) und Entfernen des Claude-Code-Deploy-Keys.
+3. **Die Paper-Trade-Phase selbst.** Der Code gilt als review-seitig freigegeben, aber ein freigegebener Code ist keine validierte Strategie. Offen bleiben insbesondere die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` anhand realer Fill-Daten (siehe 6f, bisherige Stichprobe n=2) und die Positionsgrößen-Festlegung inklusive des in W16 gerechneten Grid-Topfs.
+
+**Für den Echtgeld-Schalter heißt das:** Die technischen Voraussetzungen stehen — `USE_TESTNET=false` ist ein Konfigurationsschritt mit lauter Warnung, Pflichtprüfung und erzwungenen expliziten Positionsgrößen (W12). Die verbleibende Absicherung ist nicht mehr der Code, sondern die Beobachtungszeit.
 
 ---
 
