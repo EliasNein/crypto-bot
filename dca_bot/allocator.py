@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -296,8 +297,34 @@ class Allocator:
             return {}
 
     def _write_state(self, data: dict) -> None:
-        with self._state_path.open("w", encoding="utf-8") as f:
+        """
+        Schreibt die Zuteilung ATOMAR: temporäre Datei, fsync,
+        os.replace - dasselbe Muster wie die drei Ledger (W5) und der
+        Pending-Store (K2).
+
+        Bis zum 17.09.2026 lief das hier über ein einfaches `open("w")`,
+        also kürzen und neu befüllen. Solange DCA und Trend das Opt-in
+        nicht gesetzt hatten, war das folgenlos: Die Datei hatte keine
+        Konsumenten außer dem Allocator selbst. Mit der Aktivierung des
+        Opt-ins (siehe 6h) lesen beide Bots sie vor JEDER neuen Order -
+        eine halb geschriebene Datei landet damit unmittelbar in einer
+        Kaufentscheidung.
+
+        Und die Fehlerrichtung wäre die falsche gewesen: Eine kaputte
+        Datei ließ `read_allocation_fraction()` `None` zurückgeben, was
+        bei beiden Bots "kein Allocator" und damit den VOLLEN Betrag
+        bedeutet - DCA kauft voll, Trend steigt voll ein, zusammen also
+        mehr Kapital als die Zuteilung je vorgesehen hätte. Genau die
+        Überallokation, gegen die der Allocator gebaut ist. Die
+        Gegenmaßnahme dort steht in allocator_signals.py; hier wird die
+        Ursache beseitigt.
+        """
+        tmp_path = self._state_path.with_name(self._state_path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._state_path)
 
     def execute_once(self) -> None:
         """

@@ -8,3 +8,7 @@ logs/
 venv/
 data/
 STOP
+STOP_GRID
+STOP_TREND
+STOP_ALLOCATOR
+STOP_ALL

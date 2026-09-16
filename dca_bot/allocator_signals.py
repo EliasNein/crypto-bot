@@ -107,22 +107,86 @@ def read_allocation_fraction(path: str) -> float | None:
     Liest die aktuelle geglättete Trend-Following-Zuteilung (0.0-1.0) aus
     der vom Allocator geschriebenen State-Datei.
 
-    Gibt None zurück, wenn `path` leer ist (Feature nicht aktiviert),
-    die Datei fehlt, kaputt ist oder einen ungültigen Wert enthält - der
-    aufrufende Bot fällt dann auf sein Standardverhalten (100% des
-    konfigurierten Betrags) zurück. So bleiben DCA/Trend voll
-    funktionsfähig, auch wenn der Allocator nie läuft oder gerade down ist.
+    Zwei Ausgänge, und der Unterschied zwischen ihnen ist der Kern dieser
+    Funktion:
+
+    - **`None` = "es gibt keinen Allocator".** Nur bei leerem `path`
+      (Feature nicht aktiviert) oder fehlender Datei (der Allocator hat
+      noch nie geschrieben - der reguläre Zustand bei einem frischen
+      Deployment und in den Sekunden zwischen zwei Service-Starts). Der
+      aufrufende Bot verhält sich dann exakt wie ohne Allocator, nutzt
+      also 100% seines konfigurierten Betrags.
+    - **`STALE_ALLOCATION_FALLBACK` (0.0) = "die Datei ist da, aber
+      unbrauchbar".** Veraltet (W10), unlesbar, kaputt, ohne
+      `trend_fraction` oder mit einem Wert außerhalb 0-1.
+
+    Dass der zweite Fall NICHT `None` ergibt, ist eine bewusste
+    Entscheidung und war bis zum 17.09.2026 anders: `None` heißt für den
+    Trend-Bot "voller Einstiegsbetrag" und für den DCA-Bot "voller
+    Kaufbetrag" - zusammen also MEHR Kapital, als die Zuteilung je
+    vorgesehen hätte. Das ist die Überallokation, gegen die der Allocator
+    überhaupt existiert. Genau diese Abwägung war für den Veraltet-Fall
+    schon getroffen (siehe STALE_ALLOCATION_FALLBACK und
+    `_allocation_is_stale`); für die kaputte Datei war sie schlicht nie
+    nachgezogen worden. `0.0` lässt den DCA-Bot regulär kaufen und den
+    Trend-Einstieg entfallen - die konservative Richtung.
+
+    Die Reihenfolge der `except`-Zweige ist wichtig: `FileNotFoundError`
+    ist eine Unterklasse von `OSError`. Würde der generische Zweig zuerst
+    greifen, bekäme "Datei existiert nicht" den Fallback statt `None` -
+    und ein frisch aufgesetzter Bot mit gesetztem Opt-in, aber noch nicht
+    gestartetem Allocator, würde nie wieder Trend-Positionen eröffnen.
+    Dieselbe Falle wie bei W5.
     """
     if not path:
         return None
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+    except FileNotFoundError:
+        # Der Allocator hat noch nie geschrieben - kein Befund.
+        return None
+    except (json.JSONDecodeError, OSError) as exc:
+        # OSError war vor dem 17.09.2026 gar nicht gefangen: Ein
+        # Rechteproblem an dieser Datei (z.B. nach einem `chmod`) hat die
+        # Exception bis in execute_once() durchgereicht und damit den
+        # kompletten Kaufzyklus des lesenden Bots abgebrochen - wegen
+        # einer Datei, die nur die Ordergröße skalieren soll.
+        logger.warning(
+            "Allocator-Zuteilung in '%s' ist nicht lesbar (%s) - es wird auf "
+            "%.0f%% Trend / %.0f%% DCA zurückgefallen, statt den Allocator zu "
+            "ignorieren (das hieße den vollen Betrag).",
+            path,
+            type(exc).__name__,
+            STALE_ALLOCATION_FALLBACK * 100,
+            (1 - STALE_ALLOCATION_FALLBACK) * 100,
+        )
+        return STALE_ALLOCATION_FALLBACK
+
+    try:
         fraction = float(data["trend_fraction"])
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return None
+    except (KeyError, ValueError, TypeError):
+        logger.warning(
+            "Allocator-Zuteilung in '%s' enthält kein brauchbares "
+            "'trend_fraction' - es wird auf %.0f%% Trend / %.0f%% DCA "
+            "zurückgefallen.",
+            path,
+            STALE_ALLOCATION_FALLBACK * 100,
+            (1 - STALE_ALLOCATION_FALLBACK) * 100,
+        )
+        return STALE_ALLOCATION_FALLBACK
+
     if not (0.0 <= fraction <= 1.0):
-        return None
+        logger.warning(
+            "Allocator-Zuteilung in '%s' liegt mit %.4f außerhalb von 0-1 - "
+            "es wird auf %.0f%% Trend / %.0f%% DCA zurückgefallen.",
+            path,
+            fraction,
+            STALE_ALLOCATION_FALLBACK * 100,
+            (1 - STALE_ALLOCATION_FALLBACK) * 100,
+        )
+        return STALE_ALLOCATION_FALLBACK
 
     if _allocation_is_stale(data, path):
         return STALE_ALLOCATION_FALLBACK

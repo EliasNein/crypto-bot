@@ -121,6 +121,12 @@ class FakeTradingClient:
         self.open_orders: list[dict] | None = []
         self.balance_calls = 0
         self.open_orders_calls = 0
+        # Gebuehrendaten, die get_order_with_fills() zu einer per
+        # get_order() geholten Order nachlaedt (K3-Restluecke im
+        # Stop-Fill-Pfad). Leer = die myTrades-Abfrage liefert nichts,
+        # die Order bleibt unveraendert.
+        self.fills_by_order_id: dict[str, list[dict]] = {}
+        self.order_with_fills_calls = 0
         # Seit dem K2-Fix reicht jede place_*-Methode einen `context` an
         # die Pending-Orders-Ablage durch (siehe binance_client.py) und
         # jede Order-Antwort traegt eine clientOrderId. Der Fake bildet
@@ -144,6 +150,34 @@ class FakeTradingClient:
         self.balance_calls += 1
         self.call_log.append("get_asset_balance")
         return self.base_balance
+
+    def get_order_with_fills(self, symbol: str, order: dict) -> dict:
+        """
+        Wie TradingClient.get_order_with_fills: laedt die Gebuehrendaten
+        einer per get_order() geholten Antwort nach.
+
+        Dass diese Methode im Fake bis zum K3-Restluecken-Fix FEHLTE, ist
+        selbst ein Befund - der Produktivpfad
+        `_close_from_filled_stop_order` hat sie nie aufgerufen, obwohl die
+        Projektdoku die Luecke als geschlossen auswies. Der Fake brauchte
+        sie deshalb nicht.
+
+        Verhaelt sich wie der echte Client: Sind bereits Fills vorhanden,
+        bleibt die Antwort unveraendert; sind fuer die Order keine
+        registriert (Testfall ohne Gebuehren), wird sie ebenfalls
+        unveraendert zurueckgegeben - genau wie eine leere
+        myTrades-Antwort.
+        """
+        self.order_with_fills_calls += 1
+        self.call_log.append("get_order_with_fills")
+        if order.get("fills"):
+            return order
+        fills = self.fills_by_order_id.get(str(order.get("orderId")))
+        if not fills:
+            return order
+        enriched = dict(order)
+        enriched["fills"] = fills
+        return enriched
 
     def get_open_orders(self, symbol: str) -> list[dict] | None:
         self.open_orders_calls += 1
@@ -252,12 +286,36 @@ class FakeTradingClient:
         self.order_status_calls.append((symbol, order_id))
         return self.orders.get(order_id)
 
-    def fill_order(self, order_id: str, executed_qty: float, cumulative_quote: float) -> None:
-        """Testhilfe: simuliert, dass die Börse die Order gefüllt hat."""
+    def fill_order(
+        self,
+        order_id: str,
+        executed_qty: float,
+        cumulative_quote: float,
+        commission: float | None = None,
+        commission_asset: str = "USDT",
+    ) -> None:
+        """
+        Testhilfe: simuliert, dass die Börse die Order gefüllt hat.
+
+        `commission` registriert zusätzlich Gebührendaten, die
+        `get_order_with_fills()` nachliefert - so wie Binance sie über
+        `myTrades` herausgibt. Ohne diesen Parameter bleibt es beim
+        bisherigen Verhalten (keine Fills, kein Gebührenabzug), damit die
+        vorhandenen Testfälle unverändert gelten.
+        """
         order = self.orders[order_id]
         order["status"] = "FILLED"
         order["executedQty"] = executed_qty
         order["cummulativeQuoteQty"] = cumulative_quote
+        if commission is not None:
+            self.fills_by_order_id[str(order_id)] = [
+                {
+                    "price": cumulative_quote / executed_qty if executed_qty else 0.0,
+                    "qty": executed_qty,
+                    "commission": commission,
+                    "commissionAsset": commission_asset,
+                }
+            ]
 
     def end_order_without_fill(self, order_id: str, status: str = "CANCELED") -> None:
         """
@@ -1293,6 +1351,179 @@ class TrendTradingRulesTestCase(TrendStrategyTestBase):
         self.assertLessEqual(quantity, raw)
         steps = quantity / FAKE_TRADING_RULES.step_size
         self.assertAlmostEqual(steps, round(steps), places=6)
+
+
+class StopFillFeeCorrectionTestCase(TrendStrategyTestBase):
+    """
+    Die letzte offene Stelle der K3-Restluecke: der Ausstieg ueber eine
+    bereits gefuellte, exchange-seitige Stop-Loss-Order.
+
+    `_close_from_filled_stop_order()` buchte `cummulativeQuoteQty` direkt
+    als Erloes - also BRUTTO. `get_order()`-Antworten enthalten keine
+    `fills`, und die Methode hat `get_order_with_fills()` nie aufgerufen,
+    obwohl das Werkzeug seit dem K2-Fix existiert und in fuenf
+    Reconciliation-Pfaden genutzt wird. Die Projektdoku wies die Luecke
+    trotzdem als geschlossen aus.
+
+    Der Schaden ist klein (rund 0,1 % des Erloeses, zu optimistisch),
+    landet aber im `realized_pnl` des Ledgers - also in genau der Zahl,
+    an der die Strategie nach der Paper-Trade-Phase gemessen wird. Und
+    betroffen ist ausgerechnet der Pfad, fuer den die boersenseitige
+    Absicherung ueberhaupt gebaut wurde: Bot-Ausfall oder Kurssprung
+    ueber Nacht.
+    """
+
+    ENTRY_PRICE = 50_000.0
+    # amount_per_trade (Default 15.0) / Einstiegspreis
+    QUANTITY = 15.0 / 50_000.0
+    FILL_PRICE = 44_850.0
+
+    def _open_and_fill_stop(self, commission: float | None):
+        """Position eroeffnen und ihre Stop-Order an der Boerse fuellen."""
+        strategy, client = self._make_strategy(
+            trading_enabled=True, price=self.ENTRY_PRICE
+        )
+        strategy._open_position(self.ENTRY_PRICE)
+        open_trade = strategy._ledger.open_position()
+        order_id = open_trade["stop_loss_order_id"]
+
+        gross = self.QUANTITY * self.FILL_PRICE
+        client.fill_order(
+            order_id,
+            executed_qty=self.QUANTITY,
+            cumulative_quote=gross,
+            commission=commission,
+        )
+        # Preis bewusst UEBER der internen Stop-Schwelle: Der Ausstieg
+        # muss nachweislich vom Order-Status kommen, nicht vom internen
+        # Stop-Loss (gleiche Absicherung wie im bestehenden Fill-Test).
+        client.price = 49_000.0
+        return strategy, client, gross
+
+    def test_quote_commission_is_deducted_from_the_booked_proceeds(self):
+        """
+        Negativkontrolle gegen den alten Stand: Ohne den Fix steht hier
+        der Bruttoerloes im Ledger.
+        """
+        commission = 0.15  # in USDT abgerechnet, wie bei einem Spot-Verkauf
+        strategy, client, gross = self._open_and_fill_stop(commission)
+
+        strategy.execute_once()
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        expected_pnl = (gross - commission) - closed["quote_spent"]
+        self.assertAlmostEqual(closed["realized_pnl"], expected_pnl, places=10)
+        # Und ausdruecklich NICHT der Bruttowert.
+        self.assertNotAlmostEqual(
+            closed["realized_pnl"], gross - closed["quote_spent"], places=10
+        )
+
+    def test_the_fee_data_is_actually_fetched(self):
+        """
+        Der Kern des Befundes war, dass dieser Pfad `get_order_with_fills`
+        nie aufgerufen hat - das wird hier direkt festgehalten, nicht nur
+        ueber das Ergebnis.
+        """
+        strategy, client, _ = self._open_and_fill_stop(commission=0.15)
+        self.assertEqual(client.order_with_fills_calls, 0)
+
+        strategy.execute_once()
+
+        self.assertEqual(client.order_with_fills_calls, 1)
+
+    def test_commission_in_another_asset_leaves_the_proceeds_gross(self):
+        """
+        Gegenprobe: Bei aktivem BNB-Rabatt wird die Gebuehr nicht in USDT
+        abgerechnet und schmaelert den Erloes deshalb nicht - dieselbe
+        Regel wie in net_proceeds().
+        """
+        strategy, client = self._make_strategy(
+            trading_enabled=True, price=self.ENTRY_PRICE
+        )
+        strategy._open_position(self.ENTRY_PRICE)
+        open_trade = strategy._ledger.open_position()
+        gross = self.QUANTITY * self.FILL_PRICE
+        client.fill_order(
+            open_trade["stop_loss_order_id"],
+            executed_qty=self.QUANTITY,
+            cumulative_quote=gross,
+            commission=0.002,
+            commission_asset="BNB",
+        )
+        client.price = 49_000.0
+
+        strategy.execute_once()
+
+        closed = strategy._ledger._read()[0]
+        self.assertAlmostEqual(
+            closed["realized_pnl"], gross - closed["quote_spent"], places=10
+        )
+
+    def test_missing_fee_data_still_closes_the_position_gross(self):
+        """
+        Der Normalfall auf dem Testnet: myTrades liefert nichts (Gebuehr
+        dort 0). Dann bleibt es beim Bruttowert - und die Position wird
+        trotzdem sauber geschlossen.
+        """
+        strategy, client, gross = self._open_and_fill_stop(commission=None)
+
+        strategy.execute_once()
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertAlmostEqual(
+            closed["realized_pnl"], gross - closed["quote_spent"], places=10
+        )
+
+    def test_failed_rules_lookup_does_not_block_the_ledger_correction(self):
+        """
+        Die wichtigste Zusicherung des Fixes: Er haengt jetzt zwei
+        API-Aufrufe in einen Pfad, der zuvor nur `get_order_status()`
+        brauchte. Scheitert einer davon, darf das die Korrektur NICHT
+        verhindern - die Boerse hat bereits verkauft, und eine im Ledger
+        faelschlich offene Position wuerde der naechste Zyklus erneut zu
+        verkaufen versuchen.
+
+        Ohne die Kapselung wuerde `execute_once()` hier mit einem
+        RuntimeError abbrechen und die Position offen lassen.
+        """
+        strategy, client, gross = self._open_and_fill_stop(commission=0.15)
+        client.force_trading_rules_failure = True
+
+        strategy.execute_once()
+
+        self.assertIsNone(strategy._ledger.open_position())
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["exit_reason"], "stop_loss")
+        # Degradiert auf brutto - das Verhalten vor dem Fix, aber ohne
+        # dass etwas haengen bleibt.
+        self.assertAlmostEqual(
+            closed["realized_pnl"], gross - closed["quote_spent"], places=10
+        )
+        # Und der Stop-Loss-Latch wird trotzdem gesetzt (W6).
+        self.assertTrue(strategy._stop_loss.is_paused())
+
+    def test_startup_reconciliation_path_gets_the_same_correction(self):
+        """
+        `_close_from_filled_stop_order` hat zwei Aufrufer: den regulaeren
+        Zyklus und den Abgleich beim Bot-Start. Beide muessen die
+        Gebuehrenkorrektur bekommen - sonst haengt die Richtigkeit der
+        PnL davon ab, ob der Bot zwischendurch neu gestartet wurde.
+        """
+        commission = 0.15
+        strategy, client, gross = self._open_and_fill_stop(commission)
+
+        strategy.reconcile_on_startup()
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertAlmostEqual(
+            closed["realized_pnl"],
+            (gross - commission) - closed["quote_spent"],
+            places=10,
+        )
 
 
 class DeadStopOrderTestCase(TrendStrategyTestBase):

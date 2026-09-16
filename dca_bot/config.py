@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_bool,
     env_float,
@@ -122,6 +123,9 @@ def load_config() -> Config:
     # KillSwitch) - ein Tippfehler dort bedeutet aber "kein Notaus", und
     # der Start ist der einzige Moment, das gefahrlos zu bemerken.
     validate_halt_variable("DCA_BOT_HALT")
+    # Der globale Notaus gilt fuer alle vier Bots - ein Tippfehler
+    # dort haette also vierfache Wirkung (bzw. vierfache Nicht-Wirkung).
+    validate_halt_variable(GLOBAL_KILL_SWITCH_NAME)
 
     # Positionsgröße und Tageslimit müssen im Live-Modus ausdrücklich
     # dastehen: die Defaults stammen aus der Testnet-Phase.

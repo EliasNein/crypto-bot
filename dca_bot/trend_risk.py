@@ -354,6 +354,14 @@ class TrendStopLoss:
             "exit_price": exit_price,
             "loss_pct": loss_pct,
         }
+        # Bewusst KEIN atomares Schreiben (anders als die Ledger, siehe
+        # dort): Fuer diesen Latch zaehlt allein, DASS die Datei
+        # existiert - `is_paused()` prueft nur `self._path.exists()`.
+        # Der Inhalt ist rein informativ fuer die spaetere Auswertung.
+        # Eine halb geschriebene Datei haelt die Pause damit genauso
+        # zuverlaessig wie eine vollstaendige. Hier steht also keine
+        # vergessene Stelle, sondern eine Abwaegung (Stufe 1 der
+        # Verbesserungsvorschlaege, Punkt 2).
         with self._path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 

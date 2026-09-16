@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_bool,
     env_float,
@@ -99,6 +100,9 @@ def load_trend_config() -> TrendConfig:
         use_testnet=use_testnet
     )
     validate_halt_variable("TREND_BOT_HALT")
+    # Der globale Notaus gilt fuer alle vier Bots - ein Tippfehler
+    # dort haette also vierfache Wirkung (bzw. vierfache Nicht-Wirkung).
+    validate_halt_variable(GLOBAL_KILL_SWITCH_NAME)
 
     require_explicit_in_live(
         "TREND_AMOUNT_PER_TRADE",

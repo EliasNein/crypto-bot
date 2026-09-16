@@ -162,6 +162,25 @@ trading-bot/
   Kauf** eines Zyklus geprüft, nicht nur einmal davor: durchquert der
   Preis in einem Intervall mehrere Stufen, kauft die Schleife mehrere
   Positionen hintereinander – und genau dann zieht jemand den Notaus.
+- **Globaler Notaus `STOP_ALL`**: Eine Datei `STOP_ALL` im
+  Projektverzeichnis **oder** `STOP_ALL=true` (Prozessumgebung oder
+  `.env`) stoppt **alle vier Bots gleichzeitig** – zusätzlich zu deren
+  eigenen Schaltern, nicht an deren Stelle. Einen einzelnen Bot
+  anzuhalten bleibt also weiterhin möglich.
+
+  ```bash
+  touch STOP_ALL     # stoppt DCA, Grid, Trend und Allocator
+  rm STOP_ALL        # gibt alle wieder frei
+  ```
+
+  Vorher brauchte es vier Dateien oder vier Variablen – und im Ernstfall
+  ist „habe ich wirklich alle vier erwischt?" genau die Frage, die man
+  sich nicht stellen will. Der Dateiname ist deshalb bewusst **nicht**
+  konfigurierbar (anders als die botspezifischen
+  `*_KILL_SWITCH_FILE`): Ein globaler Notausschalter, dessen Pfad man
+  erst nachschlagen muss, verfehlt seinen Zweck. Die ausgelöste Meldung
+  benennt außerdem, **welche** Quelle gegriffen hat – bei vier
+  gleichzeitig stoppenden Bots ist das die erste Frage.
 - **Portfolio-Stop-Loss** (`DCA_BOT_STOP_LOSS_PCT`, Default 25%): Fällt der
   aktuelle Wert der bisher gekauften Position mehr als X% unter die Summe
   der Einkaufspreise, pausiert der Bot weitere Käufe und loggt das deutlich.
@@ -860,7 +879,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -910,6 +929,16 @@ sie das Signal erzeugt, das ihr Name behauptet: Ein Test, dessen
 Prämisse nicht stimmt, wäre grün, ohne etwas zu prüfen. Der Pfad Signal
 → Entscheidung → Ein-/Ausstieg läuft dabei auch einmal komplett durch
 `execute_once()`, nicht nur durch direkte Methodenaufrufe.
+
+`test_improvements_stage_1.py` deckt die erste Stufe der
+Verbesserungsvorschläge ab: das atomare Schreiben der
+Allocator-State-Datei, den konservativen Rückfall bei einer
+unbrauchbaren Zuteilung (und die bewusste Abgrenzung zur *fehlenden*
+Datei, die weiterhin „kein Allocator" bedeutet), sowie den globalen
+Notaus `STOP_ALL` über alle vier Bots. Die Gebührenkorrektur im
+Stop-Fill-Pfad steht in `test_trend_stop_loss.py` bei ihren
+Geschwistern. Auch hier sind alle drei Bereiche gegen den
+zurückgedrehten Stand gemessen.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

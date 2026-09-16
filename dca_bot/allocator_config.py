@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_float,
     env_int,
@@ -112,6 +113,9 @@ def load_allocator_config() -> AllocatorConfig:
         use_testnet=use_testnet
     )
     validate_halt_variable("ALLOCATOR_HALT")
+    # Der globale Notaus gilt fuer alle vier Bots - ein Tippfehler
+    # dort haette also vierfache Wirkung (bzw. vierfache Nicht-Wirkung).
+    validate_halt_variable(GLOBAL_KILL_SWITCH_NAME)
 
     ema_fast_period = env_int("ALLOCATOR_EMA_FAST_PERIOD", "20", gt=0)
     ema_slow_period = env_int("ALLOCATOR_EMA_SLOW_PERIOD", "50", gt=0)

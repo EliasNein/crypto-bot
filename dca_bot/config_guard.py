@@ -46,6 +46,18 @@ import sys
 # und ein halb-live laufendes System waere schlimmer als beides ganz.
 USE_TESTNET_VAR = "USE_TESTNET"
 
+# Name des globalen Notaus - als Datei im Projektverzeichnis UND als
+# Umgebungsvariable (siehe KillSwitch in risk.py). Eine Datei `STOP_ALL`
+# oder ein `STOP_ALL=true` stoppt ALLE vier Bots gleichzeitig,
+# zusaetzlich zu deren eigenen Schaltern.
+#
+# Steht hier und nicht in risk.py, wo KillSwitch lebt: Die vier
+# Config-Module brauchen den Namen fuer die Startpruefung, und
+# `config -> risk -> notifier -> config` waere ein Zirkelbezug. Neben
+# USE_TESTNET_VAR ist das ohnehin der passende Ort - beides sind
+# projektweite Variablennamen ohne Bot-Praefix.
+GLOBAL_KILL_SWITCH_NAME = "STOP_ALL"
+
 # Werte, die als Platzhalter aus `.env.example` erkannt werden. Ein
 # kopierter Platzhalter ist kein "gesetzter Wert": ein
 # TELEGRAM_BOT_TOKEN=dein_telegram_bot_token laeuft nicht auf einen
