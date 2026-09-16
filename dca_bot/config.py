@@ -66,6 +66,13 @@ class Config:
     telegram_bot_token: str = ""  # Leer = Telegram-Benachrichtigungen deaktiviert
     telegram_chat_id: str = ""
 
+    # Abstand zwischen zwei Lebenszeichen per Telegram in Stunden
+    # (Sicherheitsreview-Punkt W13, siehe heartbeat.py). 0 = aus.
+    # Bewusst EINE gemeinsame Variable fuer alle vier Bots, wie die
+    # TELEGRAM_-Zugangsdaten auch - vier Praefix-Varianten waeren hier
+    # nur Ballast.
+    heartbeat_interval_hours: float = 24.0
+
     # --- Logging ---
     log_file: str = "logs/dca_bot.log"
 
@@ -107,4 +114,5 @@ def load_config() -> Config:
         allocator_state_file=os.getenv("DCA_ALLOCATOR_STATE_FILE", ""),
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
+        heartbeat_interval_hours=float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "24.0")),
     )

@@ -13,15 +13,17 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 from .binance_client import TradingClient
+from .heartbeat import Heartbeat
 from .grid_config import load_grid_config
 from .grid_strategy import GridTradingStrategy
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
-from .risk import BotHalted, KillSwitch
+from .risk import BotHalted, KillSwitch, LedgerUnreadable
 from .version import get_code_version
 
 # Wie oft während der Wartezeit zwischen zwei Zyklen geprüft wird, ob der
@@ -97,6 +99,20 @@ def main() -> None:
     strategy = GridTradingStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="GRID_BOT_HALT")
 
+    # Ledger-Integritaet VOR allem anderen (W5): eine vorhandene, aber
+    # beschaedigte Ledger-Datei darf NICHT als leere Historie
+    # durchgehen - Tageslimit und Stop-Loss-Basis fielen sonst
+    # stillschweigend auf Null zurueck. Lieber gar nicht starten.
+    try:
+        strategy.verify_state_readable()
+    except LedgerUnreadable as exc:
+        logger.error("%s", exc)
+        send_notification(
+            f"[GRID-FEHLER] Bot startet NICHT: {exc} "
+            "Bitte die Datei pruefen oder aus einem Backup wiederherstellen."
+        )
+        return
+
     # Reconciliation VOR dem ersten Zyklus: eine beim letzten Lauf
     # ausgeführte, aber nicht mehr verbuchte Order würde sonst eine
     # Stufe fälschlich als frei (Kauf) oder eine verkaufte Position als
@@ -112,6 +128,8 @@ def main() -> None:
         "[GRID-FEHLER]",
         [("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders)],
     )
+
+    heartbeat = Heartbeat("Grid-Bot", config.heartbeat_interval_hours)
 
     interval_seconds = config.interval_minutes * 60
 
@@ -130,6 +148,11 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Grid-Zyklus.")
                 send_notification(f"[GRID-FEHLER] Unerwarteter Fehler im Grid-Zyklus: {exc}")
+
+            # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
+            # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
+            last_cycle_at = datetime.now(timezone.utc)
+            heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %d Minuten bis zum nächsten Zyklus ...", config.interval_minutes)
             if _sleep_with_kill_switch_check(interval_seconds, kill_switch):

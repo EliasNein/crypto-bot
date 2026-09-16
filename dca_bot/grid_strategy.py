@@ -239,6 +239,20 @@ class GridTradingStrategy:
         rules = self._client.get_symbol_trading_rules(self._config.symbol)
 
         for level_index in triggered_levels:
+            # Notaus vor JEDEM einzelnen Kauf, nicht nur einmal vor der
+            # Schleife (Sicherheitsreview-Punkt W15). Genau hier zählt es:
+            # Wenn der Preis in einem Intervall durch mehrere Stufen
+            # gefallen ist (Crash-Szenario), kauft diese Schleife mehrere
+            # Positionen hintereinander - und das ist der Moment, in dem
+            # jemand den Notaus zieht. Ohne die Prüfung liefen alle
+            # verbleibenden Käufe trotzdem durch.
+            #
+            # BotHalted fliegt bis main_grid.py und stoppt den Bot sauber;
+            # die in diesem Durchlauf bereits getätigten Käufe stehen zu
+            # diesem Zeitpunkt schon im Ledger, es bleibt nichts
+            # unverbucht.
+            self._kill_switch.check()
+
             order = self._client.place_market_buy(
                 self._config.symbol,
                 self._config.amount_per_level,
@@ -301,6 +315,18 @@ class GridTradingStrategy:
                 f"{tag} Stufe {level_index}: {quantity:.8f} {self._config.symbol} "
                 f"@ {price:.2f} (Ziel-Verkauf @ {position.target_sell_price:.2f})"
             )
+
+    def verify_state_readable(self) -> None:
+        """
+        Prueft beim Bot-Start, ob das Ledger lesbar ist
+        (Sicherheitsreview-Punkt W5). Wirft `LedgerUnreadable`.
+
+        Bewusst ein eigener Schritt und NICHT in
+        safe_startup_reconciliation() gekapselt: deren Zweck ist "der
+        Start darf nicht scheitern", und genau das waere hier falsch
+        herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
+        """
+        self._ledger.verify_readable()
 
     def reconcile_pending_orders(self) -> None:
         """

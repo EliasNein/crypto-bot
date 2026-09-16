@@ -33,6 +33,48 @@ class BotHalted(Exception):
     """Wird ausgelöst, wenn der Notaus-Mechanismus ausgelöst wurde."""
 
 
+class LedgerUnreadable(Exception):
+    """
+    Eine vorhandene Ledger-Datei ist unlesbar oder beschädigt
+    (Sicherheitsreview-Punkt W5).
+
+    Bewusst eine Exception statt "leere Historie": Tageslimit und
+    Stop-Loss-Kostenbasis werden bei jedem Zyklus neu aus dem Ledger
+    berechnet. Eine kaputte Datei stillschweigend als "noch nichts
+    gekauft" zu lesen, setzt beide auf Null zurück - der Bot würde
+    munter weiterkaufen, obwohl faktisch längst Kapital gebunden ist,
+    und die einzige Spur wäre eine Warnzeile im Log. Ein Bot, der nicht
+    startet, ist deutlich besser als einer, der mit falschen Limits
+    weiterläuft.
+
+    Gilt ausdrücklich NUR für vorhandene Dateien mit kaputtem Inhalt.
+    Eine fehlende Datei ist der reguläre Fall "frisches Deployment,
+    allererster Start" (siehe TradeLedger._read) und bleibt unverändert
+    erlaubt - sonst ließe sich kein Bot mehr mit leerem data/-Ordner in
+    Betrieb nehmen.
+
+    Wird hier neben BotHalted definiert, weil beide dieselbe Rolle
+    haben: ein generischer, botübergreifender Grund, sicher anzuhalten.
+    Grid- und Trend-Ledger verwenden sie mit (wie schon KillSwitch).
+    """
+
+
+def utc_today() -> date:
+    """
+    Heutiges Datum in UTC.
+
+    Ersetzt `date.today()` (Sicherheitsreview-Punkt W3): die
+    Ledger-Zeitstempel werden in UTC geschrieben und beim Auswerten mit
+    `datetime.fromisoformat(...).date()` wieder als UTC-Datum gelesen.
+    Wurde das Tagesfenster dagegen mit der LOKALEN Serverzeit bestimmt,
+    verschob sich die Tageslimit-Grenze je nach Zeitzone um Stunden
+    gegenüber der tatsächlichen Kalendertag-Grenze der Daten - mit dem
+    Ergebnis, dass rund um den Zeitzonen-Versatz entweder zu viel oder
+    zu wenig auf das Limit angerechnet wurde.
+    """
+    return datetime.now(timezone.utc).date()
+
+
 class KillSwitch:
     """
     Notaus: Der Bot stoppt sofort - auch mitten in einem laufenden
@@ -176,25 +218,156 @@ class TradeLedger:
             self._write([])
 
     def _read(self) -> list[dict]:
-        try:
-            with self._path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            logger.warning(
-                "Trade-Ledger '%s' fehlt oder ist beschädigt - starte mit "
-                "leerer Historie.",
+        """
+        Liest das Ledger.
+
+        Eine FEHLENDE Datei ist der regulaere Fall "frisches Deployment,
+        allererster Start" und ergibt eine leere Historie - sonst liesse
+        sich kein Bot mehr mit leerem data/-Ordner in Betrieb nehmen
+        (genau so aufgesetzt beim Homeserver-Deployment).
+
+        Eine VORHANDENE, aber kaputte Datei ist etwas voellig anderes und
+        wirft seit dem W5-Fix `LedgerUnreadable`: sie als leere Historie
+        zu lesen wuerde Tageslimit und Stop-Loss-Kostenbasis
+        stillschweigend auf Null setzen, und der Bot kaufte weiter,
+        obwohl faktisch Kapital gebunden ist. Siehe LedgerUnreadable in
+        risk.py.
+
+        Reihenfolge der except-Zweige ist wichtig: FileNotFoundError ist
+        eine Unterklasse von OSError - wuerde der generische Zweig zuerst
+        greifen, schluckte er genau den Fall, der erlaubt bleiben soll.
+        """
+        if not self._path.exists():
+            logger.info(
+                "%s '%s' existiert nicht - frischer Start mit leerer Historie.",
+                "Trade-Ledger",
                 self._path,
             )
             return []
 
+        try:
+            with self._path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            # Zwischen exists() und open() verschwunden - ein Rennen, kein
+            # Datenverlust-Signal.
+            return []
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "%s '%s' ist beschaedigt und kann NICHT als leere Historie "
+                "behandelt werden: Tageslimit und Stop-Loss-Basis wuerden "
+                "stillschweigend auf Null zurueckfallen. Bitte die Datei "
+                "pruefen/wiederherstellen (%s).",
+                "Trade-Ledger",
+                self._path,
+                exc,
+            )
+            raise LedgerUnreadable(
+                f"{"Trade-Ledger"} '{self._path}' enthaelt kein gueltiges JSON: {exc}"
+            ) from exc
+        except OSError as exc:
+            logger.error(
+                "%s '%s' ist vorhanden, aber nicht lesbar (%s) - es wird "
+                "bewusst NICHT mit leerer Historie weitergemacht.",
+                "Trade-Ledger",
+                self._path,
+                exc,
+            )
+            raise LedgerUnreadable(
+                f"{"Trade-Ledger"} '{self._path}' ist nicht lesbar: {exc}"
+            ) from exc
+
+        if not isinstance(data, list):
+            logger.error(
+                "%s '%s' hat ein unerwartetes Format (%s statt Liste) - "
+                "bewusst kein Weitermachen mit leerer Historie.",
+                "Trade-Ledger",
+                self._path,
+                type(data).__name__,
+            )
+            raise LedgerUnreadable(
+                f"{"Trade-Ledger"} '{self._path}' enthaelt keine JSON-Liste."
+            )
+        return data
+
+    def verify_readable(self) -> None:
+        """
+        Liest das Ledger einmal, um Beschaedigungen sofort beim Bot-Start
+        aufzudecken statt erst im ersten Zyklus (siehe die main*.py).
+        Wirft `LedgerUnreadable`.
+        """
+        self._read()
+
     def _write(self, records: list[dict]) -> None:
-        with self._path.open("w", encoding="utf-8") as f:
+        """
+        Schreibt das Ledger ATOMAR: temporäre Datei, fsync, os.replace.
+
+        Vorher wurde die Zieldatei direkt geöffnet (`open("w")`), also
+        zuerst gekürzt und dann neu befüllt - ein Absturz oder
+        Stromausfall dazwischen hinterließ eine halb geschriebene,
+        unparsbare Datei. Das ist kein theoretischer Fall: bei jedem
+        Eintrag wird die komplette Liste neu geschrieben.
+
+        Seit dem W5-Fix führt genau so eine kaputte Datei zum harten
+        Abbruch (siehe LedgerUnreadable) - deshalb gehört diese
+        Absicherung zwingend dazu. Was nach einem Absturz übrig bleibt,
+        ist jetzt entweder die vollständige alte oder die vollständige
+        neue Fassung, nie etwas dazwischen. Gleiches Muster wie in
+        pending_orders.PendingOrderStore.
+        """
+        tmp_path = self._path.with_name(self._path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(records, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._path)
 
     def record(self, trade: TradeRecord) -> None:
         records = self._read()
         records.append(asdict(trade))
         self._write(records)
+
+    def last_trade_time(self, symbol: str) -> datetime | None:
+        """
+        Zeitpunkt des letzten protokollierten Kaufzyklus dieses Symbols,
+        oder None bei leerer Historie.
+
+        Basis für die Fälligkeitsprüfung beim Bot-Start
+        (Sicherheitsreview-Punkt W2, siehe main.py): ohne sie löste JEDER
+        Prozessstart sofort einen Kauf aus, weil `execute_once()` vor dem
+        ersten `sleep` läuft. Ein Neustart alle paar Minuten - geplant
+        oder durch eine Restart-Schleife - erzeugte damit so viele Käufe,
+        wie das Tageslimit gerade noch durchließ.
+
+        Gezählt werden bewusst AUCH Dry-Run-Einträge: die Frage ist "hat
+        in diesem Intervall bereits ein Zyklus stattgefunden", nicht "ist
+        echtes Geld geflossen". Unlesbare Zeitstempel werden
+        übersprungen statt geraten - im Zweifel wirkt der Bot dann
+        "länger nicht gelaufen" und startet sofort, also das bisherige
+        Verhalten.
+        """
+        newest: datetime | None = None
+        for record in self._read():
+            if record.get("symbol") != symbol:
+                continue
+            raw = record.get("timestamp")
+            try:
+                stamp = datetime.fromisoformat(str(raw))
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Unlesbarer Zeitstempel im Trade-Ledger (%r) - Eintrag "
+                    "bleibt bei der Fälligkeitsprüfung unberücksichtigt.",
+                    raw,
+                )
+                continue
+            if stamp.tzinfo is None:
+                # Alle Einträge werden mit Zeitzone geschrieben; ein
+                # nackter Zeitstempel kann nur von Hand entstanden sein.
+                # Als UTC zu lesen passt zum Rest des Projekts.
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if newest is None or stamp > newest:
+                newest = stamp
+        return newest
 
     def has_client_order_id(self, client_order_id: str) -> bool:
         """

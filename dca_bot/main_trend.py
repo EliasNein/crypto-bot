@@ -14,13 +14,15 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 from .binance_client import TradingClient
+from .heartbeat import Heartbeat
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
-from .risk import BotHalted, KillSwitch
+from .risk import BotHalted, KillSwitch, LedgerUnreadable
 from .trend_config import load_trend_config
 from .trend_strategy import TrendFollowingStrategy
 from .version import get_code_version
@@ -100,6 +102,20 @@ def main() -> None:
     strategy = TrendFollowingStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="TREND_BOT_HALT")
 
+    # Ledger-Integritaet VOR allem anderen (W5): eine vorhandene, aber
+    # beschaedigte Ledger-Datei darf NICHT als leere Historie
+    # durchgehen - Tageslimit und Stop-Loss-Basis fielen sonst
+    # stillschweigend auf Null zurueck. Lieber gar nicht starten.
+    try:
+        strategy.verify_state_readable()
+    except LedgerUnreadable as exc:
+        logger.error("%s", exc)
+        send_notification(
+            f"[TREND-FEHLER] Bot startet NICHT: {exc} "
+            "Bitte die Datei pruefen oder aus einem Backup wiederherstellen."
+        )
+        return
+
     # Zwei Reconciliation-Schritte, und die Reihenfolge ist bewusst so:
     #
     # 1. Offene Order-Fragen aus dem letzten Lauf auflösen (K2, siehe
@@ -126,6 +142,8 @@ def main() -> None:
         ],
     )
 
+    heartbeat = Heartbeat("Trend-Following-Bot", config.heartbeat_interval_hours)
+
     interval_seconds = config.interval_hours * 60 * 60
 
     try:
@@ -143,6 +161,11 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Trend-Zyklus.")
                 send_notification(f"[TREND-FEHLER] Unerwarteter Fehler im Trend-Zyklus: {exc}")
+
+            # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
+            # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
+            last_cycle_at = datetime.now(timezone.utc)
+            heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %d Stunden bis zum nächsten Zyklus ...", config.interval_hours)
             if _sleep_with_kill_switch_check(interval_seconds, kill_switch):

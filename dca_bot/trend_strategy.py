@@ -889,6 +889,18 @@ class TrendFollowingStrategy:
             "unverändert, bitte im Auge behalten."
         )
 
+    def verify_state_readable(self) -> None:
+        """
+        Prueft beim Bot-Start, ob das Ledger lesbar ist
+        (Sicherheitsreview-Punkt W5). Wirft `LedgerUnreadable`.
+
+        Bewusst ein eigener Schritt und NICHT in
+        safe_startup_reconciliation() gekapselt: deren Zweck ist "der
+        Start darf nicht scheitern", und genau das waere hier falsch
+        herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
+        """
+        self._ledger.verify_readable()
+
     def reconcile_pending_orders(self) -> None:
         """
         Trägt beim Bot-Start Orders nach, deren Ausgang beim letzten Lauf

@@ -135,6 +135,12 @@ class Allocator:
                 "gap_pct": state["gap_pct"],
                 "direction": state["confirmed_direction"],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
+                # Macht die Datei selbstbeschreibend: die Konsumenten
+                # (DCA/Trend) leiten daraus ab, ab wann eine Zuteilung
+                # als veraltet gilt, statt dieselbe Zahl ein zweites Mal
+                # in ihrer eigenen Konfiguration zu führen (W10, siehe
+                # allocator_signals._allocation_is_stale).
+                "interval_minutes": self._config.interval_minutes,
             }
         )
 

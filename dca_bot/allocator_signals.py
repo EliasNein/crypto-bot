@@ -19,6 +19,30 @@ Zustand) bis auf `read_allocation_fraction()`, die lediglich liest.
 from __future__ import annotations
 
 import json
+import logging
+from datetime import datetime, timezone
+
+logger = logging.getLogger("dca_bot")
+
+# Wie viele Allocator-Zyklen eine Zuteilung alt sein darf, bevor sie als
+# veraltet gilt (Sicherheitsreview-Punkt W10). Drei Zyklen lassen Raum
+# fuer einen uebersprungenen Lauf oder eine kurze Stoerung, schlagen aber
+# zuverlaessig an, wenn der Allocator-Prozess gestorben ist.
+STALE_ALLOCATION_INTERVALS = 3
+
+# Fallback, wenn die State-Datei ihr eigenes Intervall nicht mitschreibt
+# (Dateien aus der Zeit vor diesem Fix). Entspricht dem Default von
+# ALLOCATOR_INTERVAL_MINUTES (60) mal STALE_ALLOCATION_INTERVALS.
+DEFAULT_STALE_AFTER_MINUTES = 180.0
+
+# Zuteilung, auf die bei einer veralteten State-Datei zurueckgefallen
+# wird: 0.0 Trend-Anteil, also 100% DCA. Bewusst NICHT None - None hiesse
+# "kein Allocator", und der Trend-Bot wuerde dann seinen VOLLEN
+# Einstiegsbetrag verwenden. 0.0 laesst den DCA-Bot regulaer kaufen und
+# den Trend-Bot den Einstieg ueberspringen (unterhalb
+# MIN_EFFECTIVE_QUOTE_AMOUNT) - die konservativere Richtung, wenn niemand
+# mehr weiss, wie stark der Trend gerade ist.
+STALE_ALLOCATION_FALLBACK = 0.0
 
 # Unterhalb dieses Betrags (Quote-Währung) wird ein durch den Allocator
 # herunterskalierter Kauf/Einstieg übersprungen statt eine wirtschaftlich
@@ -99,4 +123,80 @@ def read_allocation_fraction(path: str) -> float | None:
         return None
     if not (0.0 <= fraction <= 1.0):
         return None
+
+    if _allocation_is_stale(data, path):
+        return STALE_ALLOCATION_FALLBACK
     return fraction
+
+
+def _allocation_is_stale(data: dict, path: str) -> bool:
+    """
+    Ob die zuletzt geschriebene Zuteilung zu alt ist, um ihr noch zu
+    trauen (Sicherheitsreview-Punkt W10).
+
+    Ohne diese Prüfung blieb der letzte berechnete Wert nach einem Tod
+    des Allocator-Prozesses FÜR IMMER gültig, ohne dass DCA oder Trend
+    etwas davon merkten: die State-Datei liegt weiterhin da und enthält
+    eine plausible Zahl. Bei einer eingefrorenen Zuteilung von z.B. 100%
+    Trend hätte der DCA-Bot dauerhaft gar nicht mehr gekauft - ein
+    stiller Ausfall, der erst bei der nächsten Auswertung aufgefallen
+    wäre.
+
+    Die Schwelle kommt aus der Datei selbst: der Allocator schreibt sein
+    `interval_minutes` mit, hier wird es mit
+    STALE_ALLOCATION_INTERVALS multipliziert. Bewusst so, statt eine
+    zweite Env-Variable auf Konsumentenseite einzuführen - zwei
+    getrennte Werte für dasselbe Intervall würden früher oder später
+    auseinanderlaufen, und der Fehler wäre still.
+
+    Ein fehlendes oder unlesbares `updated_at` gilt als VERALTET, nicht
+    als frisch: die Datei behauptet dann nichts über ihr Alter, und in
+    dieser Lage ist die konservative Annahme die richtige.
+    """
+    raw_updated_at = data.get("updated_at")
+    if raw_updated_at is None:
+        logger.warning(
+            "Allocator-Zuteilung in '%s' hat kein updated_at - sie wird als "
+            "veraltet behandelt (Rückfall auf 100%% DCA). Läuft der "
+            "Allocator-Prozess noch?",
+            path,
+        )
+        return True
+
+    try:
+        updated_at = datetime.fromisoformat(str(raw_updated_at))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Allocator-Zuteilung in '%s' hat ein unlesbares updated_at (%r) - "
+            "sie wird als veraltet behandelt (Rückfall auf 100%% DCA).",
+            path,
+            raw_updated_at,
+        )
+        return True
+
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+    try:
+        interval_minutes = float(data["interval_minutes"])
+        if interval_minutes <= 0:
+            raise ValueError
+        stale_after_minutes = interval_minutes * STALE_ALLOCATION_INTERVALS
+    except (KeyError, TypeError, ValueError):
+        # State-Dateien aus der Zeit vor diesem Fix kennen das Feld nicht.
+        stale_after_minutes = DEFAULT_STALE_AFTER_MINUTES
+
+    age_minutes = (datetime.now(timezone.utc) - updated_at).total_seconds() / 60
+    if age_minutes <= stale_after_minutes:
+        return False
+
+    logger.warning(
+        "Allocator-Zuteilung in '%s' ist %.0f Minuten alt (Grenze %.0f) - der "
+        "Allocator-Prozess läuft vermutlich nicht mehr. Es wird auf 100%% DCA "
+        "/ 0%% Trend zurückgefallen, statt einer eingefrorenen Zahl zu "
+        "vertrauen.",
+        path,
+        age_minutes,
+        stale_after_minutes,
+    )
+    return True

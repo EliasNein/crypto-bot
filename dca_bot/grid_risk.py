@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .grid_signals import is_trend_break_stop_loss_hit
+from .risk import LedgerUnreadable
 from .notifier import send_notification
 
 logger = logging.getLogger("grid_bot")
@@ -86,20 +88,109 @@ class GridLedger:
             self._write([])
 
     def _read(self) -> list[dict]:
-        try:
-            with self._path.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, FileNotFoundError):
-            logger.warning(
-                "Grid-Ledger '%s' fehlt oder ist beschädigt - starte mit "
-                "leerer Historie.",
+        """
+        Liest das Ledger.
+
+        Eine FEHLENDE Datei ist der regulaere Fall "frisches Deployment,
+        allererster Start" und ergibt eine leere Historie - sonst liesse
+        sich kein Bot mehr mit leerem data/-Ordner in Betrieb nehmen
+        (genau so aufgesetzt beim Homeserver-Deployment).
+
+        Eine VORHANDENE, aber kaputte Datei ist etwas voellig anderes und
+        wirft seit dem W5-Fix `LedgerUnreadable`: sie als leere Historie
+        zu lesen wuerde Tageslimit und Stop-Loss-Kostenbasis
+        stillschweigend auf Null setzen, und der Bot kaufte weiter,
+        obwohl faktisch Kapital gebunden ist. Siehe LedgerUnreadable in
+        risk.py.
+
+        Reihenfolge der except-Zweige ist wichtig: FileNotFoundError ist
+        eine Unterklasse von OSError - wuerde der generische Zweig zuerst
+        greifen, schluckte er genau den Fall, der erlaubt bleiben soll.
+        """
+        if not self._path.exists():
+            logger.info(
+                "%s '%s' existiert nicht - frischer Start mit leerer Historie.",
+                "Grid-Ledger",
                 self._path,
             )
             return []
 
+        try:
+            with self._path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            # Zwischen exists() und open() verschwunden - ein Rennen, kein
+            # Datenverlust-Signal.
+            return []
+        except json.JSONDecodeError as exc:
+            logger.error(
+                "%s '%s' ist beschaedigt und kann NICHT als leere Historie "
+                "behandelt werden: Tageslimit und Stop-Loss-Basis wuerden "
+                "stillschweigend auf Null zurueckfallen. Bitte die Datei "
+                "pruefen/wiederherstellen (%s).",
+                "Grid-Ledger",
+                self._path,
+                exc,
+            )
+            raise LedgerUnreadable(
+                f"{"Grid-Ledger"} '{self._path}' enthaelt kein gueltiges JSON: {exc}"
+            ) from exc
+        except OSError as exc:
+            logger.error(
+                "%s '%s' ist vorhanden, aber nicht lesbar (%s) - es wird "
+                "bewusst NICHT mit leerer Historie weitergemacht.",
+                "Grid-Ledger",
+                self._path,
+                exc,
+            )
+            raise LedgerUnreadable(
+                f"{"Grid-Ledger"} '{self._path}' ist nicht lesbar: {exc}"
+            ) from exc
+
+        if not isinstance(data, list):
+            logger.error(
+                "%s '%s' hat ein unerwartetes Format (%s statt Liste) - "
+                "bewusst kein Weitermachen mit leerer Historie.",
+                "Grid-Ledger",
+                self._path,
+                type(data).__name__,
+            )
+            raise LedgerUnreadable(
+                f"{"Grid-Ledger"} '{self._path}' enthaelt keine JSON-Liste."
+            )
+        return data
+
+    def verify_readable(self) -> None:
+        """
+        Liest das Ledger einmal, um Beschaedigungen sofort beim Bot-Start
+        aufzudecken statt erst im ersten Zyklus (siehe die main*.py).
+        Wirft `LedgerUnreadable`.
+        """
+        self._read()
+
     def _write(self, records: list[dict]) -> None:
-        with self._path.open("w", encoding="utf-8") as f:
+        """
+        Schreibt das Ledger ATOMAR: temporäre Datei, fsync, os.replace.
+
+        Vorher wurde die Zieldatei direkt geöffnet (`open("w")`), also
+        zuerst gekürzt und dann neu befüllt - ein Absturz oder
+        Stromausfall dazwischen hinterließ eine halb geschriebene,
+        unparsbare Datei. Das ist kein theoretischer Fall: bei jedem
+        Eintrag wird die komplette Liste neu geschrieben.
+
+        Seit dem W5-Fix führt genau so eine kaputte Datei zum harten
+        Abbruch (siehe LedgerUnreadable) - deshalb gehört diese
+        Absicherung zwingend dazu. Was nach einem Absturz übrig bleibt,
+        ist jetzt entweder die vollständige alte oder die vollständige
+        neue Fassung, nie etwas dazwischen. Gleiches Muster wie in
+        pending_orders.PendingOrderStore.
+        """
+        tmp_path = self._path.with_name(self._path.name + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(records, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, self._path)
 
     def open_positions(self) -> list[dict]:
         return [r for r in self._read() if r["status"] == "open"]

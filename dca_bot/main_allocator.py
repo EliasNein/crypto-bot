@@ -17,10 +17,12 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 from .allocator import Allocator
 from .allocator_config import load_allocator_config
 from .binance_client import TradingClient
+from .heartbeat import Heartbeat
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .process_lock import BotAlreadyRunning, ProcessLock
@@ -95,6 +97,8 @@ def main() -> None:
     allocator = Allocator(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="ALLOCATOR_HALT")
 
+    heartbeat = Heartbeat("Kapital-Allocator", config.heartbeat_interval_hours)
+
     interval_seconds = config.interval_minutes * 60
 
     try:
@@ -109,6 +113,11 @@ def main() -> None:
             except Exception as exc:
                 logger.exception("Unerwarteter Fehler im Allocator-Zyklus.")
                 send_notification(f"[ALLOCATOR-FEHLER] Unerwarteter Fehler: {exc}")
+
+            # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
+            # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
+            last_cycle_at = datetime.now(timezone.utc)
+            heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %d Minuten bis zur nächsten Berechnung ...", config.interval_minutes)
             if _sleep_with_kill_switch_check(interval_seconds, kill_switch):
