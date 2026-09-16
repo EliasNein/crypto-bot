@@ -17,6 +17,12 @@ from datetime import datetime, timezone
 
 from .binance_client import TradingClient
 from .heartbeat import Heartbeat
+from .config_guard import (
+    ConfigError,
+    announce_trading_mode,
+    mode_label,
+    report_config_error,
+)
 from .grid_config import load_grid_config
 from .grid_strategy import GridTradingStrategy
 from .notifier import init as init_notifier
@@ -58,13 +64,21 @@ def _sleep_with_kill_switch_check(total_seconds: int, kill_switch: KillSwitch) -
 
 
 def main() -> None:
-    config = load_grid_config()
+    # Siehe main.py: eine Fehlkonfiguration darf keine
+    # systemd-Neustartschleife ausloesen (W12).
+    try:
+        config = load_grid_config()
+    except ConfigError as exc:
+        report_config_error("Grid-Bot", exc)
+        return
+
     setup_logging(config.log_file)
     logger = logging.getLogger("grid_bot")
 
     logger.info("=" * 60)
     logger.info("Grid-Trading-Bot startet")
     logger.info("Code-Version: %s", get_code_version())
+    logger.info("Modus: %s", mode_label(config.use_testnet))
     logger.info(
         "Symbol: %s | Grid: %.2f - %.2f | Abstand: %.2f%% | Betrag/Stufe: %.2f | Intervall: %dmin",
         config.symbol,
@@ -94,6 +108,16 @@ def main() -> None:
         return
 
     init_notifier(config)
+
+    # Live-Modus ausdruecklich laut melden, im Log UND per Telegram
+    # (W12) - bewusst erst nach init_notifier().
+    announce_trading_mode(
+        logger,
+        "Grid-Bot",
+        use_testnet=config.use_testnet,
+        trading_enabled=config.trading_enabled,
+        enable_var_name="GRID_BOT_ENABLE_TRADING",
+    )
 
     client = TradingClient(config)
     strategy = GridTradingStrategy(config, client)

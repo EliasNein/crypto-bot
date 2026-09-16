@@ -17,6 +17,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from .balance_guard import (
+    SELL_INSUFFICIENT,
+    BalanceSnapshot,
+    build_snapshot,
+    check_sell_coverage,
+    describe,
+    ledger_exceeds_account,
+)
 from .binance_client import TradingClient
 from .grid_config import GridConfig
 from .grid_risk import GridLedger, GridPosition, GridStopLoss
@@ -59,6 +67,14 @@ class GridTradingStrategy:
         # bereits per Telegram gemeldet wurde (siehe _report_failed_sell) -
         # bewusst nur im Prozessspeicher, wie _last_seen_price.
         self._failed_sell_notified: set[str] = set()
+        # Ob die Buchhaltungs-Diskrepanz (W11, siehe balance_guard.py)
+        # in diesem Prozesslauf bereits per Telegram gemeldet wurde. Der
+        # Grid-Bot prueft alle GRID_INTERVAL_MINUTES - bei einer
+        # dauerhaften Ursache waere das sonst eine Nachricht im
+        # Minutentakt. Ins Log geht sie weiterhin bei jedem Zyklus.
+        # Gleiche Ueberlegung und gleiche Kurzlebigkeit wie
+        # _failed_sell_notified.
+        self._balance_mismatch_notified = False
         logger.info(
             "Grid initialisiert: %d Stufen von %.2f bis %.2f (Abstand %.2f%%, "
             "max. Kapitalbindung ca. %.2f)",
@@ -93,6 +109,16 @@ class GridTradingStrategy:
         # ausgeführten Verkauf hier eine Exception zu riskieren, würde die
         # Position unverkauft im Ledger stehen lassen, obwohl sie weg ist.
         rules = self._client.get_symbol_trading_rules(self._config.symbol)
+
+        # Konsistenz-Check vor dem Verkauf (W11, siehe balance_guard.py).
+        # Einmal pro Zyklus abgefragt, nicht pro Position: die Schleife
+        # unten kann mehrere Positionen schliessen, und zwei API-Aufrufe
+        # pro Position waeren unnoetige Last fuer eine Zahl, die sich
+        # zwischen zwei Verkaeufen nur um genau die bekannte, selbst
+        # verkaufte Menge aendert - die wird darum unten mitgefuehrt.
+        snapshot = self._account_snapshot(rules)
+        self._warn_on_ledger_mismatch(snapshot, open_positions, rules)
+        sold_this_cycle = 0.0
 
         for record in open_positions:
             if not is_sell_target_hit(price, record["target_sell_price"]):
@@ -132,6 +158,15 @@ class GridTradingStrategy:
                 )
                 order = None
             else:
+                # Deckungsprüfung unmittelbar vor der Order (W11): reicht
+                # das freie Guthaben für genau diesen Verkauf? Wenn nicht,
+                # würde die Börse ablehnen - und der Fehlschlag sähe im
+                # Log aus wie ein Netzwerkproblem, obwohl die Ursache
+                # feststeht. Lieber gar nicht erst verkaufen und das
+                # deutlich sagen.
+                if not self._sell_is_covered(record, snapshot, sold_this_cycle, rules):
+                    continue
+
                 # `context` landet VOR dem Netzwerk-Call in der
                 # Pending-Orders-Datei (siehe
                 # binance_client._place_order): geht die Antwort
@@ -153,6 +188,10 @@ class GridTradingStrategy:
                     # erreicht).
                     self._report_failed_sell(record, price)
                     continue
+
+                # Der Verkauf ist durch - diese Menge steht dem nächsten
+                # Durchlauf dieser Schleife nicht mehr zur Verfügung.
+                sold_this_cycle += float(record["quantity"])
 
             if order is not None:
                 # Netto, also abzüglich der in USDT abgerechneten
@@ -179,6 +218,135 @@ class GridTradingStrategy:
                 f"{self._config.symbol} @ {price:.2f} verkauft "
                 f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}"
             )
+
+    def _account_snapshot(self, rules) -> BalanceSnapshot | None:
+        """
+        Kontostand des Base-Assets samt Zuordnung der gebundenen Mengen
+        (W11, siehe balance_guard.py).
+
+        Nur im echten Trading-Modus: im Dry-Run existieren die Positionen
+        an der Börse gar nicht, ein Abgleich gegen echte Bestände hätte
+        dort keine Bedeutung - und würde bei jedem Zyklus zwei
+        API-Aufrufe für nichts kosten.
+
+        `None` heißt "nicht abrufbar" und schaltet beide Prüfungen für
+        diesen Zyklus ab. Das ist Absicht: ein gescheiterter Abruf ist
+        keine Aussage über das Konto, und ein Verkauf, der wegen eines
+        Netzwerk-Hängers unterbleibt, wäre die gefährlichere Richtung.
+        """
+        if not self._config.trading_enabled:
+            return None
+        return build_snapshot(
+            self._client.get_asset_balance(rules.base_asset),
+            self._client.get_open_orders(self._config.symbol),
+            self._config.bot_name,
+        )
+
+    def _warn_on_ledger_mismatch(
+        self, snapshot: BalanceSnapshot | None, open_positions: list[dict], rules
+    ) -> None:
+        """
+        Buchhaltungsprüfung (weich, W11): Deckt das Konto überhaupt ab,
+        was das eigene Ledger als offen führt?
+
+        Blockiert bewusst NICHTS - siehe Modul-Docstring von
+        balance_guard.py: ein gedeckter Einzelverkauf reduziert Risiko
+        und Kapitalbindung, ihn zu verhindern würde das eigentliche
+        Problem nicht lösen, sondern nur Assets stranden lassen. Gleiche
+        Abwägung wie beim Trendbruch-Stop-Loss, der Verkäufe ebenfalls
+        durchlässt.
+
+        Dry-Run-Positionen zählen nicht mit: sie existieren an der Börse
+        nicht und dürfen deshalb auch keinen Anspruch auf echtes
+        Guthaben begründen (K4).
+        """
+        if snapshot is None:
+            return
+
+        own_quantity = sum(
+            float(r.get("quantity", 0.0))
+            for r in open_positions
+            if not r.get("dry_run", True)
+        )
+        if not ledger_exceeds_account(snapshot, own_quantity, rules.step_size):
+            self._balance_mismatch_notified = False
+            return
+
+        logger.error(
+            "[GRID-BESTAND-DISKREPANZ] Das Grid-Ledger führt mehr %s als "
+            "auf dem Konto für diesen Bot vorhanden sein kann. %s. Da sich "
+            "DCA, Grid und Trend ein Konto teilen, kann das bedeuten, dass "
+            "ein anderer Bot oder ein manueller Trade Bestand verkauft hat, "
+            "der hier noch als offen geführt wird. Gedeckte Verkäufe laufen "
+            "weiter, bitte mit 'python -m dca_bot.audit_positions' prüfen.",
+            rules.base_asset,
+            describe(snapshot, own_quantity),
+        )
+
+        if self._balance_mismatch_notified:
+            return
+        self._balance_mismatch_notified = True
+        send_notification(
+            f"[GRID-BESTAND-DISKREPANZ] Das Grid-Ledger führt mehr "
+            f"{rules.base_asset}, als für diesen Bot auf dem Konto sein "
+            f"kann. {describe(snapshot, own_quantity)}. Geteiltes Konto - "
+            "bitte Positionen prüfen (python -m dca_bot.audit_positions)."
+        )
+
+    def _sell_is_covered(
+        self,
+        record: dict,
+        snapshot: BalanceSnapshot | None,
+        sold_this_cycle: float,
+        rules,
+    ) -> bool:
+        """
+        Deckungsprüfung (hart, W11) für genau diese eine Position.
+
+        `sold_this_cycle` zieht ab, was in diesem Durchlauf bereits
+        verkauft wurde: Der Snapshot stammt vom Anfang des Zyklus, und
+        durchquert der Preis mehrere Stufen nach oben, schließt diese
+        Schleife mehrere Positionen nacheinander. Ohne diese Korrektur
+        hielte die Prüfung dasselbe freie Guthaben für jeden Verkauf
+        erneut verfügbar - und übersähe genau den Fall, für den sie
+        gebaut ist.
+        """
+        if snapshot is None:
+            return True
+
+        quantity = float(record["quantity"])
+        remaining = BalanceSnapshot(
+            free=snapshot.free - sold_this_cycle,
+            locked=snapshot.locked,
+            own_locked=snapshot.own_locked,
+            foreign_locked=snapshot.foreign_locked,
+        )
+        if check_sell_coverage(remaining, quantity, rules.step_size) != SELL_INSUFFICIENT:
+            return True
+
+        logger.error(
+            "[GRID-VERKAUF-UNGEDECKT] Stufe %s: Verkauf über %.8f %s wird "
+            "NICHT versucht - frei verfügbar sind nur %.8f. %.8f stecken in "
+            "offenen Orders (davon %.8f aus anderen Bots bzw. manuellem "
+            "Handel). Die Börse würde die Order ablehnen; die Position "
+            "bleibt offen und wird im nächsten Zyklus erneut geprüft.",
+            record.get("level_index", "?"),
+            quantity,
+            rules.base_asset,
+            remaining.free,
+            snapshot.locked,
+            snapshot.foreign_locked,
+        )
+        if record["id"] not in self._failed_sell_notified:
+            self._failed_sell_notified.add(record["id"])
+            send_notification(
+                f"[GRID-VERKAUF-UNGEDECKT] Stufe {record.get('level_index', '?')}: "
+                f"Verkauf über {quantity:.8f} {rules.base_asset} nicht gedeckt "
+                f"(frei: {remaining.free:.8f}, in fremden Orders gebunden: "
+                f"{snapshot.foreign_locked:.8f}). Position bleibt offen - "
+                "geteiltes Konto, bitte prüfen."
+            )
+        return False
 
     def _report_failed_sell(self, record: dict, price: float) -> None:
         """

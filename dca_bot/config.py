@@ -8,10 +8,22 @@ später auch Unit-Tests (man kann eine Config einfach mocken).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+from .config_guard import (
+    ConfigError,
+    env_bool,
+    env_float,
+    env_int,
+    env_text,
+    load_api_credentials,
+    load_telegram_credentials,
+    load_use_testnet,
+    require_explicit_in_live,
+    validate_halt_variable,
+)
 
 # Lädt Variablen aus einer .env-Datei im Projektverzeichnis, falls vorhanden.
 load_dotenv()
@@ -22,6 +34,10 @@ class Config:
     # --- Binance API ---
     api_key: str
     api_secret: str
+    # Testnet oder echtes Konto. Der Default bleibt `True`, aber der Wert
+    # kommt seit dem W12-Fix aus `USE_TESTNET` und nicht mehr aus einem
+    # hart codierten Literal - "live gehen" ist damit ein
+    # Konfigurationsschritt, kein Code-Edit. Siehe config_guard.py.
     use_testnet: bool = True
 
     # --- DCA-Strategie ---
@@ -78,41 +94,90 @@ class Config:
 
 
 def load_config() -> Config:
-    """Liest alle Werte aus den Umgebungsvariablen und validiert sie."""
-    api_key = os.getenv("BINANCE_API_KEY", "")
-    api_secret = os.getenv("BINANCE_API_SECRET", "")
+    """
+    Liest alle Werte aus den Umgebungsvariablen und validiert sie.
 
-    if not api_key or not api_secret or "dein_testnet" in api_key:
-        raise ValueError(
-            "BINANCE_API_KEY / BINANCE_API_SECRET sind nicht gesetzt. "
-            "Kopiere .env.example zu .env und trage deine Testnet-Keys ein "
-            "(https://testnet.binance.vision/)."
-        )
+    Seit dem W12-Fix laufen alle Zugriffe über die Helfer in
+    config_guard.py: sie unterscheiden "nicht gesetzt" (Default gilt) von
+    "auf leer gesetzt" (Fehler), prüfen Wertebereiche und nennen in jeder
+    Meldung die betroffene Variable. Vorher scheiterte z.B. ein
+    Tippfehler in einer Zahl mit "could not convert string to float:
+    'abc'" - ohne zu sagen, welche der gut zwei Dutzend Variablen gemeint
+    war.
 
-    trading_enabled = os.getenv("DCA_BOT_ENABLE_TRADING", "false").lower() == "true"
-    kill_switch_file = os.getenv("DCA_BOT_KILL_SWITCH_FILE", "STOP")
-    stop_loss_pct = float(os.getenv("DCA_BOT_STOP_LOSS_PCT", "25.0"))
-    state_file = os.getenv("DCA_BOT_STATE_FILE", "data/trade_ledger.json")
-    stop_loss_state_file = os.getenv(
-        "DCA_BOT_STOP_LOSS_STATE_FILE", "data/stop_loss_paused.json"
+    Symbol, Kaufbetrag, Intervall und Tageslimit sind dabei neu aus der
+    `.env` lesbar (`DCA_SYMBOL`, `DCA_QUOTE_AMOUNT`, `DCA_INTERVAL_HOURS`,
+    `DCA_MAX_DAILY_SPEND`). Sie standen als einzige der vier Bots
+    ausschließlich als Code-Default hier - genau der Zustand, den W12
+    beanstandet. Die Defaults sind unverändert, ein bestehendes
+    Deployment verhält sich also exakt wie vorher.
+    """
+    use_testnet = load_use_testnet()
+    api_key, api_secret = load_api_credentials(use_testnet=use_testnet)
+    telegram_bot_token, telegram_chat_id = load_telegram_credentials(
+        use_testnet=use_testnet
     )
-    telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    # Der Notaus wird zur Laufzeit bewusst tolerant gelesen (siehe
+    # KillSwitch) - ein Tippfehler dort bedeutet aber "kein Notaus", und
+    # der Start ist der einzige Moment, das gefahrlos zu bemerken.
+    validate_halt_variable("DCA_BOT_HALT")
+
+    # Positionsgröße und Tageslimit müssen im Live-Modus ausdrücklich
+    # dastehen: die Defaults stammen aus der Testnet-Phase.
+    require_explicit_in_live(
+        "DCA_QUOTE_AMOUNT",
+        use_testnet=use_testnet,
+        hint="Das ist der Betrag, der bei jedem Kauf tatsächlich ausgegeben wird.",
+    )
+    require_explicit_in_live(
+        "DCA_MAX_DAILY_SPEND",
+        use_testnet=use_testnet,
+        hint="Das ist die Notbremse gegen unbegrenzte Käufe bei einem Bug.",
+    )
+
+    quote_amount = env_float("DCA_QUOTE_AMOUNT", "15.0", gt=0)
+    max_daily_spend = env_float("DCA_MAX_DAILY_SPEND", "50.0", gt=0)
+    if max_daily_spend < quote_amount:
+        raise ConfigError(
+            f"DCA_MAX_DAILY_SPEND ({max_daily_spend}) ist kleiner als "
+            f"DCA_QUOTE_AMOUNT ({quote_amount}) - damit würde das Tageslimit "
+            "JEDEN Kauf blockieren und der Bot liefe dauerhaft leer."
+        )
 
     return Config(
         api_key=api_key,
         api_secret=api_secret,
-        trading_enabled=trading_enabled,
-        kill_switch_file=kill_switch_file,
-        stop_loss_pct=stop_loss_pct,
-        state_file=state_file,
-        stop_loss_state_file=stop_loss_state_file,
-        pending_orders_file=os.getenv(
+        use_testnet=use_testnet,
+        symbol=env_text(
+            "DCA_SYMBOL", "BTCUSDT", hint="Zum Beispiel BTCUSDT."
+        ),
+        quote_amount=quote_amount,
+        interval_hours=env_int("DCA_INTERVAL_HOURS", "24", gt=0),
+        trading_enabled=env_bool("DCA_BOT_ENABLE_TRADING", "false"),
+        max_daily_spend=max_daily_spend,
+        kill_switch_file=env_text("DCA_BOT_KILL_SWITCH_FILE", "STOP"),
+        # 0 schaltet den Portfolio-Stop-Loss ab (dokumentiertes
+        # Verhalten, siehe PortfolioStopLoss) - deshalb ge=0 und nicht
+        # gt=0. Über 100 wäre dagegen sinnlos: mehr als den gesamten
+        # Einsatz kann man nicht verlieren.
+        stop_loss_pct=env_float("DCA_BOT_STOP_LOSS_PCT", "25.0", ge=0, le=100),
+        state_file=env_text("DCA_BOT_STATE_FILE", "data/trade_ledger.json"),
+        stop_loss_state_file=env_text(
+            "DCA_BOT_STOP_LOSS_STATE_FILE", "data/stop_loss_paused.json"
+        ),
+        # Ein leerer Pfad würde die K2-Absicherung abschalten - das fiele
+        # sonst erst bei der ersten Order auf (siehe _place_order).
+        pending_orders_file=env_text(
             "DCA_PENDING_ORDERS_FILE", "data/pending_orders_dca.json"
         ),
-        lock_file=os.getenv("DCA_LOCK_FILE", "data/dca_bot.lock"),
-        allocator_state_file=os.getenv("DCA_ALLOCATOR_STATE_FILE", ""),
+        lock_file=env_text("DCA_LOCK_FILE", "data/dca_bot.lock"),
+        # Leer ist hier die gültige Bedeutung "Allocator-Anbindung aus".
+        allocator_state_file=env_text(
+            "DCA_ALLOCATOR_STATE_FILE", "", required=False
+        ),
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
-        heartbeat_interval_hours=float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "24.0")),
+        # 0 schaltet den Heartbeat ab (siehe heartbeat.py).
+        heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
     )

@@ -13,10 +13,22 @@ kein geteilter Bot-Zustand.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+from .config_guard import (
+    ConfigError,
+    env_bool,
+    env_float,
+    env_int,
+    env_text,
+    load_api_credentials,
+    load_telegram_credentials,
+    load_use_testnet,
+    require_explicit_in_live,
+    validate_halt_variable,
+)
 
 load_dotenv()
 
@@ -26,6 +38,7 @@ class GridConfig:
     # --- Binance API (gleiche Zugangsdaten wie der DCA-Bot) ---
     api_key: str
     api_secret: str
+    # Siehe config.py (DCA): kommt seit dem W12-Fix aus `USE_TESTNET`.
     use_testnet: bool = True
 
     # --- Grid-Strategie ---
@@ -67,50 +80,77 @@ class GridConfig:
 
 
 def load_grid_config() -> GridConfig:
-    """Liest alle Werte aus den Umgebungsvariablen und validiert sie."""
-    api_key = os.getenv("BINANCE_API_KEY", "")
-    api_secret = os.getenv("BINANCE_API_SECRET", "")
+    """
+    Liest alle Werte aus den Umgebungsvariablen und validiert sie.
 
-    if not api_key or not api_secret or "dein_testnet" in api_key:
-        raise ValueError(
-            "BINANCE_API_KEY / BINANCE_API_SECRET sind nicht gesetzt. "
-            "Kopiere .env.example zu .env und trage deine Testnet-Keys ein "
-            "(https://testnet.binance.vision/)."
+    Zur Pflichtprüfung insgesamt siehe config_guard.py (W12). Für den
+    Grid-Bot ist die Größenprüfung besonders wichtig: Er hat bewusst KEIN
+    Tageslimit (siehe Modul-Docstring oben), die maximale Kapitalbindung
+    ergibt sich allein aus Stufenzahl x `amount_per_level`. Damit sind
+    `GRID_LOWER_LIMIT`, `GRID_UPPER_LIMIT`, `GRID_SPACING_PCT` und
+    `GRID_AMOUNT_PER_LEVEL` die einzige Obergrenze, die es gibt - im
+    Live-Modus müssen sie deshalb ausdrücklich in der `.env` stehen und
+    dürfen nicht auf Testnet-Defaults zurückfallen (siehe W16).
+    """
+    use_testnet = load_use_testnet()
+    api_key, api_secret = load_api_credentials(use_testnet=use_testnet)
+    telegram_bot_token, telegram_chat_id = load_telegram_credentials(
+        use_testnet=use_testnet
+    )
+    validate_halt_variable("GRID_BOT_HALT")
+
+    for name, hint in (
+        ("GRID_LOWER_LIMIT", "Untere Grid-Grenze."),
+        ("GRID_UPPER_LIMIT", "Obere Grid-Grenze."),
+        ("GRID_AMOUNT_PER_LEVEL", "Betrag pro Stufe."),
+    ):
+        require_explicit_in_live(
+            name,
+            use_testnet=use_testnet,
+            hint=f"{hint} Spanne, Abstand und Betrag/Stufe bestimmen "
+            "zusammen die maximale Kapitalbindung - beim Grid-Bot die "
+            "einzige Obergrenze, ein Tageslimit gibt es hier nicht.",
         )
 
-    lower_limit = float(os.getenv("GRID_LOWER_LIMIT", "70000.0"))
-    upper_limit = float(os.getenv("GRID_UPPER_LIMIT", "90000.0"))
-    grid_spacing_pct = float(os.getenv("GRID_SPACING_PCT", "1.5"))
+    lower_limit = env_float("GRID_LOWER_LIMIT", "70000.0", gt=0)
+    upper_limit = env_float("GRID_UPPER_LIMIT", "90000.0", gt=0)
+    grid_spacing_pct = env_float("GRID_SPACING_PCT", "1.5", gt=0, lt=100)
 
-    if lower_limit <= 0 or upper_limit <= lower_limit or grid_spacing_pct <= 0:
-        raise ValueError(
-            "Ungültige Grid-Parameter: GRID_LOWER_LIMIT muss > 0, "
-            "GRID_UPPER_LIMIT > GRID_LOWER_LIMIT und GRID_SPACING_PCT > 0 "
-            f"sein (aktuell: lower={lower_limit}, upper={upper_limit}, "
-            f"spacing={grid_spacing_pct})."
+    if upper_limit <= lower_limit:
+        raise ConfigError(
+            "Ungültige Grid-Parameter: GRID_UPPER_LIMIT muss größer als "
+            f"GRID_LOWER_LIMIT sein (aktuell: lower={lower_limit}, "
+            f"upper={upper_limit})."
         )
 
     return GridConfig(
         api_key=api_key,
         api_secret=api_secret,
-        symbol=os.getenv("GRID_SYMBOL", "BTCUSDT"),
+        use_testnet=use_testnet,
+        symbol=env_text("GRID_SYMBOL", "BTCUSDT", hint="Zum Beispiel BTCUSDT."),
         lower_limit=lower_limit,
         upper_limit=upper_limit,
         grid_spacing_pct=grid_spacing_pct,
-        amount_per_level=float(os.getenv("GRID_AMOUNT_PER_LEVEL", "15.0")),
-        interval_minutes=int(os.getenv("GRID_INTERVAL_MINUTES", "5")),
-        trading_enabled=os.getenv("GRID_BOT_ENABLE_TRADING", "false").lower() == "true",
-        kill_switch_file=os.getenv("GRID_KILL_SWITCH_FILE", "STOP_GRID"),
-        stop_loss_pct=float(os.getenv("GRID_STOP_LOSS_PCT", "15.0")),
-        state_file=os.getenv("GRID_STATE_FILE", "data/grid_positions.json"),
-        stop_loss_state_file=os.getenv(
+        amount_per_level=env_float("GRID_AMOUNT_PER_LEVEL", "15.0", gt=0),
+        # 0 wäre ein Busy-Loop: `time.sleep(0)` in main_grid.py, und der
+        # Bot würde die Preis-API im Takt der Schleife befragen.
+        interval_minutes=env_int("GRID_INTERVAL_MINUTES", "5", gt=0),
+        trading_enabled=env_bool("GRID_BOT_ENABLE_TRADING", "false"),
+        kill_switch_file=env_text("GRID_KILL_SWITCH_FILE", "STOP_GRID"),
+        # 0 schaltet den Trendbruch-Stop-Loss ab (siehe
+        # is_trend_break_stop_loss_hit), deshalb ge=0. Über 100 ergäbe
+        # eine negative Schwelle, die nie erreicht werden kann - der
+        # Stop-Loss wäre dann still wirkungslos statt abgeschaltet.
+        stop_loss_pct=env_float("GRID_STOP_LOSS_PCT", "15.0", ge=0, lt=100),
+        state_file=env_text("GRID_STATE_FILE", "data/grid_positions.json"),
+        stop_loss_state_file=env_text(
             "GRID_STOP_LOSS_STATE_FILE", "data/grid_stop_loss_paused.json"
         ),
-        pending_orders_file=os.getenv(
+        pending_orders_file=env_text(
             "GRID_PENDING_ORDERS_FILE", "data/pending_orders_grid.json"
         ),
-        lock_file=os.getenv("GRID_LOCK_FILE", "data/grid_bot.lock"),
-        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        heartbeat_interval_hours=float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "24.0")),
+        lock_file=env_text("GRID_LOCK_FILE", "data/grid_bot.lock"),
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+        heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
     )
