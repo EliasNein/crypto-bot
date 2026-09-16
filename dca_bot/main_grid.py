@@ -147,10 +147,19 @@ def main() -> None:
     # Gekapselt, damit ein Fehler hier den Bot-Start nicht verhindert
     # (W18) - der Aufruf liegt zwangsläufig außerhalb des try/except der
     # Hauptschleife.
+    # Der Bestandsabgleich laeuft als LETZTER Startschritt, nach der
+    # Reconciliation: die kann Kaeufe/Verkaeufe nachtragen, ein Abgleich
+    # davor verglicher also gegen einen veralteten Ledger-Stand. Und er
+    # liegt bewusst in dieser Liste statt in einem eigenen try/except -
+    # so gilt der W18-Schutz auch fuer ihn (Stufe 2, Punkt 3, siehe
+    # startup_checks.py).
     safe_startup_reconciliation(
         logger,
         "[GRID-FEHLER]",
-        [("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders)],
+        [
+            ("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders),
+            ("Bestandsabgleich gegen den Kontostand", strategy.check_balance_on_startup),
+        ],
     )
 
     heartbeat = Heartbeat("Grid-Bot", config.heartbeat_interval_hours)

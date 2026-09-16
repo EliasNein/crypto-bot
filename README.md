@@ -101,6 +101,7 @@ trading-bot/
 │   ├── config.py         # Zentrale Konfiguration DCA-Bot (liest .env)
 │   ├── config_guard.py   # Live-Schalter + Pflichtvariablen-Check (geteilt)
 │   ├── balance_guard.py  # Konsistenz-Check vor jedem Verkauf (geteilt)
+│   ├── startup_checks.py # Konsistenz-Check beim Bot-Start (geteilt)
 │   ├── binance_client.py # Wrapper um die Binance-API (Testnet, Buy+Sell, Handelsregeln)
 │   ├── order_utils.py    # Quantisierung auf tickSize/stepSize + Gebührenkorrektur (geteilt)
 │   ├── pending_orders.py # Idempotente Order-Platzierung + Ground-Truth-Abgleich (geteilt)
@@ -127,7 +128,7 @@ trading-bot/
 │   ├── allocator.py         # Allocator-Kernlogik (Berechnung + State-Datei)
 │   ├── allocator_backtest.py # Backtest: kombiniert vs. isoliert DCA/Trend
 │   ├── main_allocator.py    # Einstiegspunkt Allocator
-│   ├── audit_positions.py         # CLI: offene Grid-/Trend-Positionen auflisten (nur lesend)
+│   ├── audit_positions.py         # CLI: Bestand aller drei Bots + Kontoabgleich (nur lesend)
 │   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
 │   └── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
@@ -309,6 +310,32 @@ trading-bot/
   den Verkauf zu: ein Netzwerkfehler ist keine Aussage über das Konto,
   und einen Stop-Loss-Ausstieg deswegen zu verweigern wäre die
   gefährlichere Richtung.
+- **Konsistenz-Check auch beim Bot-Start** (`dca_bot/startup_checks.py`):
+  Derselbe Abgleich läuft zusätzlich einmal bei jedem Start - und zwar
+  in **allen drei** Bots, also auch im DCA-Bot. Zwei Lücken schließt
+  das. Erstens: Der DCA-Bot verkauft nie, hatte also gar keinen
+  Verkaufspfad und damit überhaupt keinen Moment, in dem seine
+  Buchhaltung je gegen die Realität gehalten wurde - obwohl sein Ledger
+  die Kostenbasis des Portfolio-Stop-Loss ist und eine zu große Menge
+  den Portfoliowert überschätzt, der Stop-Loss also zu spät auslöst.
+  Zweitens: Bei Grid und Trend lief die Prüfung nur im Verkaufsmoment,
+  und zwischen zwei Verkäufen können Wochen liegen, beim Trend-Bot auch
+  Monate. Der Start ist der natürliche zweite Zeitpunkt - er liegt nach
+  jeder Downtime, jedem Deployment und jeder manuellen Änderung an den
+  Ledger-Dateien, also nach genau den Ereignissen, die eine Diskrepanz
+  überhaupt erzeugen. Gemeldet wird wie im Verkaufspfad **laut, aber
+  nicht blockierend** (`[BESTAND-DISKREPANZ]`,
+  `[GRID-BESTAND-DISKREPANZ]`, `[TREND-BESTAND-DISKREPANZ]`): Ein Bot,
+  der wegen eines Buchhaltungsverdachts gar nicht erst startet, löst
+  nichts - er nimmt nur zusätzlich die Fähigkeit weg, offene Positionen
+  abzusichern und zu schließen. Das Gate ist dabei bewusst die **Menge**
+  und nicht `*_BOT_ENABLE_TRADING`: Führt das Ledger keine echten
+  offenen Mengen, passiert gar nichts und es wird kein einziger
+  API-Aufruf verbraucht; führt es welche, wird geprüft - auch im
+  Dry-Run, denn ein zurückgestellter Bot mit echtem Altbestand ist
+  gerade der interessante Fall. Der Aufruf hängt in derselben
+  gekapselten Startsequenz wie die Reconciliation, ein Fehlschlag kann
+  den Start also nicht verhindern.
 
 - **Echte Handelsregeln statt Annahmen** (`dca_bot/order_utils.py`,
   `binance_client.get_symbol_trading_rules`): Vor jeder Order werden Menge
@@ -862,24 +889,81 @@ Trend-Bot).
 python -m dca_bot.audit_positions
 ```
 
-Listet alle offenen Positionen von Grid- und Trend-Bot auf, jeweils mit
-ihrem **Dry-Run-Status**. Rein informativ: das Skript liest nur, ändert
-nichts an den Ledger-Dateien und platziert keine Orders. Es braucht
-bewusst auch keine API-Keys.
+Listet den Bestand von **DCA-, Grid- und Trend-Bot** auf, jeweils mit
+seinem **Dry-Run-Status**. Rein informativ: das Skript liest nur, ändert
+nichts an den Ledger-Dateien und platziert keine Orders.
 
 Gedacht als Überblick, bevor ein pausierter Bot wieder freigeschaltet
 oder `*_BOT_ENABLE_TRADING` umgestellt wird - dann ist auf einen Blick
 sichtbar, welche offenen Positionen an der Börse tatsächlich existieren
 (`ECHT`) und welche nur simuliert wurden (`DRY-RUN`, werden nie real
-verkauft, siehe Abschnitt 8.4/9.5).
+verkauft, siehe Abschnitt 8.4/9.5). Der DCA-Abschnitt zeigt zusätzlich
+Menge, Einsatz und durchschnittlichen Einstandspreis - der Bot verkauft
+nie, seine Summe aller echten Käufe *ist* sein Bestand.
 
-Pfade kommen aus `GRID_STATE_FILE`/`TREND_STATE_FILE` bzw. den üblichen
-Defaults, alternativ über `--grid-file` / `--trend-file`.
+Pfade kommen aus `DCA_BOT_STATE_FILE`/`GRID_STATE_FILE`/
+`TREND_STATE_FILE` bzw. den üblichen Defaults, alternativ über
+`--dca-file` / `--grid-file` / `--trend-file`.
+
+### 11.1 Bot-übergreifender Kontoabgleich
+
+Sind Binance-Zugangsdaten vorhanden, hängt das Skript einen zweiten
+Teil an: Es fragt den **tatsächlichen** Kontostand und die offenen
+Orders ab und stellt ihnen die **Summe** dessen gegenüber, was alle drei
+Ledger als offen führen.
+
+```
+Bot          laut Ledger offen  Hinweis
+------------------------------------------------------------------
+dca                 0.00780000
+grid                0.00116000  2 Dry-Run (zählt nicht)
+trend               0.00019505
+------------------------------------------------------------------
+SUMME               0.00915505
+```
+
+Das ist bewusst **kein** Feature eines Bots, sondern nur dieses
+Werkzeugs. Jeder Bot führt sein eigenes Ledger und darf kein fremdes
+lesen - diese Trennung ist ein Grundprinzip des Projekts. Damit kann
+aber auch keiner die entscheidende Frage beantworten: Passt die Summe
+aller drei überhaupt auf das eine geteilte Konto? Der `balance_guard`
+prüft in jedem Bot nur, ob dessen *eigener* Anspruch für sich genommen
+noch gedeckt wäre - eine Prüfung ohne Fehlalarme, die dafür genau den
+Fall nicht sieht, in dem erst die Summe zu groß wird. Ein rein lesendes
+Werkzeug darf alles einsehen und ist deshalb der richtige Ort dafür.
+
+Weitere Eigenschaften:
+
+- **Ohne API-Keys wird nur dieser zweite Teil übersprungen**, mit einer
+  Meldung, was fehlt - der Ledger-Teil läuft weiter. Die bisherige
+  Zusage "braucht keine API-Keys" gilt also unverändert. Mit `--offline`
+  lässt sich der Abgleich auch bei vorhandenen Keys abschalten.
+- **Der Client kann strukturell keine Orders platzieren:** Er wird ohne
+  Pending-Orders-Datei gebaut, und die `place_*`-Methoden weisen genau
+  diesen Zustand aktiv zurück (siehe `binance_client.py`). Die
+  Nur-Lesend-Zusage hängt damit nicht an Disziplin beim Programmieren.
+- **Verglichen wird gegen `frei + gebunden`**, nicht nur gegen das freie
+  Guthaben: Eine Menge in einer offenen Verkaufs-Order existiert noch,
+  sie ist nur gerade nicht verkäuflich. Die gebundene Menge wird
+  zusätzlich nach Verursacher aufgeschlüsselt (über das
+  clientOrderId-Präfix aus dem K2-Fix), inklusive eines eigenen Eintrags
+  für fremde bzw. manuell über die Börsen-Oberfläche platzierte Orders.
+- **Gruppiert nach Symbol**, falls die drei Bots unterschiedliche Paare
+  handeln - eine Gesamtsumme über verschiedene Assets wäre sinnlos. Im
+  Normalfall (alle drei BTCUSDT) ist das genau eine Gruppe.
+- **Ein Überschuss ist kein Befund.** Hält das Konto mehr, als die
+  Ledger beanspruchen, kann das manueller Bestand oder eine Altlast
+  sein. Nur die andere Richtung wird als Problem gemeldet - und dann mit
+  dem ausdrücklichen Hinweis, die Ledger-Dateien **nicht** blind
+  anzupassen, bevor geklärt ist, welche Seite recht hat.
+- Die Toleranz stammt aus demselben `balance_guard`, nach dem auch die
+  Bots entscheiden - zwei getrennte Toleranzen für dieselbe Frage wären
+  der sichere Weg zu einem Audit, das einem Bot widerspricht.
 
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -939,6 +1023,40 @@ Notaus `STOP_ALL` über alle vier Bots. Die Gebührenkorrektur im
 Stop-Fill-Pfad steht in `test_trend_stop_loss.py` bei ihren
 Geschwistern. Auch hier sind alle drei Bereiche gegen den
 zurückgedrehten Stand gemessen.
+
+`test_grid_signals.py` und `test_allocator_signals.py` schließen die
+zweite Lücke derselben Art wie W17 beim Trend-Bot: Die vier
+Entscheidungsfunktionen des Grid-Bots (`compute_grid_levels`,
+`find_triggered_buy_levels`, `is_sell_target_hit`,
+`is_trend_break_stop_loss_hit`) und die Zuteilungs-Mathematik des
+Allocators hatten keinen einzigen direkten Test - sie liefen nur
+indirekt über Strategie- und Backtest-Läufe mit, also immer nur an der
+Preislage, die ein anderer Testfall zufällig brauchte. Ausgerechnet
+dort saßen die beiden Designfehler, die vor Fertigstellung des
+Grid-Bots gefunden wurden (Kaltstart, Intervallgrenze). Beide sind
+jetzt mit einer **Gegenprobe** abgedeckt, nicht nur mit einer
+Zusicherung: Zum Kaltstart-Fall gehört der Nachweis, dass an derselben
+Preislage sechs Kaufstufen zu holen *wären* und mit gesetztem
+Referenzpreis auch geholt werden - sonst wäre „der Kaltstart löst
+nichts aus" auch dort grün, wo ohnehin nichts zu kaufen war. Zur
+Intervallgrenze gehört spiegelbildlich, dass ein minimal höherer
+Referenzpreis die Stufe sehr wohl einschließt. Bei den
+Allocator-Funktionen trägt die fallende Preisreihe einen EMA-Abstand
+von über 3 %, der ohne die Richtungsprüfung auf volle 100 %
+Trend-Anteil abgebildet würde - erst das macht „Abwärtstrend ergibt
+0 %" zu einer Aussage über die Logik statt über eine flache Reihe.
+
+`test_startup_balance_check.py` und `test_audit_positions.py` decken die
+zweite Stufe der Verbesserungsvorschläge ab: den Konsistenz-Check beim
+Bot-Start für alle drei Bots (inklusive des Nachweises, dass ohne echte
+offene Menge kein einziger API-Aufruf entsteht, und dass die eigene
+Stop-Loss-Order des Trend-Bots keinen Fehlalarm auslöst - mit
+Gegenprobe über dieselbe Order ohne Bot-Präfix), sowie den
+bot-übergreifenden Kontoabgleich im Positions-Audit. Die Verdrahtung in
+allen drei `main*.py` hat einen eigenen Test; er liest den Quelltext
+der jeweiligen `main()`, statt sie auszuführen, und belegt damit genau
+den Fehler, der hier realistisch ist - drei beinahe identische
+Aufrufstellen, von denen später eine vergessen wird.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

@@ -1,12 +1,28 @@
 """
-Einmalig/bei Bedarf ausführbares Audit der offenen Positionen von Grid-
-und Trend-Bot.
+Einmalig/bei Bedarf ausführbares Audit der offenen Positionen von DCA-,
+Grid- und Trend-Bot, optional samt bot-übergreifendem Abgleich gegen den
+tatsächlichen Kontostand.
 
 REIN INFORMATIV: dieses Skript liest nur, es ändert nichts an den
 Ledger-Dateien und platziert keine Orders. Gedacht, um vor dem Wieder-
 Freischalten pausierter Bots einen klaren Überblick zu haben, was gerade
 offen ist - und vor allem, welche dieser Positionen im Dry-Run eröffnet
 wurden und an der Börse deshalb gar nicht existieren.
+
+**Der bot-übergreifende Gesamtabgleich** (Stufe 2 der
+Verbesserungsvorschläge, Punkt 3 - Teil B) gehört ausdrücklich HIERHER
+und in keinen der Bots: Jeder Bot führt sein eigenes Ledger, und keiner
+darf ein fremdes lesen - diese Trennung ist ein Grundprinzip des
+Projekts. Deshalb kann auch keiner von ihnen die eigentlich
+entscheidende Frage beantworten: Passt die SUMME dessen, was alle drei
+als offen führen, überhaupt auf das eine geteilte Konto? Ein rein
+lesendes Werkzeug darf alles einsehen und ist damit der einzige Ort, an
+dem diese Frage überhaupt gestellt werden kann.
+
+Jeder einzelne Bot prüft dagegen nur, ob SEIN Anspruch allein noch
+gedeckt wäre (siehe balance_guard.py) - eine Prüfung ohne Fehlalarme,
+die dafür genau den Fall nicht sieht, in dem erst die Summe zu groß
+wird.
 
 Hintergrund (Sicherheitsreview-Punkte K1/K4, siehe
 trading-bot-projekt.md Abschnitt 6g): vor dem Fix hätte ein Umschalten
@@ -17,14 +33,20 @@ verkaufen, die nie gekauft wurden. Seit dem Fix prüfen beide Bots das
 einer Dry-Run-Position in jedem Fall simuliert - dieses Skript macht den
 Bestand vorab sichtbar.
 
-Braucht bewusst KEINE Binance-API-Keys: es liest nur die lokalen
-Ledger-Dateien und ermittelt deren Pfade direkt aus den Umgebungs-
-variablen (mit denselben Defaults wie grid_config.py/trend_config.py),
-statt über load_grid_config()/load_trend_config(), die ohne gültige Keys
-eine Exception werfen würden.
+Der Ledger-Teil braucht bewusst weiterhin KEINE Binance-API-Keys: er
+liest nur die lokalen Dateien und ermittelt deren Pfade direkt aus den
+Umgebungsvariablen (mit denselben Defaults wie config.py/grid_config.py/
+trend_config.py), statt über load_*_config(), die ohne gültige Keys eine
+Exception werfen würden.
+
+Der Kontoabgleich ist eine OPTIONALE Zugabe: Sind Zugangsdaten
+vorhanden, wird er ausgeführt, sonst übersprungen - mit einem Hinweis,
+was fehlt. Das Skript bleibt damit auf jedem Rechner lauffähig, auch
+ohne `.env`.
 
 Ausführen mit:  python -m dca_bot.audit_positions
 Optional:       python -m dca_bot.audit_positions --grid-file ... --trend-file ...
+                python -m dca_bot.audit_positions --offline
 """
 
 from __future__ import annotations
@@ -32,12 +54,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
+from .balance_guard import FOREIGN_ORDERS, split_locked_by_bot, tolerance_for
+from .config_guard import ConfigError, load_api_credentials, load_use_testnet
+
 load_dotenv()
+
+# Reihenfolge der Bots in der Ausgabe - dieselbe wie in der README und im
+# Projektdokument (DCA zuerst, dann Grid, dann Trend).
+BOT_NAMES = ["dca", "grid", "trend"]
 
 # Textmarker für einen Ledger-Eintrag ohne `dry_run`-Feld. Praktisch nur
 # durch manuelles Editieren möglich (GridPosition/TrendTrade schreiben das
@@ -128,6 +158,161 @@ def _summarize_dry_run(open_records: list[dict]) -> None:
         )
 
 
+def _quantity_of(record: dict) -> float:
+    try:
+        return float(record.get("quantity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+@dataclass(frozen=True)
+class LedgerClaim:
+    """
+    Was EIN Bot laut seinem Ledger an Base-Asset offen hält.
+
+    `quantity` zählt ausschließlich ECHTE offene Mengen. Dry-Run-Einträge
+    und Einträge ohne `dry_run`-Feld bleiben draußen und werden separat
+    gezählt - exakt dieselbe Regel, nach der die Bots selbst rechnen
+    (`not r.get("dry_run", True)`). Wer hier anders zählte, bekäme eine
+    Zahl, die zu keiner der Warnungen der Bots passt.
+    """
+
+    bot: str
+    symbol: str
+    quantity: float = 0.0
+    open_entries: int = 0
+    dry_run_entries: int = 0
+    unknown_entries: int = 0
+    error: str | None = None
+
+
+def _claim_from_open_records(
+    bot: str, symbol: str, open_records: list[dict], error: str | None
+) -> LedgerClaim:
+    """Gemeinsame Auswertung für alle drei Ledger - sie unterscheiden sich
+    nur darin, WELCHE Einträge als offen gelten (siehe die Aufrufer)."""
+    if error:
+        return LedgerClaim(bot=bot, symbol=symbol, error=error)
+
+    quantity = 0.0
+    dry_run_entries = 0
+    unknown_entries = 0
+    for record in open_records:
+        flag = record.get("dry_run")
+        if flag is None:
+            unknown_entries += 1
+        elif flag:
+            dry_run_entries += 1
+        else:
+            quantity += _quantity_of(record)
+
+    return LedgerClaim(
+        bot=bot,
+        symbol=symbol,
+        quantity=quantity,
+        open_entries=len(open_records),
+        dry_run_entries=dry_run_entries,
+        unknown_entries=unknown_entries,
+    )
+
+
+def dca_claim(path: Path, symbol: str) -> LedgerClaim:
+    """
+    Der DCA-Bot **verkauft nie** - sein Ledger ist eine reine
+    append-only-Liste von Käufen ohne `status`-Feld. Jeder echte Kauf ist
+    damit dauerhaft Bestand, und die Summe aller echten Käufe ist das,
+    was er beansprucht.
+
+    Anders als Grid und Trend tragen seine Einträge ein `symbol`-Feld -
+    es wird gefiltert, weil ein Bestand in einem anderen Paar nichts über
+    dieses Base-Asset aussagt.
+    """
+    records, error = _load_records(path)
+    matching = [r for r in records if r.get("symbol") == symbol]
+    return _claim_from_open_records("dca", symbol, matching, error)
+
+
+def grid_claim(path: Path, symbol: str) -> LedgerClaim:
+    records, error = _load_records(path)
+    return _claim_from_open_records("grid", symbol, _open_records(records), error)
+
+
+def trend_claim(path: Path, symbol: str) -> LedgerClaim:
+    records, error = _load_records(path)
+    return _claim_from_open_records("trend", symbol, _open_records(records), error)
+
+
+@dataclass(frozen=True)
+class AccountComparison:
+    """Ergebnis des bot-übergreifenden Abgleichs für EIN Symbol."""
+
+    symbol: str
+    base_asset: str
+    claims: list[LedgerClaim]
+    total_claimed: float
+    free: float
+    locked: float
+    tolerance: float
+    discrepancy: bool
+    locked_by_bot: dict[str, float] | None = field(default=None)
+
+    @property
+    def on_account(self) -> float:
+        """Alles, was von diesem Asset da ist - frei oder gebunden."""
+        return self.free + self.locked
+
+    @property
+    def difference(self) -> float:
+        """Positiv = mehr auf dem Konto als beansprucht."""
+        return self.on_account - self.total_claimed
+
+
+def compare_with_account(
+    *,
+    symbol: str,
+    base_asset: str,
+    claims: list[LedgerClaim],
+    balance: tuple[float, float],
+    open_orders: list[dict] | None,
+    step_size: float,
+) -> AccountComparison:
+    """
+    Stellt die Summe aller Ledger-Ansprüche dem tatsächlichen Bestand
+    gegenüber.
+
+    Verglichen wird gegen `free + locked`, also den GESAMTEN Bestand des
+    Base-Assets - nicht gegen das freie Guthaben allein. Eine Menge, die
+    gerade in einer offenen Verkaufs-Order steckt, existiert ja noch; sie
+    ist nur momentan nicht verkäuflich. Für die Frage "ist überhaupt
+    alles da, was die drei Ledger behaupten?" zählt sie mit.
+
+    Die Toleranz kommt aus `balance_guard.tolerance_for()` - dieselbe
+    Regel, nach der die Bots selbst entscheiden, ob eine Abweichung
+    berichtenswert ist. Zwei verschiedene Toleranzen für dieselbe Frage
+    wären der sichere Weg zu einem Audit, das einem Bot widerspricht.
+
+    Ein Überschuss (Konto hält MEHR als alle Ledger beanspruchen) ist
+    ausdrücklich KEIN Befund: Das kann manueller Bestand sein, eine
+    Altlast oder schlicht ein Bot, der hier nicht mitgezählt wird. Nur
+    die andere Richtung ist ein Problem.
+    """
+    free, locked = balance
+    total_claimed = sum(c.quantity for c in claims)
+    tolerance = tolerance_for(total_claimed, step_size)
+
+    return AccountComparison(
+        symbol=symbol,
+        base_asset=base_asset,
+        claims=claims,
+        total_claimed=total_claimed,
+        free=free,
+        locked=locked,
+        tolerance=tolerance,
+        discrepancy=total_claimed > free + locked + tolerance,
+        locked_by_bot=split_locked_by_bot(open_orders, BOT_NAMES),
+    )
+
+
 def _fmt(value: Any, spec: str) -> str:
     """Formatiert einen Zahlenwert, fällt bei fehlendem/kaputtem Wert auf '?' zurück."""
     if value is None:
@@ -136,6 +321,60 @@ def _fmt(value: Any, spec: str) -> str:
         return format(float(value), spec)
     except (TypeError, ValueError):
         return str(value)
+
+
+def audit_dca(path: Path, symbol: str) -> None:
+    """
+    Der DCA-Bestand. Kürzer als die anderen beiden, weil es nichts
+    "Offenes" im Sinne einer Position gibt: Der Bot verkauft nie, also
+    ist die Summe aller echten Käufe der Bestand.
+
+    Diese Zahl ist zugleich die Kostenbasis des Portfolio-Stop-Loss -
+    wenn sie nicht stimmt, löst der zu spät aus (siehe
+    PortfolioStopLoss in risk.py).
+    """
+    _print_header(f"DCA-BOT - Bestand aus echten Käufen ({symbol})", path)
+    records, error = _load_records(path)
+    if error:
+        print(error)
+        return
+
+    matching = [r for r in records if r.get("symbol") == symbol]
+    claim = _claim_from_open_records("dca", symbol, matching, None)
+    other_symbols = len(records) - len(matching)
+
+    print(
+        f"{len(records)} Einträge insgesamt, davon {len(matching)} für {symbol}"
+        + (f" ({other_symbols} für andere Symbole)." if other_symbols else ".")
+    )
+    if not matching:
+        return
+
+    real_entries = claim.open_entries - claim.dry_run_entries - claim.unknown_entries
+    total_spent = 0.0
+    for r in matching:
+        if r.get("dry_run") is False:
+            try:
+                total_spent += float(r.get("quote_spent", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                pass
+
+    print()
+    print(f"  Echte Käufe:      {real_entries}")
+    print(f"  Menge gesamt:     {claim.quantity:.8f}")
+    print(f"  Eingesetzt:       {total_spent:.2f}")
+    if claim.quantity > 0:
+        print(f"  Ø Einstandspreis: {total_spent / claim.quantity:.2f}")
+    if claim.dry_run_entries:
+        print(
+            f"  {claim.dry_run_entries} simulierte Käufe - zählen nicht als "
+            "Bestand (existieren an der Börse nicht)."
+        )
+    if claim.unknown_entries:
+        print(
+            f"  ACHTUNG: {claim.unknown_entries} Eintrag/Einträge ohne "
+            "dry_run-Feld, nicht mitgezählt."
+        )
 
 
 def audit_grid(path: Path) -> None:
@@ -230,12 +469,176 @@ def audit_trend(path: Path) -> None:
     _summarize_dry_run(open_records)
 
 
+@dataclass(frozen=True)
+class _ReadOnlyClientConfig:
+    """
+    Das Minimum, das `TradingClient.__init__` liest - mehr braucht dieses
+    Skript nicht.
+
+    `pending_orders_file` ist bewusst LEER: Damit legt der Client gar
+    keinen Pending-Store an, und seine `place_*`-Methoden weisen jede
+    Order aktiv zurück (siehe binance_client.py). Die Zusage "dieses
+    Skript platziert keine Orders" hängt damit nicht an Disziplin beim
+    Programmieren, sondern ist strukturell abgesichert.
+    """
+
+    api_key: str
+    api_secret: str
+    use_testnet: bool
+    bot_name: str = "audit"
+    pending_orders_file: str = ""
+
+
+def _build_read_only_client():
+    """
+    Baut einen nur lesenden Binance-Client, falls Zugangsdaten vorhanden
+    sind. Gibt `(client, None)` oder `(None, Grund)` zurück.
+
+    Fehlende oder unbrauchbare Zugangsdaten sind hier ausdrücklich KEIN
+    Fehler, sondern der dokumentierte Normalfall auf einem Rechner ohne
+    `.env` - das Skript soll dort weiterhin seinen Ledger-Teil leisten.
+    """
+    try:
+        use_testnet = load_use_testnet()
+        api_key, api_secret = load_api_credentials(use_testnet=use_testnet)
+    except ConfigError as exc:
+        return None, str(exc)
+
+    # Import bewusst erst hier: `binance_client` zieht `python-binance`
+    # nach, und der Ledger-Teil dieses Skripts soll auch dann laufen,
+    # wenn die Abhängigkeit fehlt.
+    from .binance_client import TradingClient
+
+    try:
+        client = TradingClient(
+            _ReadOnlyClientConfig(
+                api_key=api_key, api_secret=api_secret, use_testnet=use_testnet
+            )
+        )
+    except Exception as exc:  # pragma: no cover - nur bei kaputter Umgebung
+        return None, f"Binance-Client nicht aufbaubar: {type(exc).__name__}: {exc}"
+    return client, None
+
+
+def audit_account(client, claims_by_symbol: dict[str, list[LedgerClaim]]) -> None:
+    """
+    Der bot-übergreifende Gesamtabgleich - das, was kein einzelner Bot
+    leisten kann (siehe Modul-Docstring).
+
+    Gruppiert nach SYMBOL, nicht einfach über alles summiert: Handeln die
+    drei Bots unterschiedliche Paare, wäre eine Gesamtsumme schlicht
+    falsch - sie addierte Mengen verschiedener Assets. Im Normalfall
+    (alle drei auf BTCUSDT) ist das genau eine Gruppe.
+    """
+    for symbol, claims in sorted(claims_by_symbol.items()):
+        print()
+        print("=" * 78)
+        print(f"KONTOABGLEICH {symbol} - alle Bots gegen den tatsächlichen Bestand")
+        print("=" * 78)
+
+        try:
+            rules = client.get_symbol_trading_rules(symbol)
+        except Exception as exc:
+            print(f"Handelsregeln für {symbol} nicht abrufbar ({type(exc).__name__}: {exc}).")
+            print("Abgleich für dieses Symbol übersprungen.")
+            continue
+
+        balance = client.get_asset_balance(rules.base_asset)
+        if balance is None:
+            print(
+                f"Guthaben für {rules.base_asset} nicht abrufbar - Abgleich "
+                "übersprungen. (Ein gescheiterter Abruf ist keine Aussage "
+                "über das Konto.)"
+            )
+            continue
+
+        comparison = compare_with_account(
+            symbol=symbol,
+            base_asset=rules.base_asset,
+            claims=claims,
+            balance=balance,
+            open_orders=client.get_open_orders(symbol),
+            step_size=rules.step_size,
+        )
+        _print_comparison(comparison)
+
+
+def _print_comparison(c: AccountComparison) -> None:
+    print()
+    print(f"{'Bot':<8} {'laut Ledger offen':>20}  Hinweis")
+    print("-" * 78)
+    for claim in c.claims:
+        if claim.error:
+            print(f"{claim.bot:<8} {'?':>20}  {claim.error}")
+            continue
+        notes = []
+        if claim.dry_run_entries:
+            notes.append(f"{claim.dry_run_entries} Dry-Run (zählt nicht)")
+        if claim.unknown_entries:
+            notes.append(f"{claim.unknown_entries} ohne dry_run-Feld (zählt nicht)")
+        print(f"{claim.bot:<8} {claim.quantity:>20.8f}  {', '.join(notes)}")
+    print("-" * 78)
+    print(f"{'SUMME':<8} {c.total_claimed:>20.8f}")
+
+    print()
+    print(f"Tatsächlich auf dem Konto ({c.base_asset}):")
+    print(f"  frei:            {c.free:.8f}")
+    print(f"  gebunden:        {c.locked:.8f}")
+    print(f"  gesamt:          {c.on_account:.8f}")
+
+    if c.locked_by_bot is None:
+        print(
+            "\n  Offene Orders nicht abrufbar - die gebundene Menge konnte "
+            "keinem Bot zugeordnet werden."
+        )
+    elif c.locked > 0:
+        print()
+        print("  Gebundene Menge nach Verursacher (über das clientOrderId-Präfix):")
+        for name in BOT_NAMES + [FOREIGN_ORDERS]:
+            amount = c.locked_by_bot.get(name, 0.0)
+            if amount > 0:
+                print(f"    {name:<16} {amount:.8f}")
+
+    print()
+    if c.discrepancy:
+        print("  *** BEFUND: Die Ledger beanspruchen mehr, als da ist. ***")
+        print(
+            f"  Fehlbetrag: {-c.difference:.8f} {c.base_asset} "
+            f"(Toleranz: {c.tolerance:.8f})"
+        )
+        print(
+            "  Mögliche Ursachen: ein manueller Trade über die Börsen-"
+            "Oberfläche, ein\n"
+            "  Bot, der auf einem anderen Rechner mit demselben Konto "
+            "läuft, oder ein\n"
+            "  Verkauf, der nicht ins Ledger zurückgeschrieben wurde. Die "
+            "Ledger-Dateien\n"
+            "  NICHT blind anpassen - erst klären, welche Seite recht hat."
+        )
+    else:
+        print(f"  In Ordnung: Der Bestand deckt alle Ledger-Ansprüche ab.")
+        if c.difference > c.tolerance:
+            print(
+                f"  Hinweis: {c.difference:.8f} {c.base_asset} mehr auf dem "
+                "Konto als beansprucht.\n"
+                "  Das ist kein Befund - z.B. manueller Bestand oder eine "
+                "Altlast."
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Listet die offenen Positionen von Grid- und Trend-Bot samt "
-            "ihrem Dry-Run-Status auf. Rein informativ - ändert nichts."
+            "Listet den Bestand von DCA-, Grid- und Trend-Bot samt "
+            "Dry-Run-Status auf und gleicht ihn - falls API-Keys "
+            "vorhanden sind - bot-übergreifend gegen den tatsächlichen "
+            "Kontostand ab. Rein informativ, ändert nichts."
         )
+    )
+    parser.add_argument(
+        "--dca-file",
+        default=os.getenv("DCA_BOT_STATE_FILE", "data/trade_ledger.json"),
+        help="Pfad zum DCA-Ledger (Default: DCA_BOT_STATE_FILE bzw. data/trade_ledger.json)",
     )
     parser.add_argument(
         "--grid-file",
@@ -247,17 +650,67 @@ def main() -> None:
         default=os.getenv("TREND_STATE_FILE", "data/trend_ledger.json"),
         help="Pfad zum Trend-Ledger (Default: TREND_STATE_FILE bzw. data/trend_ledger.json)",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help=(
+            "Nur die Ledger-Dateien auswerten, keinen Kontoabgleich "
+            "versuchen (auch wenn API-Keys vorhanden sind)."
+        ),
+    )
     args = parser.parse_args()
+
+    # Die Symbole kommen aus denselben Variablen und Defaults wie in den
+    # Configs. Grid- und Trend-Ledger tragen selbst KEIN Symbol-Feld
+    # (siehe GridPosition/TrendTrade) - ihr Symbol ist eine Eigenschaft
+    # der Konfiguration, nicht des Eintrags.
+    dca_symbol = os.getenv("DCA_SYMBOL", "BTCUSDT")
+    grid_symbol = os.getenv("GRID_SYMBOL", "BTCUSDT")
+    trend_symbol = os.getenv("TREND_SYMBOL", "BTCUSDT")
 
     print("Positions-Audit (nur lesend, es wird nichts verändert)")
 
+    audit_dca(Path(args.dca_file), dca_symbol)
     audit_grid(Path(args.grid_file))
     audit_trend(Path(args.trend_file))
+
+    claims = [
+        dca_claim(Path(args.dca_file), dca_symbol),
+        grid_claim(Path(args.grid_file), grid_symbol),
+        trend_claim(Path(args.trend_file), trend_symbol),
+    ]
+    claims_by_symbol: dict[str, list[LedgerClaim]] = {}
+    for claim in claims:
+        claims_by_symbol.setdefault(claim.symbol, []).append(claim)
+
+    if args.offline:
+        print()
+        print("=" * 78)
+        print("Kontoabgleich übersprungen (--offline).")
+        print("=" * 78)
+    else:
+        client, reason = _build_read_only_client()
+        if client is None:
+            print()
+            print("=" * 78)
+            print("KONTOABGLEICH ÜBERSPRUNGEN")
+            print("=" * 78)
+            print(f"Grund: {reason}")
+            print(
+                "\nDer bot-übergreifende Abgleich braucht lesenden Zugriff auf "
+                "das Konto\n(Guthaben + offene Orders). Ohne ihn zeigt dieses "
+                "Skript nur, was die\nLedger-Dateien behaupten - nicht, ob es "
+                "auch da ist. Zum Aktivieren\nBINANCE_API_KEY/"
+                "BINANCE_API_SECRET in der .env setzen."
+            )
+        else:
+            audit_account(client, claims_by_symbol)
 
     print()
     print("=" * 78)
     print(
-        "Hinweis: Dry-Run-Positionen werden von beiden Bots seit dem K1/K4-Fix\n"
+        "Hinweis: Dry-Run-Positionen werden von Grid und Trend seit dem "
+        "K1/K4-Fix\n"
         "niemals real verkauft, unabhängig von *_BOT_ENABLE_TRADING. Ein\n"
         "Bereinigen der Ledger-Dateien ist dafür nicht nötig."
     )

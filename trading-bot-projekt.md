@@ -705,9 +705,65 @@ Neu ist dabei `KillSwitch.triggered_by()`: Die `BotHalted`-Meldung benennt jetzt
 
 Beiläufig: `FakeTradingClient` in `test_trend_stop_loss.py` hatte gar kein `get_order_with_fills` — der Fake brauchte die Methode nie, weil der Produktivpfad sie nie aufrief. Das ist Befund 2 von der anderen Seite gesehen.
 
-### Offen aus der Liste
+### Stufe 2 umgesetzt: Punkte 12 (Grid-Hälfte) und 3 (17.09.2026)
 
-**Stufe 2 (vor dem Echtgeld-Schalter, je etwa ein Tag):** Punkt 12 in seiner Grid-Hälfte — direkte Tests für `grid_signals.py` mit echten Kursreihen, analog zu `test_trend_decide_action.py`; begründet durch die beiden historischen Bugs genau dort. Und Punkt 3 in modifizierter Form: der vorhandene `balance_guard` zusätzlich **beim Start** und **auch im DCA-Bot** (der verkauft nie und prüft seinen Bestand deshalb heute überhaupt nicht gegen die Realität). Der bot-übergreifende Gesamtabgleich gehört dagegen nicht in einen Bot, sondern als Erweiterung in `audit_positions.py` — sonst müsste ein Bot fremde Ledger lesen, und das bricht das Trennungsprinzip.
+Die beiden Punkte, die vor dem Echtgeld-Schalter noch fällig waren.
+
+#### Punkt 12, Grid-Hälfte — direkte Tests für die Entscheidungsfunktionen
+
+Reine Testarbeit, keine Zeile Produktivlogik geändert. Der Befund war derselbe wie bei W17, nur an anderer Stelle: `compute_grid_levels`, `find_triggered_buy_levels`, `is_sell_target_hit` und `is_trend_break_stop_loss_hit` hatten **keinen einzigen direkten Test**. Sie liefen ausschließlich indirekt über die Strategie-Tests mit — also immer nur an der einen Preislage, die der jeweilige Testfall zufällig brauchte, nie an einer absichtlich konstruierten Kursreihe. Dasselbe für die Zuteilungs-Mathematik des Allocators (`derive_trend_strength`, `compute_target_fraction`, `smooth_fraction`).
+
+Das Gewicht kommt daher, wo diese Funktionen stehen: **Genau dort saßen die beiden Designfehler**, die vor Fertigstellung des Grid-Bots gefunden wurden (Kaltstart-Bug, Intervallgrenzen-Fehler, siehe Abschnitt 6). Und beim Allocator skalieren DCA und Trend seit dem Opt-in vom 16.09. den Betrag *jeder* neuen Order mit dem Ergebnis der Kette — ein Fehler dort ändert keine Entscheidung, aber jede Positionsgröße, und zwar still, weil das Ergebnis eine plausible Zahl zwischen 0 und 1 bleibt.
+
+**Zwei neue Dateien statt einer gemischten:** `tests/test_grid_signals.py` (41 Tests) und `tests/test_allocator_signals.py` (36). Sie prüfen Module, keinen Change-Set — die Projektkonvention dafür ist Thema-pro-Datei. `test_improvements_stage_1.py` heißt nur deshalb nach einer Stufe, weil es bot-übergreifende Änderungen bündelt.
+
+Das Test-Grid ist bewusst klein und rund (100–120 bei 2 % Abstand, 10 Stufen, davon 9 Kaufstufen) — jede Stufe von Hand nachrechenbar, identische Logik wie live. Gleiche Überlegung wie die kurzen EMA-Perioden bei W17.
+
+**Die Gegenproben sind der eigentliche Inhalt.** Ein Test der Form „Situation X ergibt Y" ist auch dann grün, wenn Situation X nie vorlag:
+
+| Fall | Zusicherung | Gegenprobe, die sie erst scharf macht |
+|---|---|---|
+| Kaltstart | `last_seen_price=None` löst nichts aus | Bei Preis 106,00 liegen **sechs** Kaufstufen oberhalb, die der naive Vergleich gekauft hätte — und mit gesetztem Referenzpreis (119,00) werden exakt diese sechs auch geholt |
+| Intervallgrenze | Referenzstufe exakt auf `last_seen_price` zählt nicht erneut | Ein um 1e-7 höherer Referenzpreis schließt dieselbe Stufe sehr wohl ein |
+| Oberste Stufe | ist nie Kaufstufe | Über das beobachtbare Verhalten geprüft (Durchlauf durch das ganze Grid), nicht durch Nachlesen von `levels[:-1]` |
+| Allocator, Abwärtstrend | ergibt 0 % Trend-Anteil | Dieselbe Reihe hat einen EMA-Abstand von 3,07 %, der **ohne** die Richtungsprüfung auf volle 100 % abgebildet würde |
+
+Der `last_seen_price` der Grenzfall-Tests wird direkt aus `LEVELS[5]` entnommen statt als Literal geschrieben — nur so gilt die Gleitkomma-Gleichheit per Konstruktion und nicht von der Schreibweise einer gerundeten Zahl abhängig.
+
+Mit aufgenommen: der erste real gemessene Live-Wert vom 15.09. (Trendstärke 5,25 % → `trend_fraction: 1.0`, siehe 6e) ist jetzt nachgerechnet, die Doku-Aussage hängt also an einem Test statt nur an einem Logauszug.
+
+#### Punkt 3 — Konsistenz-Check beim Start + bot-übergreifender Abgleich
+
+**Teil A: `balance_guard` beim Start, auch im DCA-Bot.** Neues Modul `dca_bot/startup_checks.py` mit einer Funktion, die alle drei nutzen; je eine kurze `check_balance_on_startup()`-Methode pro Strategie bestimmt die eigene Menge (die Ledger sind unterschiedlich aufgebaut). `balance_guard.py` bleibt dabei rein wie zugesagt — es liefert weiterhin nur die Bewertung, das neue Modul beschafft ihr die Daten.
+
+Zwei Lücken schließt das. Der **DCA-Bot** verkauft nie, hatte also gar keinen Verkaufspfad und damit überhaupt keinen Moment, in dem seine Buchhaltung je gegen die Realität gehalten wurde — er band `balance_guard` als einziger überhaupt nicht ein. Nötig ist es trotzdem: Sein Ledger ist die Kostenbasis des Portfolio-Stop-Loss, und der bewertet mit `quantity * current_price`; eine zu große Menge überschätzt den Portfoliowert und lässt den Stop-Loss zu spät auslösen. Bei **Grid und Trend** lief die Prüfung nur im Verkaufsmoment, und zwischen zwei Verkäufen können Wochen liegen, beim Trend-Bot (Tageskerzen, EMA 20/50) auch Monate.
+
+Der Aufruf hängt in der **bestehenden** `safe_startup_reconciliation()`-Liste, als letzter Schritt. Zwei Gründe: Die Reconciliation davor kann Ledger-Einträge nachtragen (K2), beim Trend-Bot stellt der zweite Schritt außerdem die Stop-Loss-Order wieder her — und genau die bindet die komplette Positionsmenge. Ein Abgleich davor verglicher gegen einen anderen Stand. Und der W18-Schutz gilt damit automatisch, ohne neuen `try/except`.
+
+**Eine bewusste Abweichung vom Verkaufspfad:** Das Gate ist die **Menge**, nicht `trading_enabled`. Dort schaltet der Dry-Run ab, weil ein simulierter Verkauf gar keine Order platziert — die Prüfung hätte keinen Gegenstand. Hier ist die Frage „gibt es überhaupt etwas zu prüfen?", und die hängt an echten Positionen, nicht am Schalterstand. Ein auf Dry-Run zurückgestellter Bot mit echtem Altbestand ist gerade der interessante Fall. Ist die Menge 0 (Dry-Run mit frischem Ledger, der Normalfall im Testbetrieb), entsteht kein einziger API-Aufruf.
+
+Kein Fehlalarm bei offener Trend-Position, und das ist nicht selbstverständlich: Deren exchange-seitige Stop-Loss-Order bindet die komplette Menge, das freie Guthaben wäre also 0. Sie trägt aber seit K2 das `trend-`Präfix und zählt damit in `own_locked` — genau dafür ist `own_upper_bound = free + own_locked` so gebaut. Beide Richtungen sind getestet, die Gegenprobe läuft über dieselbe Order ohne Präfix.
+
+**Teil B: `audit_positions.py` erweitert.** Das Skript liest jetzt zusätzlich das DCA-Ledger (eigener Abschnitt mit Menge, Einsatz und Ø-Einstandspreis) und hängt — falls API-Keys vorhanden sind — einen bot-übergreifenden Kontoabgleich an: tatsächlicher Bestand und offene Orders gegen die Summe dessen, was alle drei Ledger als offen führen.
+
+Warum das hierher und in keinen Bot gehört, ist das eigentliche Argument: Jeder Bot prüft nur, ob **sein** Anspruch für sich genommen noch gedeckt wäre — eine Prüfung ohne Fehlalarme, die dafür genau den Fall nicht sieht, in dem erst die Summe zu groß wird. Diese Frage zu stellen hieße für einen Bot, fremde Ledger zu lesen, und das bricht das Trennungsprinzip. Ein rein lesendes Werkzeug darf alles einsehen.
+
+Details, die dabei zählten:
+
+- **Ohne API-Keys wird nur der Abgleich übersprungen**, mit Begründung; der Ledger-Teil läuft weiter. Die Zusage „braucht keine API-Keys" gilt unverändert. `--offline` schaltet ihn auch bei vorhandenen Keys ab.
+- **Der Client kann strukturell keine Orders platzieren:** gebaut ohne Pending-Orders-Datei, und die `place_*`-Methoden weisen genau diesen Zustand aktiv zurück. Die Nur-Lesend-Zusage hängt nicht an Disziplin.
+- **Gruppiert nach Symbol.** Handeln die drei Bots unterschiedliche Paare, wäre eine Gesamtsumme schlicht falsch — sie addierte Mengen verschiedener Assets. Grid- und Trend-Ledger tragen selbst kein Symbol-Feld; es kommt aus der Konfiguration.
+- **Verglichen wird gegen `frei + gebunden`**, nicht nur gegen `free`: Eine Menge in einer offenen Verkaufs-Order existiert noch, sie ist nur nicht verkäuflich. Anders als bei der Deckungsprüfung eines einzelnen Verkaufs, die bewusst nur `free` betrachtet.
+- **Ein Überschuss ist kein Befund** (manueller Bestand, Altlast). Nur die andere Richtung wird gemeldet — mit dem ausdrücklichen Hinweis, die Ledger **nicht** blind anzupassen, bevor geklärt ist, welche Seite recht hat.
+- Die neue `split_locked_by_bot()` steht in `balance_guard.py`, nicht im Skript: Die Regel, welche Order überhaupt Base-Asset bindet, darf es nur einmal geben — sonst zeigt das Audit früher oder später andere Zahlen als der Bot, der sich gerade beschwert. Die vorhandene `split_locked_quantity()` bleibt unangetastet (additiv oder gar nicht, so kurz vor dem Echtgeld-Schalter).
+
+#### Tests und Wirksamkeit
+
+141 neue Tests (41 + 36 + 29 + 35), Gesamtstand **498, alle grün**. Wirksamkeit wieder gemessen statt behauptet, Kontrolllauf je ohne Mutation bei 0 Fehlschlägen. Alle 39 Mutationen über die vier Bereiche werden gefangen; die markantesten: Kaltstart-Guard entfernt → 1, Intervall oben geschlossen → 1, `levels[:-1]` → `levels` → 3, Klemmung der Zuteilung entfernt → je 5, Richtungsprüfung des Allocators aufgehoben → 4, Mengen-Gate des Start-Checks entfernt → 6, Start-Check blockiert statt weiterzulaufen → 9, Verdrahtung im DCA-Einstiegspunkt entfernt → 3, Vergleich nur gegen `free` → 2, Überschuss gilt als Befund → 3.
+
+**Die Messung war dabei zuerst selbst falsch — schon wieder an derselben Stelle wie bei W17.** Eine Mutation (`split_locked_by_bot` nimmt `origQty` statt der Restmenge) meldete 0 Fehlschläge, obwohl es einen passenden Test gibt. Ursache: Das Suchmuster `quantity = _remaining_quantity(order)` steht **zweimal** in `balance_guard.py` — einmal in der alten `split_locked_quantity()` und einmal in der neuen Funktion. Die Ersetzung traf die erste, also die falsche, und die wird in `test_stage_c_safety.py` geprüft, nicht in der gemessenen Datei. Der Anker läuft jetzt bis `for name in bot_names:`, was es nur in der neuen Funktion gibt. Das Warnsignal war dasselbe wie damals: ein Ergebnis, das zu einem vorhandenen, offensichtlich einschlägigen Test nicht passt.
+
+### Offen aus der Liste
 
 **Stufe 3 (später oder bewusst nicht):** Punkt 16 (automatischer Stop-Loss-Reset) ist der größte Hebel der Liste (~40 Prozentpunkte in 2023 laut eigener Zusatzanalyse), aber eine **Strategie**-Frage: Eine Änderung entwertet die Backtest-Basis, solange sie nicht neu backgetestet ist. Richtiger Zeitpunkt ist die laufende Paper-Trade-Phase, als Backtest-Experiment mit Erholungsschwelle und Cooldown als Parametern. Punkt 13 (gemeinsame Bot-Runtime) ist reiner Wartbarkeitsgewinn und fasst alle vier Einstiegspunkte gleichzeitig an — nach dem Cutover am 05.10., nicht davor. Punkt 15 (SQLite) ist bei aktuell 1–6 Ledger-Einträgen und ein paar Trades pro Tag Jahre entfernt. Punkt 17 (Dashboard) bleibt für 300 € Kapital Overkill. `.bak`-Kopien aus Punkt 2 entfallen: atomare Writes plus tägliche VM-Snapshots plus Git decken das ab.
 
