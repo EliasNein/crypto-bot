@@ -157,12 +157,20 @@ def main() -> None:
     # nicht verhindert (W18) - und damit Schritt 2 auch dann läuft, wenn
     # Schritt 1 scheitert: er sichert eine bereits offene Position ab und
     # ist gerade dann wertvoll.
+    # Dritter Schritt: der Bestandsabgleich (Stufe 2, Punkt 3, siehe
+    # startup_checks.py). Er steht bewusst am Ende - Schritt 1 kann einen
+    # Einstieg nachtragen, und Schritt 2 stellt eine fehlende
+    # Stop-Loss-Order wieder her. Genau diese Order bindet die komplette
+    # Positionsmenge; liefe der Abgleich davor, waere das freie Guthaben
+    # systematisch anders als danach. Dass er ebenfalls in dieser Liste
+    # steht, gibt ihm den W18-Schutz.
     safe_startup_reconciliation(
         logger,
         "[TREND-FEHLER]",
         [
             ("Reconciliation offener Order-Fragen", strategy.reconcile_pending_orders),
             ("Abgleich der Stop-Loss-Order", strategy.reconcile_on_startup),
+            ("Bestandsabgleich gegen den Kontostand", strategy.check_balance_on_startup),
         ],
     )
 

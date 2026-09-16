@@ -26,6 +26,7 @@ from .pending_orders import (
     reconcile_pending_orders,
 )
 from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord, utc_today
+from .startup_checks import report_ledger_vs_account
 
 logger = logging.getLogger("dca_bot")
 
@@ -69,6 +70,41 @@ class DCAStrategy:
         herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
         """
         self._ledger.verify_readable()
+
+    def check_balance_on_startup(self) -> None:
+        """
+        Gleicht beim Bot-Start die eigene Kostenbasis gegen den
+        tatsächlichen Kontostand ab (Stufe 2, Punkt 3 - siehe
+        startup_checks.py). Laut, aber nicht blockierend.
+
+        **Der DCA-Bot verkauft nie** - er hatte deshalb bis hierher gar
+        keinen Moment, in dem seine Buchhaltung je gegen die Realität
+        geprüft wurde, und band als einziger der drei `balance_guard`
+        überhaupt nicht ein. Nötig ist es trotzdem: `TradeLedger.position()`
+        ist die Kostenbasis des Portfolio-Stop-Loss, und der bewertet die
+        Position mit `quantity * current_price`. Steht dort eine Menge,
+        die es real nicht (mehr) gibt - weil Grid oder Trend auf dem
+        geteilten Konto verkauft haben oder jemand manuell gehandelt hat -,
+        fällt der Portfoliowert zu hoch aus und der Stop-Loss löst zu spät
+        aus.
+
+        `position()` schließt Dry-Run-Käufe bereits aus, die Menge ist
+        also per Konstruktion die der echten Käufe.
+        """
+        _, quantity = self._ledger.position(self._config.symbol)
+        report_ledger_vs_account(
+            client=self._client,
+            logger=logger,
+            symbol=self._config.symbol,
+            bot_name=self._config.bot_name,
+            own_open_quantity=quantity,
+            # Der DCA-Bot führt seine Telegram-Marker ohne Bot-Präfix
+            # (siehe [KAUF]/[FEHLER]/[NOTAUS]) - anders als Grid und
+            # Trend, die ihren Namen mitschreiben, weil sie sich den
+            # Kanal mit ihm teilen.
+            notify_tag="[BESTAND-DISKREPANZ]",
+            ledger_label="Das DCA-Ledger",
+        )
 
     def reconcile_pending_orders(self) -> None:
         """

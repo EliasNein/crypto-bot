@@ -50,6 +50,7 @@ from .pending_orders import (
     reconcile_pending_orders,
 )
 from .risk import KillSwitch
+from .startup_checks import report_ledger_vs_account
 from .trend_config import TrendConfig
 from .trend_risk import TrendLedger, TrendStopLoss, TrendTrade
 from .trend_signals import TrendSignalGenerator, decide_action, is_stop_loss_hit
@@ -1050,6 +1051,46 @@ class TrendFollowingStrategy:
         herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
         """
         self._ledger.verify_readable()
+
+    def check_balance_on_startup(self) -> None:
+        """
+        Gleicht beim Bot-Start die offene Position gegen den
+        tatsächlichen Kontostand ab (Stufe 2, Punkt 3 - siehe
+        startup_checks.py). Laut, aber nicht blockierend.
+
+        Beim Trend-Bot ist die Lücke am größten, die das schließt: Die
+        bestehende Prüfung in `_sell_is_covered()` läuft nur bei einem
+        tatsächlichen Exit, und zwischen zwei Signalen können Monate
+        liegen (Tageskerzen, EMA 20/50). Eine Position konnte also
+        beliebig lange mit einer Buchhaltung dastehen, die niemand je
+        gegen die Realität gehalten hat.
+
+        **Kein Fehlalarm durch die eigene Stop-Loss-Order:** Sie bindet
+        die komplette Positionsmenge, `free` wäre also systematisch zu
+        klein. Sie trägt aber seit dem K2-Fix das `trend-`Präfix in ihrer
+        `clientOrderId` und zählt damit in `own_locked` - und
+        `own_upper_bound` ist `free + own_locked`. Genau dafür ist die
+        Obergrenze so gebaut (siehe balance_guard.py). Der Aufruf liegt
+        deshalb auch NACH `reconcile_on_startup()`, das eine fehlende
+        Absicherung erst wiederherstellt.
+
+        Dry-Run-Positionen zählen nicht mit - sie existieren an der
+        Börse nicht (K4). Ein Eintrag ohne `dry_run`-Feld gilt über den
+        Default `True` als simuliert, die konservative Richtung.
+        """
+        open_trade = self._ledger.open_position()
+        quantity = 0.0
+        if open_trade is not None and not open_trade.get("dry_run", True):
+            quantity = float(open_trade.get("quantity", 0.0))
+        report_ledger_vs_account(
+            client=self._client,
+            logger=logger,
+            symbol=self._config.symbol,
+            bot_name=self._config.bot_name,
+            own_open_quantity=quantity,
+            notify_tag="[TREND-BESTAND-DISKREPANZ]",
+            ledger_label="Das Trend-Ledger",
+        )
 
     def reconcile_pending_orders(self) -> None:
         """

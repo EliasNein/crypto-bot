@@ -69,6 +69,14 @@ _BINDING_STATUSES = frozenset({"NEW", "PARTIALLY_FILLED", "PENDING_NEW", "PENDIN
 _RELATIVE_TOLERANCE = 0.001
 _STEP_TOLERANCE_FACTOR = 2
 
+# Schluessel fuer gebundene Mengen, die zu keinem bekannten Bot gehoeren
+# (siehe split_locked_by_bot). Bewusst ein sprechender Text statt eines
+# leeren Strings: Er landet direkt in der Ausgabe des Positions-Audits,
+# und "(fremd/manuell)" ist dort die richtige Auskunft. Eine Kollision
+# mit einem echten Bot-Namen ist ausgeschlossen - die sind "dca",
+# "grid" und "trend" (siehe die bot_name-Felder der vier Configs).
+FOREIGN_ORDERS = "(fremd/manuell)"
+
 
 # Ergebnis der Deckungspruefung.
 SELL_OK = "ok"
@@ -174,6 +182,57 @@ def split_locked_quantity(
         else:
             foreign += quantity
     return own, foreign
+
+
+def split_locked_by_bot(
+    open_orders: list[dict] | None, bot_names: list[str]
+) -> dict[str, float] | None:
+    """
+    Wie `split_locked_quantity()`, nur fuer MEHRERE Bots auf einmal: Gibt
+    je Bot die gebundene Base-Asset-Menge zurueck, plus unter dem
+    Schluessel `FOREIGN_ORDERS` alles, was zu keinem von ihnen gehoert
+    (manueller Handel ueber die Boersen-Oberflaeche, oder ein Bot, der
+    hier nicht aufgefuehrt wurde).
+
+    `None` bei `open_orders=None` (Abfrage gescheitert) - dieselbe
+    Unterscheidung wie ueberall: keine Daten sind kein Befund.
+
+    **Gebraucht wird das nur vom Positions-Audit** (audit_positions.py),
+    dem einzigen Werkzeug im Projekt, das ueberhaupt alle drei Bots
+    gleichzeitig betrachten darf. Ein einzelner Bot hat diese Frage gar
+    nicht - fuer ihn zerfaellt die Welt in "meine Orders" und "alles
+    andere", und genau das liefert `split_locked_quantity()` weiterhin.
+
+    Bewusst hier und nicht im Audit-Skript: Die Regel, WELCHE Order
+    ueberhaupt Base-Asset bindet (nur SELL, nur bestimmte Status, nur die
+    noch offene Restmenge), darf es nur einmal geben. Stuende sie ein
+    zweites Mal im Audit, wuerde es frueher oder spaeter andere Zahlen
+    zeigen als der Bot, der sich gerade beschwert - und dann glaubt man
+    dem falschen von beiden.
+    """
+    if open_orders is None:
+        return None
+
+    result = {name: 0.0 for name in bot_names}
+    result[FOREIGN_ORDERS] = 0.0
+
+    for order in open_orders:
+        if not _order_binds_base_asset(order):
+            continue
+        quantity = _remaining_quantity(order)
+        if quantity <= 0:
+            continue
+        client_order_id = str(order.get("clientOrderId", "") or "")
+        for name in bot_names:
+            if client_order_id.startswith(f"{name}-"):
+                result[name] += quantity
+                break
+        else:
+            # Kein Praefix getroffen - gleiche konservative Einordnung wie
+            # in split_locked_quantity(): im Zweifel fremd.
+            result[FOREIGN_ORDERS] += quantity
+
+    return result
 
 
 def build_snapshot(

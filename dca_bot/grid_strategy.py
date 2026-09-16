@@ -42,6 +42,7 @@ from .pending_orders import (
     reconcile_pending_orders,
 )
 from .risk import KillSwitch
+from .startup_checks import report_ledger_vs_account
 
 logger = logging.getLogger("grid_bot")
 
@@ -495,6 +496,41 @@ class GridTradingStrategy:
         herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
         """
         self._ledger.verify_readable()
+
+    def check_balance_on_startup(self) -> None:
+        """
+        Gleicht beim Bot-Start alle offenen Positionen gegen den
+        tatsächlichen Kontostand ab (Stufe 2, Punkt 3 - siehe
+        startup_checks.py). Laut, aber nicht blockierend.
+
+        Ergänzt die bestehende Prüfung in `_warn_on_ledger_mismatch()`,
+        ersetzt sie nicht: Die läuft nur in einem Zyklus, in dem
+        überhaupt ein Verkaufsziel erreicht ist. Steht der Preis
+        wochenlang unterhalb aller Ziele - also genau dann, wenn viele
+        Stufen belegt sind und am meisten Kapital gebunden ist -, wird
+        dort gar nichts geprüft.
+
+        Dieselbe Mengenberechnung wie dort: Dry-Run-Positionen zählen
+        nicht mit, sie existieren an der Börse nicht und begründen
+        keinen Anspruch auf echtes Guthaben (K4). Ein Eintrag ohne
+        `dry_run`-Feld gilt über den Default `True` als simuliert - die
+        konservative Richtung, weil er die eigene Anspruchsmenge nicht
+        künstlich erhöht.
+        """
+        quantity = sum(
+            float(r.get("quantity", 0.0))
+            for r in self._ledger.open_positions()
+            if not r.get("dry_run", True)
+        )
+        report_ledger_vs_account(
+            client=self._client,
+            logger=logger,
+            symbol=self._config.symbol,
+            bot_name=self._config.bot_name,
+            own_open_quantity=quantity,
+            notify_tag="[GRID-BESTAND-DISKREPANZ]",
+            ledger_label="Das Grid-Ledger",
+        )
 
     def reconcile_pending_orders(self) -> None:
         """
