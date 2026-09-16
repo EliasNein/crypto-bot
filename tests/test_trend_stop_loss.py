@@ -300,8 +300,17 @@ class TrendStrategyTestBase(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def _make_config(self, trading_enabled: bool) -> TrendConfig:
-        return TrendConfig(
+    def _make_config(self, trading_enabled: bool, **overrides) -> TrendConfig:
+        """
+        `overrides` erlaubt einzelnen Testfaellen eine abweichende
+        Konfiguration, ohne dass hier fuer jeden Bedarf ein eigener
+        Parameter dazukommt - genutzt z.B. von
+        tests/test_trend_decide_action.py, das kurze EMA-Perioden
+        braucht, damit eine Preisreihe von Hand nachvollziehbar bleibt
+        (mit den Live-Defaults 20/50 braeuchte es 50 Kurse Vorlauf, bevor
+        ueberhaupt ein Signal moeglich waere).
+        """
+        params = dict(
             api_key="test",
             api_secret="test",
             symbol="BTCUSDT",
@@ -312,14 +321,23 @@ class TrendStrategyTestBase(unittest.TestCase):
             state_file=self.state_file,
             stop_loss_state_file=self.stop_loss_state_file,
         )
+        params.update(overrides)
+        return TrendConfig(**params)
 
     def _make_strategy(
-        self, trading_enabled: bool, price: float
+        self, trading_enabled: bool, price: float, **overrides
     ) -> tuple[TrendFollowingStrategy, FakeTradingClient]:
-        config = self._make_config(trading_enabled)
+        config = self._make_config(trading_enabled, **overrides)
         client = FakeTradingClient(trading_enabled, price)
         strategy = TrendFollowingStrategy(config, client)
-        strategy._seeded = True  # kein echter Netzwerkzugriff für die Historie
+        # Kein echter Netzwerkzugriff fuer die Historie. ACHTUNG: Damit
+        # bleibt der Signalgenerator LEER - feed() liefert lauter None,
+        # `confirmed_direction` ist nie gesetzt, und decide_action() gibt
+        # in diesen Tests immer None zurueck. Genau das war der
+        # W17-Befund; die Entscheidungslogik selbst wird deshalb in
+        # tests/test_trend_decide_action.py mit echten Preisreihen
+        # geprueft.
+        strategy._seeded = True
         return strategy, client
 
 

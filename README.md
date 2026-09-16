@@ -860,7 +860,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -892,6 +892,24 @@ Pflichtvariablen-Check, den Konsistenz-Check vor jedem Verkauf auf dem
 geteilten Konto, und den entkoppelten Feed-Takt des Allocators. Mehrere
 davon sind ausdrücklich Negativkontrollen: Dreht man die jeweilige
 Änderung zurück, fallen sie um.
+
+`test_trend_decide_action.py` schließt die letzte Lücke der
+Testabdeckung: die Entscheidungslogik des Trend-Bots
+(`decide_action()` in `trend_signals.py`). Alle übrigen Trend-Tests
+setzen `strategy._seeded = True`, um den Netzwerkzugriff auf die
+Historie zu vermeiden – damit bleibt der Signalgenerator leer,
+`confirmed_direction` ist dort immer `None`, und die Entscheidung wurde
+nie mit einem echten Signal getroffen (nachgemessen: 24 Aufrufe in der
+übrigen Suite, davon 0 mit bestätigter Richtung). Diese Datei füttert
+den Generator stattdessen mit synthetischen, aber vollständig
+durchlaufenen Preisreihen – Aufwärts- und Abwärtstrend, Seitwärtsmarkt,
+ein Trend knapp unter der Trendstärke-Schwelle und ein echter Whipsaw
+(die EMAs kreuzen sich tatsächlich, ohne dass die Schwelle erreicht
+wird). Jede Reihe hat zusätzlich einen eigenen Test, der belegt, dass
+sie das Signal erzeugt, das ihr Name behauptet: Ein Test, dessen
+Prämisse nicht stimmt, wäre grün, ohne etwas zu prüfen. Der Pfad Signal
+→ Entscheidung → Ein-/Ausstieg läuft dabei auch einmal komplett durch
+`execute_once()`, nicht nur durch direkte Methodenaufrufe.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
