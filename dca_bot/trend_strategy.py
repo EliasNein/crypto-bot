@@ -757,12 +757,59 @@ class TrendFollowingStrategy:
         `log_prefix` erlaubt main_trend.py, denselben Ablauf für den
         Reconciliation-Schritt beim Bot-Start mit einem eigenen,
         gut auffindbaren Log-Tag ("[REKONZILIATION]") wiederzuverwenden.
+
+        Der Erlös wird um die in Quote-Währung abgerechnete
+        Verkaufsgebühr bereinigt - das war die letzte offene Stelle der
+        K3-Restlücke (siehe unten).
         """
+        # Gebührenkorrektur (K3-Restlücke). `get_order()`-Antworten
+        # enthalten keine `fills`; ohne sie ist `cummulativeQuoteQty` der
+        # BRUTTO-Erlös, und der realisierte Gewinn genau dieses Pfads
+        # bliebe systematisch um die Verkaufsgebühr zu optimistisch.
+        # `get_order_with_fills()` lädt die fehlenden Gebührendaten über
+        # `myTrades` nach - dasselbe Muster, das die fünf
+        # Reconciliation-Pfade schon verwenden.
+        #
+        # Beide Aufrufe sind bewusst GEKAPSELT, und das ist hier der
+        # eigentliche Punkt: Diese Methode trägt einen Verkauf nach, den
+        # die Börse BEREITS AUSGEFÜHRT hat. Scheitert das Nachladen
+        # (Netzwerk, Rate-Limit, exchangeInfo nicht erreichbar), darf das
+        # die Ledger-Korrektur nicht verhindern - die Position stünde
+        # sonst weiterhin als "offen" im Ledger, obwohl die Assets an der
+        # Börse längst verkauft sind, und der nächste Zyklus würde sie
+        # erneut zu verkaufen versuchen. Ein um die Gebühr zu
+        # optimistischer Eintrag ist dagegen folgenlos. Gleiche Abwägung
+        # wie im Docstring von get_order_with_fills() selbst.
+        rules = None
+        try:
+            rules = self._client.get_symbol_trading_rules(self._config.symbol)
+            order_status = self._client.get_order_with_fills(
+                self._config.symbol, order_status
+            )
+        except Exception as exc:
+            # Bewusst breit gefangen: Was hier schiefgeht, ist für die
+            # Ledger-Korrektur zweitrangig (siehe oben). Der Exception-Typ
+            # genügt, um den Fall im Log wiederzufinden.
+            logger.warning(
+                "%sGebührendaten zur gefüllten Stop-Loss-Order konnten nicht "
+                "geholt werden (%s) - der Ausstieg wird mit dem BRUTTO-Erlös "
+                "verbucht und ist damit um die Verkaufsgebühr zu optimistisch. "
+                "Die Position wird trotzdem regulär geschlossen.",
+                log_prefix,
+                type(exc).__name__,
+            )
+
         executed_qty = float(order_status.get("executedQty", open_trade["quantity"]))
         cumulative_quote = float(order_status.get("cummulativeQuoteQty", 0.0))
         if executed_qty > 0 and cumulative_quote > 0:
             exit_price = cumulative_quote / executed_qty
-            proceeds = cumulative_quote
+            # Ohne `rules` (Abruf oben gescheitert) bleibt es beim
+            # Bruttowert - das ist exakt das Verhalten vor diesem Fix.
+            proceeds = (
+                net_proceeds(order_status, rules, fallback=cumulative_quote)
+                if rules is not None
+                else cumulative_quote
+            )
         else:
             exit_price = float(order_status.get("price", open_trade["entry_price"]))
             proceeds = open_trade["quantity"] * exit_price

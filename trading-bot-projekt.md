@@ -389,6 +389,10 @@ Dazu zwei Funde, die aus der Bearbeitung selbst entstanden und mit erledigt wurd
 
 **Die K3-Restlücke ist damit ebenfalls geschlossen.** Sie war beim K3-Fix bewusst offen gelassen worden: `get_order()`-Antworten enthalten keine `fills`, weshalb im Exit-Pfad "exchange-seitige Stop-Order war bereits gefüllt" die Verkaufsgebühr mangels Daten unberücksichtigt blieb (PnL dieses einen Pfads ca. 0,1% zu optimistisch); die Notiz dort lautete "sauber lösbar nur über eine zusätzliche `myTrades`-Abfrage". Genau diese Abfrage wurde für den K2-Reconcile-Pfad gebraucht und als `get_order_with_fills()` gebaut — dort zwingend, weil ein nachgetragener Kauf sonst mit der Brutto-Menge ins Ledger käme und damit in dieselbe K3-Falle zurückliefe.
 
+> **Korrektur 17.09.2026: Der Absatz oben stimmte nicht.** Das Werkzeug `get_order_with_fills()` wurde gebaut und in den fünf Reconciliation-Pfaden genutzt — aber an `_close_from_filled_stop_order()`, also genau den Pfad, um den es in der Restlücke ging, nie angeschlossen. Er buchte weiterhin `cummulativeQuoteQty` brutto. Die Restlücke bestand damit vom 16.09. bis zum 17.09. unverändert fort, während dieser Absatz sie als geschlossen auswies. Aufgefallen beim Ist-Stand-Check der Verbesserungsvorschläge aus Review-Abschnitt 7 (Punkt 8), behoben am 17.09. — siehe „Verbesserungsvorschläge, Stufe 1" in 6i.
+>
+> Das ist eine andere Fehlerklasse als die beiden Doku-Karteileichen desselben Tages (6b, 5a): Dort war ein Text veraltet, hier stand im Dokument eine **Zusicherung über das laufende System, die nie zutraf**. Festgehalten statt stillschweigend überschrieben, weil genau diese Sorte Aussage später als Beleg herangezogen wird.
+
 **Was das für den Live-Gang heißt:** Punkt 1 der Liste aus 6d (Sicherheitsreview mit Opus 5) ist abgeschlossen, Punkt 2 (exchange-seitiger Stop-Loss) ist umgesetzt und deployed. Offen bleiben die nicht-code-seitigen Punkte: Kapitalverteilung nach Auswertung des Testmonats (3), Home-Netzwerk-Absicherung (4, laut 6e bereits geprüft — keine Portfreigaben vorhanden) sowie der weiterlaufende Allocator-Live-Dry-Run (5). Der Code selbst gilt damit als review-seitig freigegeben; die verbleibende Absicherung ist die monatelange Paper-Trade-Phase, u.a. zur Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` (siehe 6f).
 
 ### Wichtige Punkte, Stufe A: W18, W7, W6, W8, W1 (16.09.2026)
@@ -649,6 +653,63 @@ Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infra
 Bewusst nur auf dem Homeserver, nicht auf dem VPS (dort bleibt der Allocator inaktiv, siehe Grundsatzentscheidung in 6e). Beide Bots starten fehlerfrei mit aktiviertem Opt-in, keine Fehler beim Lesen der Allocator-State-Datei.
 
 Damit beginnt jetzt faktisch die geplante, mindestens einmonatige Live-Testphase des vollständigen Systems vor dem Echtgeld-Einstieg (siehe 5b, 6c).
+
+## 6i. Verbesserungsvorschläge aus Review-Abschnitt 7 (17.09.2026)
+
+Der Sicherheitsreview enthielt neben den K- und W-Punkten eine dritte, kürzere Liste: 17 Qualitäts- und Komfortvorschläge, von denen keiner als sicherheitskritisch eingestuft war. Am 17.09. wurde dafür ein Ist-Stand-Check gemacht.
+
+**Ergebnis des Checks:** 8 waren als Nebeneffekt der K/W-Fixes bereits vollständig erledigt (exchangeInfo-Quantisierung → K3, idempotente Orderplatzierung → K2, Lockfile → W4, Heartbeat → W13, Balance-Check vor dem Verkauf → W11, Allocator-Kadenz → W9, DCA-Konfiguration nach `.env` → W12, Log-Rotation und Snapshots → Infrastruktur-Härtung in 6g). 4 waren teilweise erledigt, 5 offen — davon zwei bewusst (W14-artige Architekturentscheidung bzw. als Overkill eingestuft).
+
+Drei Funde aus dem Check waren gewichtiger, als die Liste sie eingestuft hatte:
+
+1. **Die Allocator-State-Datei wurde nicht atomar geschrieben.** Bis zum Opt-in vom 16.09. (siehe 6h) folgenlos, weil sie außer dem Allocator selbst niemand las. Seitdem lesen DCA und Trend sie vor *jeder* neuen Order.
+2. **Die K3-Restlücke war entgegen der Dokumentation nie geschlossen** — siehe die Korrektur-Notiz in 6g.
+3. **Die Entscheidungsfunktionen von Grid und Allocator haben keinen einzigen direkten Test.** Genau dort saßen die beiden Designfehler, die vor Fertigstellung des Grid-Bots gefunden wurden (Kaltstart, Intervallgrenze, siehe Abschnitt 6) — also nicht „könnte theoretisch mal ein Problem werden".
+
+### Stufe 1 umgesetzt: Punkte 8, 2 und 10 (17.09.2026)
+
+Die drei kleinen, vor dem Echtgeld-Schalter fälligen Punkte.
+
+**Punkt 8 — Gebührenkorrektur im Stop-Fill-Pfad (die eigentliche K3-Restlücke).** `_close_from_filled_stop_order()` buchte `cummulativeQuoteQty` direkt als Erlös, also brutto. `get_order_with_fills()` existierte seit dem K2-Fix und wurde in fünf Reconciliation-Pfaden genutzt — an diesen einen Pfad war es nie angeschlossen worden. Der Fehler ist klein (rund 0,1 % des Erlöses, zu optimistisch), landet aber im `realized_pnl` des Ledgers, also in genau der Zahl, an der die Strategie nach der Paper-Trade-Phase gemessen wird. Und betroffen ist ausgerechnet der Pfad, für den die börsenseitige Absicherung überhaupt gebaut wurde: Bot-Ausfall oder Kurssprung über Nacht.
+
+Beide Aufrufstellen (regulärer Zyklus und Startup-Abgleich) bekommen die Korrektur, es gibt für jede einen eigenen Test — sonst hinge die Richtigkeit der PnL daran, ob der Bot zwischendurch neu gestartet wurde.
+
+**Bewusste Konstruktion:** Der Fix hängt zwei API-Aufrufe in einen Pfad, der zuvor nur `get_order_status()` brauchte. Beide sind gekapselt und fallen bei einem Fehlschlag auf den Bruttoerlös zurück — also exakt das Verhalten vor dem Fix. Der Grund: Diese Methode trägt einen Verkauf nach, den die Börse **bereits ausgeführt hat**. Bräche sie an einer fehlgeschlagenen Gebührenabfrage ab, stünde die Position weiterhin als „offen" im Ledger, obwohl die Assets weg sind — und der nächste Zyklus würde sie erneut zu verkaufen versuchen. Ein um die Gebühr zu optimistischer Eintrag ist dagegen folgenlos. Damit kann der Fix nur verbessern, nie verschlechtern; es gibt einen eigenen Test dafür.
+
+**Punkt 2 — Atomares Schreiben der Allocator-State-Datei.** Umgestellt auf dasselbe `tmp` + `fsync` + `os.replace`-Muster wie die drei Ledger (W5) und der Pending-Store (K2).
+
+Dazu der eigentlich wichtigere Teil: **`read_allocation_fraction()` unterscheidet jetzt zwei Fälle**, die vorher beide `None` ergaben.
+
+| Lage | vorher | jetzt |
+|---|---|---|
+| Feature nicht aktiviert, Datei fehlt | `None` → voller Betrag | unverändert `None` |
+| kaputtes JSON, fehlendes `trend_fraction`, unlesbarer Wert, Wert außerhalb 0–1 | `None` → voller Betrag | `0.0` → 100 % DCA, kein Trend-Einstieg |
+| `PermissionError`/`OSError` | **gar nicht gefangen** → Abbruch des Kaufzyklus | `0.0` |
+| veraltet (W10) | `0.0` | unverändert `0.0` |
+
+`None` heißt für beide Konsumenten „kein Allocator" und damit **voller Betrag** — DCA kauft voll *und* Trend steigt voll ein, zusammen also mehr Kapital, als die Zuteilung je vorgesehen hätte. Das ist genau die Überallokation, gegen die der Allocator existiert. Für den *veralteten* Fall war diese Abwägung unter W10 längst getroffen; für die *kaputte* Datei war sie nie nachgezogen worden.
+
+Dass `FileNotFoundError` weiterhin `None` ergibt, ist die bewusste Grenze: Eine fehlende Datei heißt „der Allocator hat noch nie geschrieben" — der reguläre Zustand bei einem frischen Deployment und in den Sekunden zwischen zwei Service-Starts. Bekäme dieser Fall den Fallback, würde ein neu aufgesetzter Bot mit gesetztem Opt-in, aber noch nicht gestartetem Allocator nie wieder Trend-Positionen eröffnen. Die Reihenfolge der `except`-Zweige ist deshalb kritisch (`FileNotFoundError` ist eine Unterklasse von `OSError`) — dieselbe Falle wie bei W5.
+
+Die **drei Stop-Loss-Latch-Dateien** schreiben bewusst weiterhin einfach: Für sie zählt allein, *dass* die Datei existiert (`is_paused()` prüft nur `exists()`), der Inhalt ist rein informativ. Eine halb geschriebene Datei hält die Pause genauso zuverlässig. Das steht jetzt als Kommentar an allen drei Stellen, damit es nicht wie eine vergessene Ecke aussieht.
+
+**Punkt 10 — Globaler Notaus `STOP_ALL`.** Eine Datei `STOP_ALL` im Projektverzeichnis oder `STOP_ALL=true` (Prozessumgebung oder aktuelle `.env`) stoppt alle vier Bots gleichzeitig. Dieselbe ODER-Verknüpfung und dieselbe Asymmetrie wie bei W1: auslösen leicht, versehentlich aufheben schwer. Die botspezifischen Schalter bleiben unberührt — einen einzelnen Bot anzuhalten muss weiterhin möglich sein.
+
+Der Pfad ist **bewusst nicht konfigurierbar**, anders als die `*_KILL_SWITCH_FILE`: Ein globaler Notausschalter, dessen Namen man erst in der `.env` nachschlagen muss, verfehlt seinen Zweck. Aufgelöst wird er gegen die Projektwurzel, nicht gegen das Arbeitsverzeichnis. `STOP_ALL` wird außerdem beim Start validiert wie die vier `*_HALT`-Variablen — ein `STOP_ALL=ture` hätte sonst vierfache Nicht-Wirkung.
+
+Neu ist dabei `KillSwitch.triggered_by()`: Die `BotHalted`-Meldung benennt jetzt, **welche** Quelle ausgelöst hat. Wenn vier Bots gleichzeitig stoppen, ist „warum eigentlich?" die erste Frage, und „jemand hat STOP_ALL angelegt" ist eine andere Antwort als „dieser eine Bot hat seine eigene STOP-Datei".
+
+**Ein Nebenfund beim Testen:** Der `.env`-Weg des Notaus hat den Wert schon immer getrimmt, der Prozessumgebungs-Weg nicht. Ein `DCA_BOT_HALT=" true "` in einer systemd-Unit hieß damit still „kein Notaus" — dieselbe unangenehme Fehlerrichtung wie ein Tippfehler, nur durch ein Leerzeichen ausgelöst. Beide Wege verhalten sich jetzt gleich.
+
+**Tests:** 33 neue (6 in `tests/test_trend_stop_loss.py` für Punkt 8, 27 in der neuen `tests/test_improvements_stage_1.py` für die Punkte 2 und 10). Wirksamkeit wieder gemessen statt behauptet, Kontrolllauf ohne Änderung bei 0 Fehlschlägen: nicht-atomares Schreiben → 1 Test fällt um, alter `None`-Fallback → 6, fehlender globaler Notaus → 6, fehlende Gebührenkorrektur → 2. Gesamtstand: **357 Tests, alle grün.**
+
+Beiläufig: `FakeTradingClient` in `test_trend_stop_loss.py` hatte gar kein `get_order_with_fills` — der Fake brauchte die Methode nie, weil der Produktivpfad sie nie aufrief. Das ist Befund 2 von der anderen Seite gesehen.
+
+### Offen aus der Liste
+
+**Stufe 2 (vor dem Echtgeld-Schalter, je etwa ein Tag):** Punkt 12 in seiner Grid-Hälfte — direkte Tests für `grid_signals.py` mit echten Kursreihen, analog zu `test_trend_decide_action.py`; begründet durch die beiden historischen Bugs genau dort. Und Punkt 3 in modifizierter Form: der vorhandene `balance_guard` zusätzlich **beim Start** und **auch im DCA-Bot** (der verkauft nie und prüft seinen Bestand deshalb heute überhaupt nicht gegen die Realität). Der bot-übergreifende Gesamtabgleich gehört dagegen nicht in einen Bot, sondern als Erweiterung in `audit_positions.py` — sonst müsste ein Bot fremde Ledger lesen, und das bricht das Trennungsprinzip.
+
+**Stufe 3 (später oder bewusst nicht):** Punkt 16 (automatischer Stop-Loss-Reset) ist der größte Hebel der Liste (~40 Prozentpunkte in 2023 laut eigener Zusatzanalyse), aber eine **Strategie**-Frage: Eine Änderung entwertet die Backtest-Basis, solange sie nicht neu backgetestet ist. Richtiger Zeitpunkt ist die laufende Paper-Trade-Phase, als Backtest-Experiment mit Erholungsschwelle und Cooldown als Parametern. Punkt 13 (gemeinsame Bot-Runtime) ist reiner Wartbarkeitsgewinn und fasst alle vier Einstiegspunkte gleichzeitig an — nach dem Cutover am 05.10., nicht davor. Punkt 15 (SQLite) ist bei aktuell 1–6 Ledger-Einträgen und ein paar Trades pro Tag Jahre entfernt. Punkt 17 (Dashboard) bleibt für 300 € Kapital Overkill. `.bak`-Kopien aus Punkt 2 entfallen: atomare Writes plus tägliche VM-Snapshots plus Git decken das ab.
 
 ---
 

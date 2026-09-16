@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_bool,
     env_float,
@@ -98,6 +99,9 @@ def load_grid_config() -> GridConfig:
         use_testnet=use_testnet
     )
     validate_halt_variable("GRID_BOT_HALT")
+    # Der globale Notaus gilt fuer alle vier Bots - ein Tippfehler
+    # dort haette also vierfache Wirkung (bzw. vierfache Nicht-Wirkung).
+    validate_halt_variable(GLOBAL_KILL_SWITCH_NAME)
 
     for name, hint in (
         ("GRID_LOWER_LIMIT", "Untere Grid-Grenze."),

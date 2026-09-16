@@ -18,6 +18,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from .config_guard import GLOBAL_KILL_SWITCH_NAME
 from .notifier import send_notification
 
 logger = logging.getLogger("dca_bot")
@@ -78,12 +79,28 @@ def utc_today() -> date:
 class KillSwitch:
     """
     Notaus: Der Bot stoppt sofort - auch mitten in einem laufenden
-    Kaufzyklus -, sobald einer von drei Wegen ausgelöst wird.
+    Kaufzyklus -, sobald einer von fünf Wegen ausgelöst wird.
+
+    Botspezifisch (stoppt nur diesen einen Bot):
 
     1. Die Notaus-Datei existiert (z.B. `STOP`).
     2. Die Umgebungsvariable des Prozesses (z.B. `DCA_BOT_HALT`) steht
        auf "true" - gesetzt beim Start, etwa über die systemd-Unit.
     3. Die aktuelle `.env` im Projektverzeichnis setzt sie auf "true".
+
+    Global (stoppt ALLE vier Bots gleichzeitig):
+
+    4. Die Datei `STOP_ALL` liegt im Projektverzeichnis.
+    5. `STOP_ALL=true` steht in der Prozessumgebung oder in der
+       aktuellen `.env`.
+
+    Die Wege 4 und 5 sind Stufe 1 der Verbesserungsvorschläge (Punkt 10).
+    Vorher brauchte es vier Dateien oder vier Variablen, um alles
+    anzuhalten - und im Ernstfall ist "habe ich wirklich alle vier
+    erwischt?" genau die Frage, die man sich nicht stellen will. Sie
+    ersetzen die botspezifischen Schalter NICHT: Einen einzelnen Bot
+    anzuhalten muss weiterhin möglich sein, ohne die anderen drei
+    mitzunehmen.
 
     Weg 3 war der Sicherheitsreview-Punkt W1: `os.getenv()` liest die
     Umgebung, die beim Prozessstart einmalig aus der `.env` befüllt
@@ -93,10 +110,10 @@ class KillSwitch:
     STOP-Datei beschrieben. Ein Notaus, der nicht auslöst, ist die
     schlechteste Sorte Sicherheitsmechanismus: man verlässt sich darauf.
 
-    Die drei Wege sind mit ODER verknüpft, und das ist bewusst
+    Alle Wege sind mit ODER verknüpft, und das ist bewusst
     asymmetrisch: Auslösen soll leicht sein, versehentliches Aufheben
-    schwer. Zum Wiederanlaufen müssen alle drei Quellen sauber sein -
-    beim Neustart liest `load_dotenv()` die Datei ohnehin frisch ein.
+    schwer. Zum Wiederanlaufen müssen alle Quellen sauber sein - beim
+    Neustart liest `load_dotenv()` die Datei ohnehin frisch ein.
 
     Gelesen wird mit `dotenv_values()`, NICHT mit
     `load_dotenv(override=True)`: Letzteres würde `os.environ`
@@ -110,9 +127,15 @@ class KillSwitch:
         file_path: str,
         env_var_name: str = "DCA_BOT_HALT",
         env_file: str | Path | None = None,
+        global_file: str | Path | None = None,
     ):
         self._file_path = Path(file_path)
         self._env_var_name = env_var_name
+        # `global_file` existiert ausschliesslich fuer Tests - im Betrieb
+        # ist der Pfad bewusst fest (siehe GLOBAL_KILL_SWITCH_NAME).
+        self._global_file = (
+            Path(global_file) if global_file else _PROJECT_ROOT / GLOBAL_KILL_SWITCH_NAME
+        )
         # Projektwurzel wie in version.py, damit der Pfad auch stimmt,
         # wenn der Prozess von woanders gestartet wurde.
         self._env_file = Path(env_file) if env_file else _PROJECT_ROOT / ".env"
@@ -126,13 +149,14 @@ class KillSwitch:
         self._env_file_signature: tuple[int, int] | None = None
         self._env_file_values: dict[str, str | None] = {}
 
-    def _env_file_halts(self) -> bool:
+    def _env_file_halts(self, var_name: str) -> bool:
         """
-        Ob die aktuelle `.env` den Notaus dieses Bots setzt.
+        Ob die aktuelle `.env` die genannte Notaus-Variable setzt -
+        aufgerufen für die botspezifische Variable UND für `STOP_ALL`.
 
         Eine fehlende, unlesbare oder kaputte Datei bedeutet "kein
         Notaus" - dieser Weg darf nie selbst zur Fehlerquelle werden.
-        Die anderen beiden Wege bleiben davon unberührt.
+        Die anderen Wege bleiben davon unberührt.
         """
         try:
             stat = self._env_file.stat()
@@ -146,31 +170,69 @@ class KillSwitch:
             except Exception:
                 logger.warning(
                     "Notaus-Prüfung: '%s' konnte nicht gelesen werden - der "
-                    "Datei-Weg des Notaus (%s) entfällt in diesem Durchlauf. "
-                    "Notaus-Datei und Prozess-Umgebung wirken weiterhin.",
+                    "Datei-Weg des Notaus (%s / %s) entfällt in diesem "
+                    "Durchlauf. Notaus-Dateien und Prozess-Umgebung wirken "
+                    "weiterhin.",
                     self._env_file,
                     self._env_var_name,
+                    GLOBAL_KILL_SWITCH_NAME,
                 )
                 self._env_file_values = {}
             self._env_file_signature = signature
 
-        raw = self._env_file_values.get(self._env_var_name)
+        raw = self._env_file_values.get(var_name)
         return str(raw or "").strip().lower() == "true"
 
-    def is_set(self) -> bool:
+    def _halt_variable_set(self, var_name: str) -> bool:
+        """
+        Prozessumgebung ODER aktuelle `.env` - siehe W1.
+
+        Der `.strip()` auf dem Umgebungswert kam beim STOP_ALL-Fix dazu:
+        Der `.env`-Weg hat den Wert schon immer getrimmt (siehe
+        `_env_file_halts`), der Prozess-Weg nicht. Ein `DCA_BOT_HALT=" true "`
+        in einer systemd-Unit hiess damit still "kein Notaus" - dieselbe
+        unangenehme Fehlerrichtung wie bei einem Tippfehler, nur durch
+        ein Leerzeichen ausgeloest. Jetzt verhalten sich beide Wege gleich.
+        """
+        if os.getenv(var_name, "false").strip().lower() == "true":
+            return True
+        return self._env_file_halts(var_name)
+
+    def triggered_by(self) -> str | None:
+        """
+        Welche Quelle den Notaus auslöst, oder None.
+
+        Die Quelle zu benennen ist seit dem globalen `STOP_ALL` kein
+        Luxus mehr: Wenn alle vier Bots gleichzeitig stoppen, ist "warum
+        eigentlich?" die erste Frage - und die Antwort "jemand hat
+        STOP_ALL angelegt" ist eine andere als "dieser eine Bot hat
+        seine eigene STOP-Datei".
+
+        Die Reihenfolge der Prüfungen ist reine Diagnose-Ergonomie: Die
+        beiden Datei-Wege stehen vorn, weil sie der übliche manuelle
+        Eingriff sind.
+        """
         if self._file_path.exists():
-            return True
-        if os.getenv(self._env_var_name, "false").lower() == "true":
-            return True
-        return self._env_file_halts()
+            return f"Notaus-Datei '{self._file_path}'"
+        if self._global_file.exists():
+            return (
+                f"globale Notaus-Datei '{self._global_file}' "
+                "(stoppt alle vier Bots)"
+            )
+        if self._halt_variable_set(self._env_var_name):
+            return f"{self._env_var_name}=true"
+        if self._halt_variable_set(GLOBAL_KILL_SWITCH_NAME):
+            return f"{GLOBAL_KILL_SWITCH_NAME}=true (stoppt alle vier Bots)"
+        return None
+
+    def is_set(self) -> bool:
+        return self.triggered_by() is not None
 
     def check(self) -> None:
         """Wirft BotHalted, falls der Notaus aktiv ist."""
-        if self.is_set():
-            raise BotHalted(
-                f"Notaus ausgelöst (Datei '{self._file_path}' vorhanden "
-                f"oder {self._env_var_name}=true gesetzt)."
-            )
+        source = self.triggered_by()
+        if source is not None:
+            raise BotHalted(f"Notaus ausgelöst durch {source}.")
 
 
 @dataclass
@@ -467,6 +529,14 @@ class PortfolioStopLoss:
             "value_at_trigger": current_value,
             "loss_pct_at_trigger": loss_pct,
         }
+        # Bewusst KEIN atomares Schreiben (anders als die Ledger, siehe
+        # dort): Fuer diesen Latch zaehlt allein, DASS die Datei
+        # existiert - `is_paused()` prueft nur `self._path.exists()`.
+        # Der Inhalt ist rein informativ fuer die spaetere Auswertung.
+        # Eine halb geschriebene Datei haelt die Pause damit genauso
+        # zuverlaessig wie eine vollstaendige. Hier steht also keine
+        # vergessene Stelle, sondern eine Abwaegung (Stufe 1 der
+        # Verbesserungsvorschlaege, Punkt 2).
         with self._path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 

@@ -41,12 +41,23 @@ class KillSwitchTestCase(unittest.TestCase):
         self.stop_file = tmp / "STOP_TEST"
         self.env_file = tmp / ".env"
         self.env_file.write_text("SONSTIGE_EINSTELLUNG=egal\n", encoding="utf-8")
+        # Der globale Notaus zeigt im Betrieb fest auf
+        # <Projektwurzel>/STOP_ALL. Hier wird er auf einen temporaeren
+        # Pfad umgebogen, sonst faerbt eine echte, im Projekt angelegte
+        # STOP_ALL-Datei diese gesamte Suite rot - und zwar mit einer
+        # Meldung, die nicht verraet, warum.
+        self.global_stop_file = tmp / "STOP_ALL"
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
     def _make_switch(self) -> KillSwitch:
-        return KillSwitch(str(self.stop_file), env_var_name=ENV_VAR, env_file=self.env_file)
+        return KillSwitch(
+            str(self.stop_file),
+            env_var_name=ENV_VAR,
+            env_file=self.env_file,
+            global_file=self.global_stop_file,
+        )
 
     def _write_env(self, content: str) -> None:
         """
