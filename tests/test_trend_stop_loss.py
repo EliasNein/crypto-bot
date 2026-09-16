@@ -113,6 +113,14 @@ class FakeTradingClient:
         # das nicht stillschweigend ignoriert wird.
         self.force_trading_rules_failure = False
         self.trading_rules_calls = 0
+        # Konsistenz-Check vor dem Verkauf (W11, siehe balance_guard.py).
+        # Default bewusst reichlich: die bestehenden Testfaelle sollen
+        # sich nicht darum kuemmern muessen, dass der Bot jetzt auch das
+        # Guthaben prueft. Die W11-Tests setzen diese Werte gezielt.
+        self.base_balance: tuple[float, float] | None = (1_000.0, 0.0)
+        self.open_orders: list[dict] | None = []
+        self.balance_calls = 0
+        self.open_orders_calls = 0
         # Seit dem K2-Fix reicht jede place_*-Methode einen `context` an
         # die Pending-Orders-Ablage durch (siehe binance_client.py) und
         # jede Order-Antwort traegt eine clientOrderId. Der Fake bildet
@@ -131,6 +139,15 @@ class FakeTradingClient:
 
     def get_current_price(self, symbol: str) -> float:
         return self.price
+
+    def get_asset_balance(self, asset: str) -> tuple[float, float] | None:
+        self.balance_calls += 1
+        self.call_log.append("get_asset_balance")
+        return self.base_balance
+
+    def get_open_orders(self, symbol: str) -> list[dict] | None:
+        self.open_orders_calls += 1
+        return self.open_orders
 
     def get_symbol_trading_rules(self, symbol: str):
         self.trading_rules_calls += 1
@@ -354,7 +371,14 @@ class TrendStopLossTestCase(TrendStrategyTestBase):
         self.assertEqual(len(client.market_sell_calls), 1)
         # Reihenfolge: cancel_order muss VOR dem Market-Sell aufgerufen
         # worden sein (sonst bliebe eine verwaiste Order an der Börse).
-        self.assertEqual(client.call_log, ["cancel_order", "place_market_sell"])
+        # Dazwischen liegt seit W11 die Deckungsprüfung - und die gehört
+        # zwingend genau dorthin: Vor dem Stornieren bindet die eigene
+        # Stop-Order die komplette Positionsmenge, das freie Guthaben
+        # wäre also systematisch zu klein (siehe balance_guard.py).
+        self.assertEqual(
+            client.call_log,
+            ["cancel_order", "get_asset_balance", "place_market_sell"],
+        )
         closed_trade = strategy._ledger._read()[0]
         self.assertEqual(closed_trade["status"], "closed")
         self.assertEqual(closed_trade["exit_reason"], "signal")

@@ -22,6 +22,14 @@ from datetime import datetime, timedelta, timezone
 
 from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
 from .backtest import fetch_historical_klines
+from .balance_guard import (
+    SELL_INSUFFICIENT,
+    BalanceSnapshot,
+    build_snapshot,
+    check_sell_coverage,
+    describe,
+    ledger_exceeds_account,
+)
 from .binance_client import TradingClient
 from .notifier import send_notification
 from .order_utils import (
@@ -392,6 +400,24 @@ class TrendFollowingStrategy:
             )
             order = None
         else:
+            # Konsistenz-Check vor dem Verkauf (W11, siehe
+            # balance_guard.py). Bewusst genau HIER: Bis
+            # _resolve_stop_order_before_close() oben gelaufen ist, bindet
+            # die eigene Stop-Loss-Order die komplette Positionsmenge -
+            # das freie Guthaben wäre also systematisch zu klein und jede
+            # Prüfung liefe ins Leere.
+            if not self._sell_is_covered(open_trade):
+                # Die Stop-Order ist zu diesem Zeitpunkt bereits
+                # storniert. Ein einfaches `return` ließe die Position
+                # damit ungeschützt zurück - genau der K1-Folgefund.
+                # _handle_failed_real_sell() platziert sie neu.
+                self._handle_failed_real_sell(
+                    open_trade,
+                    price,
+                    cause="Verkauf mangels Deckung nicht versucht",
+                )
+                return
+
             order = self._client.place_market_sell(
                 self._config.symbol,
                 open_trade["quantity"],
@@ -440,12 +466,88 @@ class TrendFollowingStrategy:
             loss_pct = (1 - price / open_trade["entry_price"]) * 100
             self._stop_loss.pause(self._config.symbol, open_trade["entry_price"], price, loss_pct)
 
-    def _handle_failed_real_sell(self, open_trade: dict, price: float) -> None:
+    def _sell_is_covered(self, open_trade: dict) -> bool:
         """
-        Behandelt einen fehlgeschlagenen ECHTEN Market-Sell (siehe
-        _close_position): die Position bleibt OFFEN im Ledger, es wird
-        KEIN Erlös aus quantity*price erfunden und KEIN Stop-Loss-Latch
-        gesetzt - es hat schlicht kein Ausstieg stattgefunden.
+        Deckungsprüfung vor einem echten Verkauf (W11, siehe
+        balance_guard.py): Reicht das freie Guthaben für die Menge dieser
+        Position?
+
+        Zusätzlich läuft hier die weiche Buchhaltungsprüfung. Anders als
+        beim Grid-Bot braucht es dafür keinen Anti-Spam-Zähler: Der
+        Trend-Bot hält höchstens eine offene Position und läuft im
+        24-Stunden-Takt - eine Meldung pro Tag ist keine Flut, und sie
+        blockiert ohnehin nichts.
+
+        Ein nicht abrufbares Guthaben (`None`) lässt den Verkauf zu.
+        Einen Stop-Loss-Ausstieg wegen eines Netzwerk-Hängers zu
+        verweigern wäre die deutlich gefährlichere Richtung - siehe die
+        gleiche Abwägung in binance_client.get_asset_balance().
+        """
+        if not self._config.trading_enabled:
+            return True
+
+        rules = self._client.get_symbol_trading_rules(self._config.symbol)
+        snapshot = build_snapshot(
+            self._client.get_asset_balance(rules.base_asset),
+            self._client.get_open_orders(self._config.symbol),
+            self._config.bot_name,
+        )
+        if snapshot is None:
+            return True
+
+        quantity = float(open_trade["quantity"])
+
+        if ledger_exceeds_account(snapshot, quantity, rules.step_size):
+            logger.error(
+                "[TREND-BESTAND-DISKREPANZ] Das Trend-Ledger führt eine "
+                "offene Position über mehr %s, als auf dem Konto für diesen "
+                "Bot vorhanden sein kann. %s. Da sich DCA, Grid und Trend "
+                "ein Konto teilen, kann ein anderer Bot oder ein manueller "
+                "Trade Bestand verkauft haben, der hier noch als offen "
+                "geführt wird.",
+                rules.base_asset,
+                describe(snapshot, quantity),
+            )
+            send_notification(
+                f"[TREND-BESTAND-DISKREPANZ] Offene Position über "
+                f"{quantity:.8f} {rules.base_asset}, aber so viel kann für "
+                f"diesen Bot nicht auf dem Konto sein. "
+                f"{describe(snapshot, quantity)}. Geteiltes Konto - bitte "
+                "prüfen (python -m dca_bot.audit_positions)."
+            )
+
+        if check_sell_coverage(snapshot, quantity, rules.step_size) != SELL_INSUFFICIENT:
+            return True
+
+        logger.error(
+            "[TREND-VERKAUF-UNGEDECKT] Verkauf über %.8f %s wird NICHT "
+            "versucht - frei verfügbar sind nur %.8f. %.8f stecken in "
+            "offenen Orders (davon %.8f aus anderen Bots bzw. manuellem "
+            "Handel). Die Börse würde die Order ablehnen.",
+            quantity,
+            rules.base_asset,
+            snapshot.free,
+            snapshot.locked,
+            snapshot.foreign_locked,
+        )
+        return False
+
+    def _handle_failed_real_sell(
+        self, open_trade: dict, price: float, cause: str | None = None
+    ) -> None:
+        """
+        Behandelt einen ECHTEN Market-Sell, der nicht zustande gekommen
+        ist (siehe _close_position): die Position bleibt OFFEN im Ledger,
+        es wird KEIN Erlös aus quantity*price erfunden und KEIN
+        Stop-Loss-Latch gesetzt - es hat schlicht kein Ausstieg
+        stattgefunden.
+
+        `cause` unterscheidet die beiden Wege hierher, weil sie im Log
+        nicht gleich aussehen dürfen: Entweder die Börse hat die Order
+        abgelehnt (Default), oder der Verkauf wurde wegen fehlender
+        Deckung gar nicht erst versucht (W11). Die Wiederherstellung der
+        Absicherung ist in beiden Fällen identisch und deshalb hier
+        zusammengefasst.
 
         Zusätzlich muss hier die Absicherung wiederhergestellt werden:
         _resolve_stop_order_before_close() hat die exchange-seitige
@@ -463,11 +565,12 @@ class TrendFollowingStrategy:
         dort geht es darum, eine BESTEHENDE Order nicht rückwirkend mit
         einem geänderten Config-Wert zu verfälschen.
         """
+        headline = cause or "Echter Verkauf fehlgeschlagen"
         logger.warning(
-            "[TREND-VERKAUF-FEHLGESCHLAGEN] Echter Verkauf für %s "
-            "fehlgeschlagen (Position %s, Preis ~%.2f) - Position bleibt "
-            "OFFEN im Ledger, kein Erlös verbucht, kein Stop-Loss-Latch. "
-            "Der nächste Zyklus versucht es erneut.",
+            "[TREND-VERKAUF-FEHLGESCHLAGEN] %s für %s (Position %s, Preis "
+            "~%.2f) - Position bleibt OFFEN im Ledger, kein Erlös verbucht, "
+            "kein Stop-Loss-Latch. Der nächste Zyklus versucht es erneut.",
+            headline,
             self._config.symbol,
             open_trade["id"],
             price,
@@ -497,10 +600,10 @@ class TrendFollowingStrategy:
                 limit_price,
             )
             send_notification(
-                f"[TREND-VERKAUF-FEHLGESCHLAGEN] {self._config.symbol}: echter "
-                f"Verkauf @ {price:.2f} fehlgeschlagen. Position bleibt offen, "
-                "wurde aber durch eine NEUE Stop-Loss-Order wieder "
-                "abgesichert. Siehe Bot-Log."
+                f"[TREND-VERKAUF-FEHLGESCHLAGEN] {self._config.symbol}: "
+                f"{headline} @ {price:.2f}. Position bleibt offen, wurde aber "
+                "durch eine NEUE Stop-Loss-Order wieder abgesichert. Siehe "
+                "Bot-Log."
             )
             return
 
@@ -517,10 +620,10 @@ class TrendFollowingStrategy:
             open_trade["id"],
         )
         send_notification(
-            f"[TREND-FEHLER] {self._config.symbol}: echter Verkauf @ {price:.2f} "
-            "fehlgeschlagen UND keine neue Stop-Loss-Order platzierbar - "
-            "Position weder verkauft noch exchange-seitig abgesichert. "
-            "Manuelle Prüfung nötig."
+            f"[TREND-FEHLER] {self._config.symbol}: {headline} @ {price:.2f} "
+            "UND keine neue Stop-Loss-Order platzierbar - Position weder "
+            "verkauft noch exchange-seitig abgesichert. Manuelle Prüfung "
+            "nötig."
         )
 
     def _ensure_stop_loss_protection(self, open_trade: dict, log_prefix: str = "") -> None:

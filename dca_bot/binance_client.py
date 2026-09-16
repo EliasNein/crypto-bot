@@ -232,6 +232,93 @@ class TradingClient:
         balance = self._client.get_asset_balance(asset=quote_asset)
         return float(balance["free"]) if balance else 0.0
 
+    def get_asset_balance(self, asset: str) -> tuple[float, float] | None:
+        """
+        Freies und gebundenes Guthaben eines Assets als `(free, locked)` -
+        Grundlage des Konsistenz-Checks vor jedem Verkauf
+        (Sicherheitsreview-Punkt W11, siehe balance_guard.py).
+
+        `locked` ist die Menge, die aktuell in offenen Orders steckt -
+        für den Vergleich wichtig, weil sie zwar existiert, aber nicht
+        verkäuflich ist.
+
+        Gibt `None` zurück (statt 0.0 oder einer Exception), wenn die
+        Abfrage scheitert, und das ist eine bewusste Unterscheidung: `0.0`
+        hieße "kein Guthaben da" und würde jeden Verkauf blockieren,
+        `None` heißt "ich konnte es nicht klären". Nur der erste Fall ist
+        eine Aussage über das Konto. Gleiche Haltung wie bei
+        `LOOKUP_FAILED` in get_order_by_client_id(): ein gescheiterter
+        Abruf ist kein Befund.
+        """
+        try:
+            balance = self._client.get_asset_balance(asset=asset)
+        except (
+            BinanceAPIException,
+            BinanceOrderException,
+            *INCONCLUSIVE_REQUEST_ERRORS,
+        ) as exc:
+            logger.warning(
+                "Guthaben für %s konnte nicht abgefragt werden (%s) - der "
+                "Konsistenz-Check vor dem Verkauf entfällt in diesem Zyklus.",
+                asset,
+                type(exc).__name__,
+            )
+            return None
+
+        if not balance:
+            # Binance meldet ein nie gehaltenes Asset gar nicht. Das ist
+            # eine echte Aussage ("nichts davon da"), kein Fehlschlag.
+            return 0.0, 0.0
+
+        try:
+            return float(balance.get("free", 0.0)), float(balance.get("locked", 0.0))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Guthaben-Antwort für %s ist unlesbar (%r) - der "
+                "Konsistenz-Check vor dem Verkauf entfällt in diesem Zyklus.",
+                asset,
+                balance,
+            )
+            return None
+
+    def get_open_orders(self, symbol: str) -> list[dict] | None:
+        """
+        Alle aktuell offenen Orders eines Symbols - für die Frage, welche
+        gebundene Menge zu WELCHEM Bot gehört (W11).
+
+        Möglich ist diese Zuordnung nur wegen des K2-Fixes: jede Order
+        dieses Projekts trägt eine selbstvergebene `clientOrderId` mit
+        Bot-Präfix (`grid-…`, `trend-…`, `dca-…`, siehe
+        pending_orders.new_client_order_id). Damit lässt sich ohne
+        Zugriff auf fremde Ledger unterscheiden, ob eine offene
+        Verkaufs-Order die eigene ist - und damit, ob das dort gebundene
+        Base-Asset überhaupt für einen eigenen Verkauf zur Verfügung
+        stünde.
+
+        Gibt wie get_asset_balance() `None` zurück, wenn die Abfrage
+        scheitert: eine leere Liste hieße "keine offenen Orders", und das
+        ist etwas anderes als "unbekannt".
+        """
+        try:
+            orders = self._client.get_open_orders(symbol=symbol)
+        except (
+            BinanceAPIException,
+            BinanceOrderException,
+            *INCONCLUSIVE_REQUEST_ERRORS,
+        ) as exc:
+            logger.warning(
+                "Offene Orders für %s konnten nicht abgefragt werden (%s) - "
+                "die Zuordnung gebundener Mengen zu den einzelnen Bots "
+                "entfällt in diesem Zyklus.",
+                symbol,
+                type(exc).__name__,
+            )
+            return None
+
+        if not isinstance(orders, list):
+            return None
+        return [o for o in orders if isinstance(o, dict)]
+
     def get_order_by_client_id(
         self, symbol: str, client_order_id: str
     ) -> tuple[str, dict | None]:

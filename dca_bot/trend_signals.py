@@ -116,6 +116,33 @@ class TrendSignalGenerator:
             # neue beginnt sie gerade erst.
             self._pending_direction = raw_direction
 
+        return self.current_state()
+
+    def current_state(self) -> dict:
+        """
+        Der aktuelle Stand OHNE neuen Kurs - gleiche Struktur wie der
+        Rückgabewert von feed().
+
+        Gebraucht vom Kapital-Allocator (allocator.py, W9): Seit der
+        Entkopplung von Feed- und Zyklus-Takt speist er die EMAs nur
+        einmal pro abgeschlossenem Kalendertag, muss die aktuelle
+        Trendstärke aber in JEDEM Zyklus in seine State-Datei schreiben.
+        Ohne diese Methode bliebe nur, dafür einen Kurs einzuspeisen -
+        also genau der Fehler, den W9 behebt.
+
+        feed() endet bewusst mit einem Aufruf hierher, statt dieselbe
+        Ableitung ein zweites Mal zu enthalten: zwei Formeln für
+        denselben Sachverhalt sind die Art Divergenz, die später niemand
+        mehr bemerkt (siehe W8 und order_lifecycle_state()).
+        """
+        if self._ema_fast is None or self._ema_slow is None:
+            return {
+                "ema_fast": None,
+                "ema_slow": None,
+                "gap_pct": None,
+                "confirmed_direction": None,
+            }
+
         gap_pct = abs(self._ema_fast - self._ema_slow) / self._ema_slow * 100
 
         confirmed_direction = None

@@ -17,6 +17,12 @@ from datetime import date, datetime, timezone
 from .binance_client import TradingClient
 from .heartbeat import Heartbeat
 from .config import Config, load_config
+from .config_guard import (
+    ConfigError,
+    announce_trading_mode,
+    mode_label,
+    report_config_error,
+)
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
@@ -125,13 +131,24 @@ def _send_daily_summary(
 
 
 def main() -> None:
-    config = load_config()
+    # Die Konfigurationspruefung laeuft zwangslaeufig vor dem
+    # Logging-Setup (das seinen Pfad ja aus der Config bezieht). Eine
+    # durchgereichte Exception ergaebe Exit-Code 1, und
+    # `Restart=on-failure` machte daraus eine Neustartschleife, die nie
+    # zum Erfolg fuehren kann - siehe report_config_error (W12).
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        report_config_error("DCA-Bot", exc)
+        return
+
     setup_logging(config.log_file)
     logger = logging.getLogger("dca_bot")
 
     logger.info("=" * 60)
     logger.info("DCA-Bot startet")
     logger.info("Code-Version: %s", get_code_version())
+    logger.info("Modus: %s", mode_label(config.use_testnet))
     logger.info("Symbol: %s | Betrag pro Kauf: %.2f | Intervall: %.2fh",
                 config.symbol, config.quote_amount, config.interval_hours)
     logger.info("Trading aktiv (kein Dry-Run): %s", config.trading_enabled)
@@ -154,6 +171,18 @@ def main() -> None:
         return
 
     init_notifier(config)
+
+    # Der Live-Modus wird ausdruecklich laut gemeldet - Log UND Telegram,
+    # bei jedem Start (W12). Bewusst erst hier: vor init_notifier() gaebe
+    # es keinen Telegram-Kanal, und gerade diese Meldung soll nicht nur
+    # im Log stehen.
+    announce_trading_mode(
+        logger,
+        "DCA-Bot",
+        use_testnet=config.use_testnet,
+        trading_enabled=config.trading_enabled,
+        enable_var_name="DCA_BOT_ENABLE_TRADING",
+    )
 
     client = TradingClient(config)
     strategy = DCAStrategy(config, client)

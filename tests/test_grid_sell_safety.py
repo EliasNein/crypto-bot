@@ -84,6 +84,14 @@ class FakeGridClient:
         # der Live-Betrieb.
         self.order_contexts: list[dict | None] = []
         self._next_client_order_id = 0
+        # Konsistenz-Check vor dem Verkauf (W11, siehe balance_guard.py).
+        # Default bewusst reichlich: die bestehenden Testfaelle sollen
+        # sich nicht darum kuemmern muessen, dass der Bot jetzt auch das
+        # Guthaben prueft. Die W11-Tests setzen diese Werte gezielt.
+        self.base_balance: tuple[float, float] | None = (1_000.0, 0.0)
+        self.open_orders: list[dict] | None = []
+        self.balance_calls = 0
+        self.open_orders_calls = 0
 
     def _new_client_order_id(self) -> str:
         self._next_client_order_id += 1
@@ -91,6 +99,14 @@ class FakeGridClient:
 
     def get_current_price(self, symbol: str) -> float:
         return self.price
+
+    def get_asset_balance(self, asset: str) -> tuple[float, float] | None:
+        self.balance_calls += 1
+        return self.base_balance
+
+    def get_open_orders(self, symbol: str) -> list[dict] | None:
+        self.open_orders_calls += 1
+        return self.open_orders
 
     def get_symbol_trading_rules(self, symbol: str):
         self.trading_rules_calls += 1

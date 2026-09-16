@@ -50,6 +50,7 @@ Dann `.env` öffnen und deine Testnet-Keys eintragen:
 ```
 BINANCE_API_KEY=dein_echter_testnet_key
 BINANCE_API_SECRET=dein_echtes_testnet_secret
+USE_TESTNET=true                       # false = ECHTE Börse, echtes Geld
 DCA_BOT_ENABLE_TRADING=false
 
 # Risikomanagement (optional, Defaults siehe dca_bot/config.py)
@@ -68,9 +69,20 @@ simuliert der Bot jeden Kauf nur und loggt ihn ("[DRY-RUN]"), platziert aber kei
 echte Order. Erst wenn du das Verhalten im Log geprüft hast, auf `true` stellen,
 um echte Testnet-Orders (mit Test-Guthaben, kein echtes Geld) zu platzieren.
 
-Weitere Einstellungen (Symbol, Betrag, Intervall, Tageslimit) befinden sich aktuell
-als Defaults in `dca_bot/config.py` – für den nächsten Schritt können wir diese
-auch über Umgebungsvariablen konfigurierbar machen.
+Symbol, Betrag, Intervall und Tageslimit des DCA-Bots sind seit dem
+W12-Fix ebenfalls über die `.env` einstellbar (`DCA_SYMBOL`,
+`DCA_QUOTE_AMOUNT`, `DCA_INTERVAL_HOURS`, `DCA_MAX_DAILY_SPEND`) – sie
+standen als einzige der vier Bots vorher nur als Default im Code. Die
+Defaults sind unverändert.
+
+**`USE_TESTNET` ist der Live-Schalter des Projekts** (Default `true`).
+Auf `false` gesetzt, handeln alle vier Prozesse gegen die echte Börse mit
+echtem Geld – das meldet jeder von ihnen beim Start unübersehbar im Log
+und per Telegram, eine stille Umschaltung gibt es nicht. Im Live-Modus
+werden ausserdem Telegram-Zugangsdaten und alle Positionsgrössen zur
+Pflichtangabe (siehe Abschnitt 6). Nicht vergessen: Testnet-Keys
+funktionieren an der echten Börse nicht, `BINANCE_API_KEY`/`SECRET`
+müssen mitgewechselt werden.
 
 ## 4. Starten
 
@@ -87,6 +99,8 @@ Beenden mit `Strg+C`.
 trading-bot/
 ├── dca_bot/
 │   ├── config.py         # Zentrale Konfiguration DCA-Bot (liest .env)
+│   ├── config_guard.py   # Live-Schalter + Pflichtvariablen-Check (geteilt)
+│   ├── balance_guard.py  # Konsistenz-Check vor jedem Verkauf (geteilt)
 │   ├── binance_client.py # Wrapper um die Binance-API (Testnet, Buy+Sell, Handelsregeln)
 │   ├── order_utils.py    # Quantisierung auf tickSize/stepSize + Gebührenkorrektur (geteilt)
 │   ├── pending_orders.py # Idempotente Order-Platzierung + Ground-Truth-Abgleich (geteilt)
@@ -210,6 +224,73 @@ trading-bot/
   Lock auf dem Dateideskriptor und keine PID-Datei: das Betriebssystem
   gibt es auch bei `kill -9` frei, eine liegengebliebene `.lock`-Datei
   blockiert also keinen Neustart.
+- **Live-Schalter mit Sicherheitsschwelle** (`USE_TESTNET`, Default
+  `true`): Ob die Bots gegen das Testnet oder die echte Börse handeln,
+  ist eine Einstellung in der `.env` und kein Code-Edit mehr. Nur die
+  Werte `true`/`false` sind erlaubt - ein Tippfehler bricht ab, statt
+  stillschweigend auf `false` (also **live**) zu fallen. Bei `false` gibt
+  jeder der vier Prozesse beim Start einen unübersehbaren Block ins Log
+  (`ACHTUNG: LIVE-MODUS MIT ECHTEM GELD AKTIV`) **und** eine
+  Telegram-Nachricht aus. Unterschieden werden dabei drei Zustände:
+  Testnet (eine ruhige Zeile), Live mit aktivem Trading (`CRITICAL`), und
+  Live mit deaktiviertem Trading - Letzteres ist ausdrücklich ein eigener
+  Fall und kein harmloser Dry-Run, denn die Kontodaten sind echt und ein
+  Umlegen einer einzigen Variable genügt dann für echtes Geld.
+- **Pflichtvariablen-Check beim Start** (`dca_bot/config_guard.py`):
+  Jeder Wert wird beim Laden geprüft, statt mit einem Default
+  weiterzulaufen oder erst im Betrieb aufzufallen. Abgedeckt sind unter
+  anderem leere Angaben (`GRID_SYMBOL=` ist eine Angabe, keine fehlende
+  Zeile - der Default ersetzt sie nicht), Intervalle von 0 (ein
+  Busy-Loop gegen die API), unsinnige Prozentwerte (ein
+  `GRID_STOP_LOSS_PCT=150` ergäbe eine negative Schwelle und damit einen
+  still wirkungslosen Stop-Loss), nicht lesbare Zahlen (die Meldung nennt
+  jetzt die betroffene Variable), aus `.env.example` kopierte Platzhalter
+  und ein leerer Pending-Orders-Pfad, der die K2-Absicherung abschalten
+  würde. Wo `0` eine dokumentierte Bedeutung hat (Stop-Loss aus bei
+  DCA/Grid, Heartbeat aus), bleibt es ausdrücklich erlaubt - beim
+  Trend-Bot dagegen nicht, dort schlösse ein Stop-Loss von 0 % jede
+  Position sofort wieder. Auch die `*_HALT`-Variablen werden beim Start
+  geprüft: zur Laufzeit liest der Notaus sie bewusst weiter tolerant
+  (eine Exception alle fünf Sekunden wäre schlimmer als das Problem),
+  aber `GRID_BOT_HALT=ture` bedeutet dort "kein Notaus" - und der Start
+  ist der einzige Moment, das gefahrlos zu bemerken.
+- **Im Live-Modus zusätzlich Pflicht**: Telegram-Zugangsdaten (ohne
+  Kanal kämen ausgerechnet `[ORDER-UNKLAR]`, `[STOP-LOSS]` und
+  `[HEARTBEAT]` nirgends an) sowie alle Werte, die die Positionsgröße
+  bestimmen - `DCA_QUOTE_AMOUNT`, `DCA_MAX_DAILY_SPEND`,
+  `GRID_LOWER_LIMIT`, `GRID_UPPER_LIMIT`, `GRID_AMOUNT_PER_LEVEL`,
+  `TREND_AMOUNT_PER_TRADE`. Sie müssen ausdrücklich in der `.env` stehen
+  und dürfen nicht auf die Testnet-Defaults zurückfallen: Live sind genau
+  sie die Stellschraube für die tatsächliche Kapitalbindung, und ein
+  vergessener Eintrag sähe im Log aus wie ein bewusst gewählter Wert.
+- **Fehlkonfiguration löst keine Neustartschleife aus**: Die Prüfung
+  läuft zwangsläufig vor dem Logging-Setup. Statt eines nackten
+  Tracebacks mit Exit-Code 1 (den `Restart=on-failure` endlos
+  wiederholen würde, ohne je erfolgreich zu sein) gibt es eine klare
+  Meldung auf stderr, nach Möglichkeit eine Telegram-Nachricht, und ein
+  sauberes Ende. Gleiches Muster wie bei einem bereits laufenden Bot.
+- **Konsistenz-Check vor jedem Verkauf** (`dca_bot/balance_guard.py`):
+  DCA, Grid und Trend teilen sich ein Konto und handeln dasselbe Symbol,
+  aber jeder führt sein eigenes Ledger - die Zuordnung "dieses BTC gehört
+  dem Grid-Bot" existiert nur buchhalterisch. Vor jedem echten Verkauf
+  wird deshalb gegen den tatsächlichen Kontostand geprüft, und zwar
+  zweistufig: Reicht das **freie** Guthaben für genau diesen Verkauf
+  nicht, wird gar nicht erst verkauft (die Börse würde ablehnen, und der
+  Fehlschlag sähe im Log aus wie ein Netzwerkproblem). Deckt das Konto
+  darüber hinaus nicht ab, was das eigene Ledger insgesamt als offen
+  führt, gibt es eine deutliche Warnung samt Telegram - der einzelne,
+  gedeckte Verkauf läuft aber **trotzdem**: Er reduziert Risiko und
+  Kapitalbindung, ihn zu blockieren würde nur Assets stranden lassen
+  (dieselbe Abwägung wie beim Grid-Stop-Loss, der Verkäufe ebenfalls
+  durchlässt). Welche gebundene Menge zu welchem Bot gehört, lässt sich
+  dabei ohne Zugriff auf fremde Ledger beantworten - jede Order trägt
+  seit dem K2-Fix ein Bot-Präfix in ihrer `clientOrderId`. Die Prüfung
+  ist bewusst so gebaut, dass sie keine Fehlalarme erzeugen kann und
+  dafür nicht jeden Fall erkennt. Ein **nicht abrufbares** Guthaben lässt
+  den Verkauf zu: ein Netzwerkfehler ist keine Aussage über das Konto,
+  und einen Stop-Loss-Ausstieg deswegen zu verweigern wäre die
+  gefährlichere Richtung.
+
 - **Echte Handelsregeln statt Annahmen** (`dca_bot/order_utils.py`,
   `binance_client.get_symbol_trading_rules`): Vor jeder Order werden Menge
   und Preise gegen die tatsächlichen Filter des Symbols quantisiert
@@ -666,8 +747,8 @@ ALLOCATOR_EMA_FAST_PERIOD=20
 ALLOCATOR_EMA_SLOW_PERIOD=50
 ALLOCATOR_ZERO_ANCHOR_PCT=0.0     # EMA-Abstand, ab dem 0% Trend-Anteil gilt
 ALLOCATOR_FULL_ANCHOR_PCT=3.0     # EMA-Abstand, ab dem 100% Trend-Anteil gilt
-ALLOCATOR_SMOOTHING_PERIOD=24     # EMA-Glättung der Zuteilung, in Allocator-Zyklen
-ALLOCATOR_INTERVAL_MINUTES=60     # Wie oft neu berechnet wird
+ALLOCATOR_SMOOTHING_PERIOD=3      # EMA-Glättung der Zuteilung, in TAGEN
+ALLOCATOR_INTERVAL_MINUTES=60     # Wie oft der Prozess aufwacht (nicht: EMA-Takt)
 ALLOCATOR_NOTIFY_THRESHOLD_PP=15.0
 ALLOCATOR_KILL_SWITCH_FILE=STOP_ALLOCATOR
 ALLOCATOR_HALT=false
@@ -703,6 +784,25 @@ Trend-Bot).
   der Allocator braucht den rohen, kontinuierlichen EMA-Abstand). Nur eine
   bestätigte AUFWÄRTS-Richtung zählt als Stärke - der Trend-Bot ist
   long-only, bei Abwärtstrend bekäme er ohnehin kein Kapital zugeteilt.
+- **Zwei Takte, bewusst entkoppelt** (Sicherheitsreview-Punkt W9): Die
+  EMAs werden mit **genau einem Tagesschlusskurs pro Kalendertag**
+  gefüttert - identisch zum Backtest. `ALLOCATOR_INTERVAL_MINUTES`
+  bestimmt dagegen nur, wie oft der Prozess aufwacht, den Zustand mit
+  frischem Zeitstempel neu veröffentlicht und den Notaus prüft.
+  Hintergrund: `TrendSignalGenerator` ist ereignisgesteuert, jeder
+  `feed()` rückt die EMAs um **eine Periode** vor. Vorher speiste jeder
+  60-Minuten-Zyklus einen Spot-Ticker ein, also 24 Werte pro Tag in eine
+  auf 20/50 **Tage** ausgelegte Berechnung - das Ergebnis war faktisch
+  eine EMA(20h)/EMA(50h), ein anderer Indikator als der backgetestete.
+  Der stündliche Takt bleibt trotzdem: Er ist das Lebenszeichen, an dem
+  die Frische-Prüfung unten hängt. Ein Tages-Intervall hätte deren
+  Schwelle von drei Stunden auf drei Tage gedehnt.
+- **Glättung in Tagen**: `ALLOCATOR_SMOOTHING_PERIOD` rückt entsprechend
+  nur beim Tages-Feed vor und ist damit direkt mit
+  `--smoothing-period-days` im Backtest vergleichbar (dort Default 3.0).
+  Nach einer Downtime werden versäumte Tage einzeln nachgeholt, jeder
+  gegen sein eigenes Tagesziel - das Ergebnis ist dasselbe, als wäre der
+  Prozess durchgelaufen.
 - **Lineare Interpolation** zwischen `ALLOCATOR_ZERO_ANCHOR_PCT` und
   `ALLOCATOR_FULL_ANCHOR_PCT`, außerhalb der Anker geklemmt (kein
   Extrapolieren).
@@ -760,7 +860,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -785,7 +885,13 @@ Notaus-Wege ab, insbesondere das Wirken einer nachträglich geänderten
 Korrektheits- und Verfügbarkeitspunkte: UTC-Tagesfenster,
 Ledger-Integrität inkl. atomarer Writes, Fälligkeitsprüfung beim Start,
 Frische der Allocator-Zuteilung, Heartbeat und der Notaus zwischen
-mehreren Grid-Käufen.
+mehreren Grid-Käufen. `test_stage_c_safety.py` deckt die letzten
+Code-Punkte vor dem Echtgeld-Schalter ab: den Live-Schalter samt
+striktem Wahrheitswert-Parsing und der lauten Start-Warnung, den
+Pflichtvariablen-Check, den Konsistenz-Check vor jedem Verkauf auf dem
+geteilten Konto, und den entkoppelten Feed-Takt des Allocators. Mehrere
+davon sind ausdrücklich Negativkontrollen: Dreht man die jeweilige
+Änderung zurück, fallen sie um.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

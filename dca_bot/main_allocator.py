@@ -21,6 +21,12 @@ from datetime import datetime, timezone
 
 from .allocator import Allocator
 from .allocator_config import load_allocator_config
+from .config_guard import (
+    ConfigError,
+    announce_trading_mode,
+    mode_label,
+    report_config_error,
+)
 from .binance_client import TradingClient
 from .heartbeat import Heartbeat
 from .notifier import init as init_notifier
@@ -59,16 +65,24 @@ def _sleep_with_kill_switch_check(total_seconds: int, kill_switch: KillSwitch) -
 
 
 def main() -> None:
-    config = load_allocator_config()
+    # Siehe main.py: eine Fehlkonfiguration darf keine
+    # systemd-Neustartschleife ausloesen (W12).
+    try:
+        config = load_allocator_config()
+    except ConfigError as exc:
+        report_config_error("Kapital-Allocator", exc)
+        return
+
     setup_logging(config.log_file)
     logger = logging.getLogger("allocator")
 
     logger.info("=" * 60)
     logger.info("Kapital-Allocator startet")
     logger.info("Code-Version: %s", get_code_version())
+    logger.info("Modus: %s", mode_label(config.use_testnet))
     logger.info(
-        "Symbol: %s | EMA %d/%d | Anker %.1f%%-%.1f%% | Glättung: %d Zyklen | "
-        "Intervall: %dmin",
+        "Symbol: %s | EMA %d/%d | Anker %.1f%%-%.1f%% | Glättung: %d Tage | "
+        "Zyklus: %dmin (Feed: 1 Tagesschlusskurs/Tag)",
         config.symbol,
         config.ema_fast_period,
         config.ema_slow_period,
@@ -77,7 +91,12 @@ def main() -> None:
         config.smoothing_period,
         config.interval_minutes,
     )
-    logger.info("Hinweis: Der Allocator platziert selbst nie Orders - nur Berechnung + State-Datei.")
+    logger.info(
+        "Hinweis: Der Allocator platziert selbst nie Orders - nur Berechnung "
+        "+ State-Datei. Die EMAs werden mit genau einem Tagesschlusskurs pro "
+        "Kalendertag gespeist (wie im Backtest); der Zyklus-Takt dient dem "
+        "Neuveroeffentlichen und dem Notaus (W9)."
+    )
     logger.info("=" * 60)
 
     # Schutz gegen einen versehentlichen doppelten Bot-Start (siehe
@@ -92,6 +111,16 @@ def main() -> None:
         return
 
     init_notifier(config)
+
+    # trading_enabled=None: der Allocator platziert nie Orders,
+    # liest im Live-Modus aber echte Konto-/Kursdaten und steuert
+    # die Ordergroesse von DCA und Trend (W12).
+    announce_trading_mode(
+        logger,
+        "Kapital-Allocator",
+        use_testnet=config.use_testnet,
+        trading_enabled=None,
+    )
 
     client = TradingClient(config)
     allocator = Allocator(config, client)

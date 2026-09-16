@@ -13,10 +13,22 @@ nicht zu entwerten.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
+
+from .config_guard import (
+    ConfigError,
+    env_bool,
+    env_float,
+    env_int,
+    env_text,
+    load_api_credentials,
+    load_telegram_credentials,
+    load_use_testnet,
+    require_explicit_in_live,
+    validate_halt_variable,
+)
 
 load_dotenv()
 
@@ -25,6 +37,7 @@ load_dotenv()
 class TrendConfig:
     api_key: str
     api_secret: str
+    # Siehe config.py (DCA): kommt seit dem W12-Fix aus `USE_TESTNET`.
     use_testnet: bool = True
 
     symbol: str = "BTCUSDT"
@@ -76,49 +89,71 @@ class TrendConfig:
 
 
 def load_trend_config() -> TrendConfig:
-    """Liest alle Werte aus den Umgebungsvariablen und validiert sie."""
-    api_key = os.getenv("BINANCE_API_KEY", "")
-    api_secret = os.getenv("BINANCE_API_SECRET", "")
+    """
+    Liest alle Werte aus den Umgebungsvariablen und validiert sie.
+    Zur Pflichtprüfung insgesamt siehe config_guard.py (W12).
+    """
+    use_testnet = load_use_testnet()
+    api_key, api_secret = load_api_credentials(use_testnet=use_testnet)
+    telegram_bot_token, telegram_chat_id = load_telegram_credentials(
+        use_testnet=use_testnet
+    )
+    validate_halt_variable("TREND_BOT_HALT")
 
-    if not api_key or not api_secret or "dein_testnet" in api_key:
-        raise ValueError(
-            "BINANCE_API_KEY / BINANCE_API_SECRET sind nicht gesetzt. "
-            "Kopiere .env.example zu .env und trage deine Testnet-Keys ein "
-            "(https://testnet.binance.vision/)."
-        )
+    require_explicit_in_live(
+        "TREND_AMOUNT_PER_TRADE",
+        use_testnet=use_testnet,
+        hint="Das ist die Positionsgröße jedes Einstiegs.",
+    )
 
-    ema_fast_period = int(os.getenv("TREND_EMA_FAST_PERIOD", "20"))
-    ema_slow_period = int(os.getenv("TREND_EMA_SLOW_PERIOD", "50"))
-    if ema_fast_period <= 0 or ema_slow_period <= ema_fast_period:
-        raise ValueError(
-            "Ungültige EMA-Perioden: TREND_EMA_FAST_PERIOD muss > 0 und "
-            "kleiner als TREND_EMA_SLOW_PERIOD sein "
+    ema_fast_period = env_int("TREND_EMA_FAST_PERIOD", "20", gt=0)
+    ema_slow_period = env_int("TREND_EMA_SLOW_PERIOD", "50", gt=0)
+    if ema_slow_period <= ema_fast_period:
+        raise ConfigError(
+            "Ungültige EMA-Perioden: TREND_EMA_FAST_PERIOD muss kleiner als "
+            "TREND_EMA_SLOW_PERIOD sein "
             f"(aktuell: fast={ema_fast_period}, slow={ema_slow_period})."
         )
 
     return TrendConfig(
         api_key=api_key,
         api_secret=api_secret,
-        symbol=os.getenv("TREND_SYMBOL", "BTCUSDT"),
+        use_testnet=use_testnet,
+        symbol=env_text("TREND_SYMBOL", "BTCUSDT", hint="Zum Beispiel BTCUSDT."),
         ema_fast_period=ema_fast_period,
         ema_slow_period=ema_slow_period,
-        min_gap_pct=float(os.getenv("TREND_MIN_GAP_PCT", "1.0")),
-        amount_per_trade=float(os.getenv("TREND_AMOUNT_PER_TRADE", "15.0")),
-        interval_hours=int(os.getenv("TREND_INTERVAL_HOURS", "24")),
-        trading_enabled=os.getenv("TREND_BOT_ENABLE_TRADING", "false").lower() == "true",
-        kill_switch_file=os.getenv("TREND_KILL_SWITCH_FILE", "STOP_TREND"),
-        stop_loss_pct=float(os.getenv("TREND_STOP_LOSS_PCT", "10.0")),
-        stop_limit_offset_pct=float(os.getenv("TREND_STOP_LIMIT_OFFSET_PCT", "0.5")),
-        state_file=os.getenv("TREND_STATE_FILE", "data/trend_ledger.json"),
-        stop_loss_state_file=os.getenv(
+        # 0 ist zulässig und heißt "kein Trendstärke-Filter" - dann zählt
+        # jeder rohe EMA-Crossover als bestätigt (siehe
+        # TrendSignalGenerator.feed).
+        min_gap_pct=env_float("TREND_MIN_GAP_PCT", "1.0", ge=0, lt=100),
+        amount_per_trade=env_float("TREND_AMOUNT_PER_TRADE", "15.0", gt=0),
+        interval_hours=env_int("TREND_INTERVAL_HOURS", "24", gt=0),
+        trading_enabled=env_bool("TREND_BOT_ENABLE_TRADING", "false"),
+        kill_switch_file=env_text("TREND_KILL_SWITCH_FILE", "STOP_TREND"),
+        # Anders als bei DCA und Grid ist 0 hier NICHT "aus", sondern
+        # fatal: is_stop_loss_hit() vergleicht dann gegen den
+        # Einstiegspreis selbst und löst beim ersten Zyklus aus, in dem
+        # der Preis nicht gestiegen ist. Der Bot würde also jede Position
+        # sofort wieder schließen und den Stop-Loss-Latch setzen.
+        stop_loss_pct=env_float("TREND_STOP_LOSS_PCT", "10.0", gt=0, lt=100),
+        # 0 hieße kein Puffer zwischen Stop- und Limit-Preis - genau der
+        # Durchrutsch-Fall, gegen den dieser Wert existiert (siehe 6f).
+        stop_limit_offset_pct=env_float(
+            "TREND_STOP_LIMIT_OFFSET_PCT", "0.5", gt=0, lt=100
+        ),
+        state_file=env_text("TREND_STATE_FILE", "data/trend_ledger.json"),
+        stop_loss_state_file=env_text(
             "TREND_STOP_LOSS_STATE_FILE", "data/trend_stop_loss_paused.json"
         ),
-        pending_orders_file=os.getenv(
+        pending_orders_file=env_text(
             "TREND_PENDING_ORDERS_FILE", "data/pending_orders_trend.json"
         ),
-        lock_file=os.getenv("TREND_LOCK_FILE", "data/trend_bot.lock"),
-        allocator_state_file=os.getenv("TREND_ALLOCATOR_STATE_FILE", ""),
-        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-        heartbeat_interval_hours=float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "24.0")),
+        lock_file=env_text("TREND_LOCK_FILE", "data/trend_bot.lock"),
+        # Leer ist hier die gültige Bedeutung "Allocator-Anbindung aus".
+        allocator_state_file=env_text(
+            "TREND_ALLOCATOR_STATE_FILE", "", required=False
+        ),
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+        heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
     )

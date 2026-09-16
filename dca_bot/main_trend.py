@@ -23,6 +23,12 @@ from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
 from .risk import BotHalted, KillSwitch, LedgerUnreadable
+from .config_guard import (
+    ConfigError,
+    announce_trading_mode,
+    mode_label,
+    report_config_error,
+)
 from .trend_config import load_trend_config
 from .trend_strategy import TrendFollowingStrategy
 from .version import get_code_version
@@ -59,13 +65,21 @@ def _sleep_with_kill_switch_check(total_seconds: int, kill_switch: KillSwitch) -
 
 
 def main() -> None:
-    config = load_trend_config()
+    # Siehe main.py: eine Fehlkonfiguration darf keine
+    # systemd-Neustartschleife ausloesen (W12).
+    try:
+        config = load_trend_config()
+    except ConfigError as exc:
+        report_config_error("Trend-Following-Bot", exc)
+        return
+
     setup_logging(config.log_file)
     logger = logging.getLogger("trend_bot")
 
     logger.info("=" * 60)
     logger.info("Trend-Following-Bot startet")
     logger.info("Code-Version: %s", get_code_version())
+    logger.info("Modus: %s", mode_label(config.use_testnet))
     logger.info(
         "Symbol: %s | EMA %d/%d | Mindestabstand: %.2f%% | Betrag/Trade: %.2f | "
         "Stop-Loss: %.1f%% | Intervall: %dh",
@@ -97,6 +111,16 @@ def main() -> None:
         return
 
     init_notifier(config)
+
+    # Live-Modus ausdruecklich laut melden, im Log UND per Telegram
+    # (W12) - bewusst erst nach init_notifier().
+    announce_trading_mode(
+        logger,
+        "Trend-Following-Bot",
+        use_testnet=config.use_testnet,
+        trading_enabled=config.trading_enabled,
+        enable_var_name="TREND_BOT_ENABLE_TRADING",
+    )
 
     client = TradingClient(config)
     strategy = TrendFollowingStrategy(config, client)
