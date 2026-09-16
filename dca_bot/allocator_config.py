@@ -60,6 +60,13 @@ class AllocatorConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Abstand zwischen zwei Lebenszeichen per Telegram in Stunden
+    # (Sicherheitsreview-Punkt W13, siehe heartbeat.py). 0 = aus.
+    # Bewusst EINE gemeinsame Variable fuer alle vier Bots, wie die
+    # TELEGRAM_-Zugangsdaten auch - vier Praefix-Varianten waeren hier
+    # nur Ballast.
+    heartbeat_interval_hours: float = 24.0
+
     log_file: str = "logs/allocator.log"
 
 
@@ -108,4 +115,5 @@ def load_allocator_config() -> AllocatorConfig:
         lock_file=os.getenv("ALLOCATOR_LOCK_FILE", "data/allocator.lock"),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        heartbeat_interval_hours=float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "24.0")),
     )

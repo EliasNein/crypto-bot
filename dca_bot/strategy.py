@@ -13,7 +13,7 @@ risk.py und wird hier nur eingebunden - siehe dort für Details.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
 from .binance_client import TradingClient
@@ -25,7 +25,7 @@ from .pending_orders import (
     PendingOrder,
     reconcile_pending_orders,
 )
-from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord
+from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord, utc_today
 
 logger = logging.getLogger("dca_bot")
 
@@ -43,7 +43,10 @@ class DCAStrategy:
     def _within_daily_limit(self, amount: float) -> bool:
         # Aus der persistenten Ledger-Datei berechnet statt In-Memory-Zähler,
         # damit das Limit auch nach einem Neustart des Bots noch gilt.
-        spent_today = self._ledger.spent_on_day(self._config.symbol, date.today())
+        # UTC, nicht lokale Serverzeit (W3): die Ledger-Zeitstempel sind
+        # UTC, ein lokales Tagesfenster wuerde das Limit gegenueber den
+        # Daten verschieben. Siehe utc_today() in risk.py.
+        spent_today = self._ledger.spent_on_day(self._config.symbol, utc_today())
         if spent_today + amount > self._config.max_daily_spend:
             logger.warning(
                 "Tageslimit erreicht: %.2f von max. %.2f bereits ausgegeben. "
@@ -54,6 +57,18 @@ class DCAStrategy:
             )
             return False
         return True
+
+    def verify_state_readable(self) -> None:
+        """
+        Prueft beim Bot-Start, ob das Ledger lesbar ist
+        (Sicherheitsreview-Punkt W5). Wirft `LedgerUnreadable`.
+
+        Bewusst ein eigener Schritt und NICHT in
+        safe_startup_reconciliation() gekapselt: deren Zweck ist "der
+        Start darf nicht scheitern", und genau das waere hier falsch
+        herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
+        """
+        self._ledger.verify_readable()
 
     def reconcile_pending_orders(self) -> None:
         """

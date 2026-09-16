@@ -91,6 +91,7 @@ trading-bot/
 │   ├── order_utils.py    # Quantisierung auf tickSize/stepSize + Gebührenkorrektur (geteilt)
 │   ├── pending_orders.py # Idempotente Order-Platzierung + Ground-Truth-Abgleich (geteilt)
 │   ├── process_lock.py   # Schutz gegen doppelten Bot-Start (geteilt)
+│   ├── heartbeat.py      # Tägliches Lebenszeichen aller vier Bots (geteilt)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
 │   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss (DCA)
 │   ├── notifier.py       # Telegram-Benachrichtigungen (optional, geteilt)
@@ -127,7 +128,11 @@ trading-bot/
 - **Tageslimit** (`max_daily_spend` in `config.py`): verhindert, dass bei einem
   Bug (z.B. Endlosschleife) unbegrenzt viele Käufe ausgelöst werden. Wird aus
   der persistenten Trade-Historie (`data/trade_ledger.json`) berechnet, gilt
-  also auch nach einem Neustart des Bots weiter.
+  also auch nach einem Neustart des Bots weiter. Das Tagesfenster läuft
+  durchgängig in **UTC**, passend zu den Zeitstempeln im Ledger – mit
+  lokaler Serverzeit verschob sich die Grenze je nach Zeitzone um
+  Stunden gegenüber den Daten. Die Tageszusammenfassung folgt derselben
+  Grenze (UTC-Mitternacht).
 - **Notaus**: Läuft die Datei `STOP` (Pfad über `DCA_BOT_KILL_SWITCH_FILE`
   konfigurierbar) im Projektverzeichnis, oder ist `DCA_BOT_HALT=true`
   gesetzt, stoppt der Bot sofort und sauber – auch mitten in einem laufenden
@@ -139,6 +144,10 @@ trading-bot/
   Anlegen der STOP-Datei. Die drei Wege sind mit ODER verknüpft, bewusst
   asymmetrisch: auslösen soll leicht sein, versehentliches Aufheben
   schwer – zum Wiederanlaufen müssen alle drei Quellen sauber sein.
+  Beim Grid-Bot wird der Notaus zusätzlich **zwischen jedem einzelnen
+  Kauf** eines Zyklus geprüft, nicht nur einmal davor: durchquert der
+  Preis in einem Intervall mehrere Stufen, kauft die Schleife mehrere
+  Positionen hintereinander – und genau dann zieht jemand den Notaus.
 - **Portfolio-Stop-Loss** (`DCA_BOT_STOP_LOSS_PCT`, Default 25%): Fällt der
   aktuelle Wert der bisher gekauften Position mehr als X% unter die Summe
   der Einkaufspreise, pausiert der Bot weitere Käufe und loggt das deutlich.
@@ -165,6 +174,33 @@ trading-bot/
   Ledger-Einträge als `[REKONZILIATION]` nach. Das schließt auch das
   Fenster, das ohne jeden Netzwerkfehler durch einen Prozess-Kill
   zwischen Order und Ledger-Eintrag entstand.
+- **Beschädigtes Ledger stoppt den Bot, statt still zurückzusetzen**:
+  Tageslimit und Stop-Loss-Kostenbasis werden bei jedem Zyklus aus der
+  Ledger-Datei berechnet. Eine vorhandene, aber unparsbare Datei als
+  "leere Historie" zu lesen würde beide auf Null setzen - der Bot
+  kaufte weiter, obwohl faktisch Kapital gebunden ist. Deshalb: klarer
+  `ERROR` + Telegram, und der Bot **startet nicht** (bzw. der laufende
+  Zyklus bricht ab). Eine **fehlende** Datei bleibt ausdrücklich der
+  normale Fall "frisches Deployment, allererster Start". Damit das
+  keinen Verfügbarkeitsverlust bedeutet, werden alle drei Ledger jetzt
+  **atomar** geschrieben (temporäre Datei + `os.replace`) - ein Absturz
+  mitten im Schreiben kann keine halbe Datei mehr hinterlassen.
+- **Kein Sofortkauf bei jedem Neustart** (DCA): Beim Start prüft der Bot
+  aus dem Ledger, wie lange der letzte Zyklus her ist, und wartet bis
+  zum nächsten fälligen Zeitpunkt. Vorher löste **jeder** Prozessstart
+  sofort einen echten Kauf aus - in einer Neustartschleife so viele, wie
+  das Tageslimit gerade noch durchließ. Bei leerem Ledger (allererster
+  Start) wird wie bisher sofort gekauft.
+- **Lebenszeichen** (`dca_bot/heartbeat.py`, `HEARTBEAT_INTERVAL_HOURS`,
+  Default 24 h): Jeder der vier Bots meldet sich einmal pro Intervall per
+  Telegram (`[HEARTBEAT] <Bot> läuft, Version <hash>, letzter Zyklus
+  <Zeitpunkt>`), auch wenn nichts passiert ist. Ohne das fällt ein
+  abgestürzter Bot nur durch *ausbleibende* Nachrichten auf - und ein
+  stiller Grid-Bot kann "keine Stufe durchquert" oder "seit Dienstag tot"
+  bedeuten. Der mitgesendete Zyklus-Zeitstempel unterscheidet zusätzlich
+  "Prozess läuft" von "Prozess arbeitet". Bewusst **kein** Heartbeat beim
+  Start: ein Bot in einer Neustartschleife würde sonst im Minutentakt
+  "ich lebe" melden.
 - **Kein doppelter Bot-Start** (`dca_bot/process_lock.py`): Jeder der vier
   Prozesse hält beim Start ein exklusives Lock auf einer eigenen
   `.lock`-Datei (`fcntl`/`msvcrt`). Ein zweiter Start desselben Bots
@@ -678,6 +714,15 @@ Trend-Bot).
   die Zuteilung nur bei explizitem Opt-in (siehe 10.1) unmittelbar vor
   einer NEUEN Order; unterhalb von 5 USDT wird die Order übersprungen
   statt einer wirtschaftlich bedeutungslosen Mini-Order.
+- **Frische-Prüfung der Zuteilung**: Stirbt der Allocator-Prozess, bliebe
+  der zuletzt berechnete Wert sonst für immer gültig – bei eingefrorenen
+  100% Trend hätte der DCA-Bot dauerhaft gar nicht mehr gekauft, ohne
+  dass irgendetwas darauf hinweist. Ist `updated_at` älter als das
+  Dreifache des Allocator-Intervalls, fallen DCA/Trend auf **100% DCA /
+  0% Trend** zurück (die konservativere Richtung) und loggen eine
+  Warnung. Die Schwelle kommt aus der State-Datei selbst: der Allocator
+  schreibt sein `interval_minutes` mit, statt dieselbe Zahl ein zweites
+  Mal auf Konsumentenseite zu konfigurieren.
 - **Telegram-Benachrichtigung** (falls konfiguriert) nur bei einer
   Verschiebung um mindestens `ALLOCATOR_NOTIFY_THRESHOLD_PP`
   Prozentpunkte seit der letzten Meldung - verhindert Spam bei kleinen,
@@ -715,7 +760,7 @@ Defaults, alternativ über `--grid-file` / `--trend-file`.
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -736,7 +781,11 @@ Zeile, in der `python-binance` seinen Request absetzt),
 drei Bots inklusive Idempotenz, und `test_process_lock.py` den Schutz
 gegen einen doppelten Bot-Start. `test_kill_switch.py` deckt alle drei
 Notaus-Wege ab, insbesondere das Wirken einer nachträglich geänderten
-`.env` ohne Neustart.
+`.env` ohne Neustart. `test_stage_b_safety.py` bündelt die
+Korrektheits- und Verfügbarkeitspunkte: UTC-Tagesfenster,
+Ledger-Integrität inkl. atomarer Writes, Fälligkeitsprüfung beim Start,
+Frische der Allocator-Zuteilung, Heartbeat und der Notaus zwischen
+mehreren Grid-Käufen.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 

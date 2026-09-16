@@ -65,6 +65,13 @@ class TrendConfig:
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Abstand zwischen zwei Lebenszeichen per Telegram in Stunden
+    # (Sicherheitsreview-Punkt W13, siehe heartbeat.py). 0 = aus.
+    # Bewusst EINE gemeinsame Variable fuer alle vier Bots, wie die
+    # TELEGRAM_-Zugangsdaten auch - vier Praefix-Varianten waeren hier
+    # nur Ballast.
+    heartbeat_interval_hours: float = 24.0
+
     log_file: str = "logs/trend_bot.log"
 
 
@@ -113,4 +120,5 @@ def load_trend_config() -> TrendConfig:
         allocator_state_file=os.getenv("TREND_ALLOCATOR_STATE_FILE", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        heartbeat_interval_hours=float(os.getenv("HEARTBEAT_INTERVAL_HOURS", "24.0")),
     )

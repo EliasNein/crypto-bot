@@ -12,15 +12,16 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 
 from .binance_client import TradingClient
+from .heartbeat import Heartbeat
 from .config import Config, load_config
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
-from .risk import BotHalted, KillSwitch, PortfolioStopLoss, TradeLedger
+from .risk import BotHalted, KillSwitch, LedgerUnreadable, PortfolioStopLoss, TradeLedger, utc_today
 from .strategy import DCAStrategy
 from .version import get_code_version
 
@@ -57,6 +58,55 @@ def _sleep_with_kill_switch_check(total_seconds: int, kill_switch: KillSwitch) -
         time.sleep(step)
         elapsed += step
     return False
+
+
+def _seconds_until_next_cycle(
+    ledger: TradeLedger, symbol: str, interval_seconds: int, logger: logging.Logger
+) -> int:
+    """
+    Wie lange nach einem Prozessstart bis zum nächsten fälligen
+    Kaufzyklus gewartet werden muss (Sicherheitsreview-Punkt W2).
+
+    0 bedeutet "sofort" und ist der Normalfall: leeres Ledger (frisches
+    Deployment, allererster Start) oder das Intervall ist seit dem
+    letzten Zyklus ohnehin abgelaufen - damit bleibt das bisherige
+    Verhalten erhalten, wo es richtig war.
+
+    Wichtig: Wird ein Zyklus wegen Stop-Loss oder Tageslimit
+    übersprungen, entsteht KEIN Ledger-Eintrag. Der nächste Start
+    rechnet dann korrekt "lange her" und läuft sofort - die Prüfung
+    verzögert also nie einen Zyklus, der tatsächlich fällig wäre.
+    """
+    last = ledger.last_trade_time(symbol)
+    if last is None:
+        logger.info(
+            "Keine bisherigen Käufe für %s im Ledger - der erste Zyklus läuft sofort.",
+            symbol,
+        )
+        return 0
+
+    elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+    remaining = interval_seconds - elapsed
+    if remaining <= 0:
+        logger.info(
+            "Letzter Kauf für %s vor %.1f h, Intervall %.1f h - der nächste "
+            "Zyklus ist fällig und läuft sofort.",
+            symbol,
+            elapsed / 3600,
+            interval_seconds / 3600,
+        )
+        return 0
+
+    logger.info(
+        "Letzter Kauf für %s vor %.1f h, Intervall %.1f h - der nächste Zyklus "
+        "ist erst in %.1f h fällig. Es wird gewartet, statt beim Start sofort "
+        "zu kaufen (der Notaus bleibt währenddessen wirksam).",
+        symbol,
+        elapsed / 3600,
+        interval_seconds / 3600,
+        remaining / 3600,
+    )
+    return int(remaining)
 
 
 def _send_daily_summary(
@@ -109,6 +159,20 @@ def main() -> None:
     strategy = DCAStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file)
 
+    # Ledger-Integritaet VOR allem anderen (W5): eine vorhandene, aber
+    # beschaedigte Ledger-Datei darf NICHT als leere Historie
+    # durchgehen - Tageslimit und Stop-Loss-Basis fielen sonst
+    # stillschweigend auf Null zurueck. Lieber gar nicht starten.
+    try:
+        strategy.verify_state_readable()
+    except LedgerUnreadable as exc:
+        logger.error("%s", exc)
+        send_notification(
+            f"[FEHLER] Bot startet NICHT: {exc} "
+            "Bitte die Datei pruefen oder aus einem Backup wiederherstellen."
+        )
+        return
+
     # Reconciliation VOR der ersten Kaufentscheidung: falls beim letzten
     # Lauf eine Order ausgeführt, aber nicht mehr verbucht wurde (siehe
     # pending_orders.py, Sicherheitsreview-Punkt K2), wird sie jetzt
@@ -135,11 +199,29 @@ def main() -> None:
     # Auf heute initialisiert, damit beim Start nicht sofort eine
     # (unvollständige) Zusammenfassung für den laufenden Tag rausgeht -
     # die erste Benachrichtigung kommt beim nächsten echten Tageswechsel.
-    last_summary_date = date.today()
+    # Tageswechsel = UTC-Mitternacht (W3), passend zu den Zeitstempeln im
+    # Ledger und zum Tageslimit in strategy.py.
+    last_summary_date = utc_today()
+
+    heartbeat = Heartbeat("DCA-Bot", config.heartbeat_interval_hours)
 
     interval_seconds = config.interval_hours * 60 * 60
 
     try:
+        # Kein Sofortkauf bei jedem Prozessstart (W2): erst prüfen, ob
+        # das Kaufintervall seit dem letzten protokollierten Zyklus
+        # überhaupt abgelaufen ist. Vorher lief execute_once() vor dem
+        # ersten sleep, jeder Neustart löste also einen echten Kauf aus -
+        # und in einer Restart-Schleife so viele, wie das Tageslimit
+        # gerade noch durchließ.
+        initial_wait = _seconds_until_next_cycle(
+            summary_ledger, config.symbol, interval_seconds, logger
+        )
+        if initial_wait > 0 and _sleep_with_kill_switch_check(initial_wait, kill_switch):
+            logger.warning("Notaus während der Wartezeit ausgelöst - Bot wird gestoppt.")
+            send_notification("[NOTAUS] Bot während Wartezeit gestoppt.")
+            return
+
         while True:
             try:
                 strategy.execute_once()
@@ -155,10 +237,15 @@ def main() -> None:
                 logger.exception("Unerwarteter Fehler im Kaufzyklus.")
                 send_notification(f"[FEHLER] Unerwarteter Fehler im Kaufzyklus: {exc}")
 
-            today = date.today()
+            today = utc_today()
             if today != last_summary_date:
                 _send_daily_summary(config, summary_ledger, summary_stop_loss, last_summary_date)
                 last_summary_date = today
+
+            # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
+            # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
+            last_cycle_at = datetime.now(timezone.utc)
+            heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %.2f Stunden bis zum nächsten Zyklus ...",
                         config.interval_hours)
