@@ -763,9 +763,54 @@ Details, die dabei zählten:
 
 **Die Messung war dabei zuerst selbst falsch — schon wieder an derselben Stelle wie bei W17.** Eine Mutation (`split_locked_by_bot` nimmt `origQty` statt der Restmenge) meldete 0 Fehlschläge, obwohl es einen passenden Test gibt. Ursache: Das Suchmuster `quantity = _remaining_quantity(order)` steht **zweimal** in `balance_guard.py` — einmal in der alten `split_locked_quantity()` und einmal in der neuen Funktion. Die Ersetzung traf die erste, also die falsche, und die wird in `test_stage_c_safety.py` geprüft, nicht in der gemessenen Datei. Der Anker läuft jetzt bis `for name in bot_names:`, was es nur in der neuen Funktion gibt. Das Warnsignal war dasselbe wie damals: ein Ergebnis, das zu einem vorhandenen, offensichtlich einschlägigen Test nicht passt.
 
+### Punkt 16 als Backtest-Experiment durchgespielt — Ergebnis: vorerst NICHT umsetzen (17.09.2026)
+
+Punkt 16 (automatischer Stop-Loss-Reset) war als größter Hebel der Liste eingestuft und für die laufende Paper-Trade-Phase vorgemerkt — „als Backtest-Experiment mit Erholungsschwelle und Cooldown als Parametern" (siehe unten). Genau das ist jetzt gemacht. **Ergebnis: keine Änderung am Produktivsystem.** Der Latch in `TrendStopLoss` (`trend_risk.py`) bleibt ohne Auto-Reset, DCA und Grid ebenso.
+
+**Was gebaut wurde.** Ein neuer Analyse-Modus `--analyze-auto-reset` in `trend_backtest.py`, rein additiv und ohne eine Zeile Produktivlogik — dasselbe Muster wie `--analyze-stop-limit-reliability` aus K3. Der bestehende `--simulate-reset-after-days`-Pfad bleibt unangetastet: Er ist die Grundlage der bereits in Abschnitt 6 dokumentierten Zahl, und die muss reproduzierbar bleiben. Beide Modi gleichzeitig zu setzen wird aktiv abgewiesen (zwei konkurrierende Regeln für denselben Latch; das Ergebnis wäre keiner von beiden zuzuordnen).
+
+Der simulierte Mechanismus hebt den Latch auf, sobald **beide** Bedingungen erfüllt sind (UND, nicht ODER):
+
+- **Erholungsschwelle:** Preis ≥ Auslösepreis des Stop-Loss × (1 + X %)
+- **Cooldown:** mindestens Y Tage seit dem Stop-Loss-Exit
+
+Die UND-Verknüpfung ist der eigentliche Gegenstand. Jede Bedingung für sich hat eine offensichtliche Lücke: Eine reine Erholungsschwelle greift auch beim Ein-Tages-Sprung direkt nach dem Exit (Dead-Cat-Bounce), ein reiner Cooldown ist wieder die Zeitregel von `--simulate-reset-after-days`, nur anders benannt. Anker der Schwelle ist der **tatsächliche Ausstiegskurs**, nicht die rechnerische Schwelle `entry_price × (1 − stop_loss_pct/100)` — beide fallen oft, aber nicht immer zusammen, und `TrendStopLoss.pause()` schreibt den Ausstiegskurs ohnehin schon als `exit_price` in die Latch-Datei. Eine spätere Live-Umsetzung bräuchte also keinen neuen Zustand.
+
+**Definition „falscher Wiedereinstieg":** ein Wiedereinstieg, der selbst wieder im Stop-Loss endet, statt per Signal-Umkehr geschlossen zu werden. Bewusst **nicht** „macht Verlust". Ein per Signal geschlossener Wiedereinstieg hat sich als Entscheidung bewährt, auch wenn er im Minus endete — die Frage des Latches ist nicht „hat sich der Trade gelohnt", sondern „ist der Bot in einen noch laufenden Abwärtstrend hineingelaufen". Am Periodenende offene Wiedereinstiege werden eigens ausgewiesen: Sie haben keinen Ausgang, und sie als „nicht falsch" zu zählen wäre eine Aussage, die die Daten nicht hergeben.
+
+**Ergebnis der Grid-Suche** (3 Schwellen × 3 Cooldowns × 3 Zeiträume, Live-Defaults: EMA 20/50, Mindestabstand 1,0 %, Stop-Loss 10 %, 15,00 pro Trade, 0,1 % Gebühr je Seite). Rendite = realisiert **plus** unrealisiert:
+
+| Zeitraum | Erholung % | Cooldown | Resets | Rendite mit Auto-Reset | Rendite ohne (Referenz) | Zusätzl. Wiedereinstiege | davon falsch |
+|---|---|---|---|---|---|---|---|
+| 2022 Bärenmarkt | 2 | 3 / 7 / 14 | 1 | −15,75 % | −15,75 % | 0 | 0 |
+| 2022 Bärenmarkt | 5 | 3 / 7 / 14 | 0 | −15,75 % | −15,75 % | 0 | 0 |
+| 2022 Bärenmarkt | 10 | 3 / 7 / 14 | 0 | −15,75 % | −15,75 % | 0 | 0 |
+| 2023 Erholung | 2 / 5 / 10 | 3 / 7 / 14 | 1 | **+55,03 %** | +13,14 % | 1 | 0 (1 offen) |
+| 2021 Seitwärts | 2 / 5 / 10 | 3 / 7 / 14 | 0 | +11,83 % | +11,83 % | 0 | 0 |
+
+*(Zusammengefasste Schreibweise: Innerhalb einer Zeile sind alle aufgeführten Kombinationen zahlengleich. Vollständige 27-Zeilen-Ausgabe über `python -m dca_bot.trend_backtest --analyze-auto-reset`.)*
+
+**Die Rendite-Spalte enthält bewusst auch den unrealisierten Anteil**, und das ist hier nicht kosmetisch: Der gesamte 2023-Effekt steckt in einer am Periodenende noch **offenen** Position (+13,14 % realisiert / +41,89 % unrealisiert). Eine Tabelle nach der Konvention von `print_report` — nur realisierte PnL — hätte für alle 27 Kombinationen exakt den Referenzwert gezeigt und den Effekt vollständig verborgen. Das war der erste Entwurf der Ausgabe und ist genau deshalb jetzt ausdrücklich dokumentiert. Nebenbei eine saubere Gegenprobe: +55,03 % reproduziert die in Abschnitt 6 dokumentierten ~55 % exakt — der echte Mechanismus kommt auf dasselbe Ergebnis wie die grobe 14-Tage-Simulation.
+
+**Drei Befunde:**
+
+1. **Es gibt genau EIN auswertbares Ereignis über alle drei Zeiträume.** 2021: Der Stop-Loss löst nie aus, der Auto-Reset hat keinen Gegenstand. 2022: Er löst einmal aus (Exit 11.04. @ 39.530,45), der Latch fällt bei 2 % — der Kurs erholte sich um zwischen 2 % und 5 % über den Ausstieg, mehr nie —, aber danach kommt kein bestätigtes Aufwärtssignal mehr, also 0 Wiedereinstiege. Das bestätigt die Aussage aus Abschnitt 6 („im Bärenmarkt ändert Reset nichts") und zeigt jetzt auch den Grund: nicht weil der Latch hielt, sondern weil kein Signal kam. 2023: 1 Stop-Loss, 1 Wiedereinstieg.
+
+2. **In 2023 waren die Parameter nie die bindende Bedingung — deshalb sind alle neun Zellen identisch.** Stop-Loss-Exit am 17.08.2023 @ 26.623,41. Die Schwellen werden sehr unterschiedlich erreicht: 2 % am 29.08. (+12 Tage), 5 % am 01.10. (+45), 10 % am 20.10. (+64). Das bestätigte Aufwärtssignal kommt am **20.10.2023**, also am selben Tag wie die strengste Schwelle. Engpass war durchgängig das EMA-Signal, nie der Latch — die Grid-Suche kann zwischen den Parametern folglich gar nicht unterscheiden. Eine erweiterte Suche (Schwellen bis 25 %, Cooldowns bis 90 Tage) zeigt, dass der Effekt trotzdem nicht auf Messers Schneide steht: Der Wiedereinstieg bleibt bestehen, die Rendite sinkt graduell +55 % → +40 % → +24 %, **nie unter die Referenz von +13,14 %**.
+
+3. **Die Whipsaw-Sorge ist weder bestätigt noch widerlegt.** 0 falsche Wiedereinstiege in allen 27 Kombinationen — bei genau **einem** Wiedereinstieg insgesamt. Das ist keine Entlastung des Latches, das ist Stichprobengröße 1. Exakt dieselbe Kategorie wie der `TREND_STOP_LIMIT_OFFSET_PCT`-Fund (2 simulierte Stop-Loss-Exits, siehe 6f): eine Frage, die der Backtest mangels Ereignissen nicht beantworten kann. Der eine Wiedereinstieg ist zudem am Periodenende offen, seine +41,89 % hängen also am gewählten Enddatum.
+
+**Entscheidung: vorerst nicht umsetzen, n = 1 ist nicht ausreichend.** Der Mechanismus sieht in dem einen Fall, in dem er überhaupt wirken konnte, nützlich und harmlos aus — aber aus einem einzigen Ereignis eine Parameterwahl abzuleiten wäre Overfitting mit maximaler Stichprobenarmut, und zwar an einer Sicherheitssperre. Die Entscheidung fällt mit echten Daten aus der laufenden Paper-Trade-Phase, gleiches Vorgehen und gleiche Begründung wie beim Stop-Limit-Offset. Bis dahin gilt unverändert: Nach einem Trend-Stop-Loss setzt ein Mensch zurück (`python -m dca_bot.reset_trend_stop_loss`), und genau das ist der Punkt des Latches.
+
+**Tests:** 25 neue in `tests/test_trend_auto_reset.py`, Gesamtstand **523, alle grün**. Wirksamkeit wieder gemessen: Kontrolllauf 0 Fehlschläge, alle 8 Mutationen gefangen (UND→ODER → 10, Schwelle `>=`→`>` → 2, Cooldown-Off-by-one → 1, falscher Anker → 1, „falsch" per PnL statt Ausstiegsgrund → 1, Wiedereinstiegs-Markierung → 5, offener Wiedereinstieg → 2, fehlender Modus-Ausschluss → 1).
+
+**Und wieder dieselbe Falle wie in Stufe 2 und bei W17:** Die Anker-Mutation meldete zunächst 0 Fehlschläge. Ursache diesmal nicht ein mehrdeutiges Suchmuster, sondern eine echte Testlücke — der vorhandene Test prüfte `_auto_reset_is_due()` selbst, also die *Rechnung*, nicht die *Verdrahtung* in der Backtest-Schleife. Reicht diese den falschen Wert als Anker herein, rechnet die Funktion weiterhin korrekt, nur mit der falschen Zahl. Dafür gibt es jetzt einen eigenen Test über eine 30-%-Schwelle, die genau zwischen den beiden Kandidaten liegt (Ausstiegskurs 90,00 → 117,00 erreichbar; rechnerische Schwelle 95,40 → 124,02 unerreichbar). Das Warnsignal war zum dritten Mal dasselbe: ein Messergebnis, das zu einem offensichtlich einschlägigen Test nicht passt.
+
+Ein kleiner Nebenbefund noch: `100.0 * 1.1` ergibt in Fließkomma `110.00000000000001`, eine Erholungsschwelle bei krummen Prozentwerten ist also nicht exakt erreichbar. Die Vergleichsform ist projektkonform (`is_stop_loss_hit` und `is_trend_break_stop_loss_hit` rechnen genauso, Decimal ist in `order_utils.py` den Ordermengen vorbehalten, wo die Börse ablehnt), für eine Analyse ist der Bruchteil eines Cents bedeutungslos. Die Testkonstanten sind deshalb binär exakt gewählt (25 % statt 10 %), damit „die Schwelle zählt inklusive" den Vergleichsoperator prüft und nicht ein Darstellungsartefakt.
+
 ### Offen aus der Liste
 
-**Stufe 3 (später oder bewusst nicht):** Punkt 16 (automatischer Stop-Loss-Reset) ist der größte Hebel der Liste (~40 Prozentpunkte in 2023 laut eigener Zusatzanalyse), aber eine **Strategie**-Frage: Eine Änderung entwertet die Backtest-Basis, solange sie nicht neu backgetestet ist. Richtiger Zeitpunkt ist die laufende Paper-Trade-Phase, als Backtest-Experiment mit Erholungsschwelle und Cooldown als Parametern. Punkt 13 (gemeinsame Bot-Runtime) ist reiner Wartbarkeitsgewinn und fasst alle vier Einstiegspunkte gleichzeitig an — nach dem Cutover am 05.10., nicht davor. Punkt 15 (SQLite) ist bei aktuell 1–6 Ledger-Einträgen und ein paar Trades pro Tag Jahre entfernt. Punkt 17 (Dashboard) bleibt für 300 € Kapital Overkill. `.bak`-Kopien aus Punkt 2 entfallen: atomare Writes plus tägliche VM-Snapshots plus Git decken das ab.
+**Stufe 3 (später oder bewusst nicht):** Punkt 16 (automatischer Stop-Loss-Reset) ist **durchgespielt und bewusst zurückgestellt** — siehe den Abschnitt direkt darüber. Die frühere Einschätzung „größter Hebel der Liste (~40 Prozentpunkte in 2023)" bleibt der Größenordnung nach richtig, ruht aber auf einem einzigen Ereignis; das war vor dem Experiment nicht sichtbar. Punkt 13 (gemeinsame Bot-Runtime) ist reiner Wartbarkeitsgewinn und fasst alle vier Einstiegspunkte gleichzeitig an — nach dem Cutover am 05.10., nicht davor. Punkt 15 (SQLite) ist bei aktuell 1–6 Ledger-Einträgen und ein paar Trades pro Tag Jahre entfernt. Punkt 17 (Dashboard) bleibt für 300 € Kapital Overkill. `.bak`-Kopien aus Punkt 2 entfallen: atomare Writes plus tägliche VM-Snapshots plus Git decken das ab.
 
 ---
 
