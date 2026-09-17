@@ -612,6 +612,15 @@ bei Null anfangen müssen.
   Löschen der Datei unter `TREND_STOP_LOSS_STATE_FILE`. Der Backtest zeigt
   deutlich den Preis dafür - ohne periodischen manuellen Reset verpasst
   die Strategie ggf. einen Großteil einer nachfolgenden Erholung.
+  Ein **automatischer** Reset (Erholungsschwelle + Cooldown) wurde am
+  17.09.2026 als reines Backtest-Experiment durchgespielt
+  (`python -m dca_bot.trend_backtest --analyze-auto-reset`, Ergebnisse in
+  trading-bot-projekt.md 6i) und bewusst **nicht** umgesetzt: Über alle
+  drei Referenz-Zeiträume und 27 Parameter-Kombinationen gab es genau
+  ein auswertbares Ereignis, und aus n=1 lässt sich keine Parameterwahl
+  für eine Sicherheitssperre ableiten. Entschieden wird das mit echten
+  Daten aus der Paper-Trade-Phase - gleiches Vorgehen wie beim
+  `TREND_STOP_LIMIT_OFFSET_PCT` (siehe Abschnitt 9.5).
 - **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
   `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`, `[TREND-AUSSTIEG]` (mit
   realisiertem Gewinn/Verlust und Ausstiegsgrund),
@@ -963,7 +972,7 @@ Weitere Eigenschaften:
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions tests.test_trend_auto_reset -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -1057,6 +1066,24 @@ allen drei `main*.py` hat einen eigenen Test; er liest den Quelltext
 der jeweiligen `main()`, statt sie auszuführen, und belegt damit genau
 den Fehler, der hier realistisch ist - drei beinahe identische
 Aufrufstellen, von denen später eine vergessen wird.
+
+`test_trend_auto_reset.py` deckt den Analyse-Modus
+`--analyze-auto-reset` des Trend-Backtests ab (siehe Abschnitt 9.4 und
+trading-bot-projekt.md 6i). Dass ein reiner Analyse-Modus Tests bekommt,
+hat denselben Grund wie bei den Entscheidungsfunktionen von Grid und
+Allocator: Auf dieser Rechnung soll eine Strategie-Entscheidung beruhen,
+und sie ist die einzige Grundlage dafür - anders als beim Live-Code
+fällt ein Fehler hier durch nichts anderes auf. Geprüft werden vor allem
+drei Aussagen: dass die UND-Verknüpfung von Erholungsschwelle und
+Cooldown wirklich ein UND ist (jede Bedingung allein reicht
+nachweislich nicht - zu einem ODER verrutscht wäre es eine stille, im
+Ergebnis aber gravierende Änderung), dass der Anker der Erholung der
+tatsächliche Ausstiegskurs ist und nicht die rechnerische Stop-Schwelle
+(mit einem eigenen Test für die *Verdrahtung*, nicht nur für die
+Rechnung), und dass ein Wiedereinstieg über seinen Ausstiegsgrund als
+"falsch" gilt und nicht über das Vorzeichen seiner PnL - dazu die
+Gegenprobe mit einem Wiedereinstieg, der Verlust macht und trotzdem
+nicht als falsch zählt.
 
 ## 13. Nächste Ausbaustufen (siehe trading-bot-projekt.md)
 
