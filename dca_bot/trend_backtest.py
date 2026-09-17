@@ -18,6 +18,19 @@ nicht die bestmögliche Kurve für genau diese drei Zeiträume zu finden.
 Ausführen mit:  python -m dca_bot.trend_backtest
 (ohne Argumente: läuft automatisch über drei Referenz-Zeiträume -
 2022 Bärenmarkt, 2023 Erholung, 2021 Seitwärts/Konsolidierung)
+
+Zwei zusätzliche ANALYSE-Modi, die beide NICHT das Live-Verhalten
+abbilden und es auch nicht verändern (gleiches Muster: eigener Schalter,
+eigene Tabelle, klar als Analyse gekennzeichnet):
+
+- `--analyze-stop-limit-reliability` (aus dem K3-Fix, siehe
+  analyze_stop_limit_reliability)
+- `--analyze-auto-reset` (siehe AutoResetParams und
+  print_auto_reset_table): spielt einen ECHTEN automatischen
+  Stop-Loss-Reset mit Erholungsschwelle und Cooldown durch. Der
+  Live-Bot resettet weiterhin NIE automatisch (siehe TrendStopLoss in
+  trend_risk.py) - das hier ist die Recherche zu Punkt 16 der
+  Verbesserungsvorschläge, keine Implementierung.
 """
 
 from __future__ import annotations
@@ -56,6 +69,10 @@ class TrendBacktestResult:
     buy_and_hold_return_pct: float
     stop_loss_paused_at_end: bool
     trade_log: list[dict] = field(default_factory=list)
+    # Nur gesetzt, wenn der Lauf mit `auto_reset` lief (siehe
+    # AutoResetParams) - sonst None, also unverändert für jeden
+    # bisherigen Aufrufer.
+    auto_reset_stats: "AutoResetStats | None" = None
 
 
 def _extended_start_date(start_date: str, slow_period: int) -> str:
@@ -214,6 +231,125 @@ def analyze_stop_limit_reliability(
     )
 
 
+@dataclass(frozen=True)
+class AutoResetParams:
+    """
+    Parameter eines ECHTEN automatischen Stop-Loss-Resets - NUR für die
+    Analyse (`--analyze-auto-reset`), NICHT das Live-Verhalten.
+
+    Der Live-Bot hebt seinen Stop-Loss-Latch ausschließlich manuell auf
+    (`python -m dca_bot.reset_trend_stop_loss`, siehe TrendStopLoss in
+    trend_risk.py). Diese Klasse verändert daran nichts - sie
+    parametrisiert nur die Simulation eines Mechanismus, den es im
+    Produktivcode bewusst nicht gibt.
+
+    Abgrenzung zum älteren `reset_cooldown_days` (siehe
+    run_trend_backtest): Das simuliert einen MENSCHEN, der stur alle X
+    Tage manuell zurücksetzt - eine rein zeitliche Regel ohne jeden
+    Bezug zum Kurs. Genau daraus stammt die Zahl in
+    trading-bot-projekt.md Abschnitt 6 (2023: ~55 % statt ~13 % bei
+    14 Tagen). Sie beantwortet aber nicht die eigentliche Frage, denn
+    "der Mensch schaut alle zwei Wochen drauf" ist kein Mechanismus mit
+    Parametern, die man begründen könnte.
+
+    Hier dagegen zwei konkrete, konfigurierbare Bedingungen:
+
+    - `recovery_threshold_pct`: Der Preis muss um X % ÜBER den
+      Auslösepreis des Stop-Loss gestiegen sein.
+    - `cooldown_days`: Seit dem Stop-Loss-Exit müssen mindestens so
+      viele Tage vergangen sein, bevor der Latch überhaupt geprüft wird.
+
+    **Beide Bedingungen müssen erfüllt sein (UND, nicht ODER)** - siehe
+    `_auto_reset_is_due`. Das ist der eigentliche Punkt des Experiments:
+    Jede Bedingung für sich hat eine offensichtliche Lücke. Eine reine
+    Erholungsschwelle greift auch bei einem Ein-Tages-Sprung direkt nach
+    dem Exit (klassischer Dead-Cat-Bounce), ein reiner Cooldown ist
+    wieder nur die Zeitregel von oben, bloß mit anderem Namen. Erst die
+    Kombination ist die Whipsaw-Absicherung, um die es bei der
+    Latch-Entscheidung überhaupt geht.
+    """
+
+    recovery_threshold_pct: float
+    cooldown_days: int
+
+
+@dataclass
+class AutoResetStats:
+    """
+    Was der simulierte Auto-Reset in einem Lauf tatsächlich ausgelöst hat.
+
+    `num_reentries` zählt Einstiege, die es OHNE Auto-Reset nicht
+    gegeben hätte. Die Zuordnung ist dabei exakt und keine Schätzung:
+    Ohne automatischen Reset hält der Latch bis zum Ende des
+    Backtest-Zeitraums (er wird nie aufgehoben, es gibt in der
+    Simulation keinen Menschen). Nach dem ERSTEN Stop-Loss-Exit ist
+    damit jeder weitere Einstieg zwangsläufig einer, den erst der
+    Auto-Reset ermöglicht hat.
+
+    Die drei folgenden Zahlen teilen diese Wiedereinstiege nach ihrem
+    Ausgang auf - und `num_reentries_stopped_out` ist die Zahl, um die
+    es geht: der WHIPSAW-Fall.
+
+    **Definition "falscher Wiedereinstieg": ein Wiedereinstieg, der
+    selbst wieder im Stop-Loss endet** (`exit_reason == "stop_loss"`),
+    statt regulär per Signal-Umkehr geschlossen zu werden. Das ist
+    bewusst keine Näherung, sondern genau der befürchtete Vorgang: Der
+    Bot steigt in eine Erholung ein, die keine war, und der Kurs fällt
+    weiter, bis der Stop-Loss erneut greift. Ein Wiedereinstieg, der
+    dagegen per Signal-Umkehr endet, hat sich als richtige Entscheidung
+    erwiesen - unabhängig davon, wie kurz er lief und ob er Gewinn
+    gemacht hat. Ein Verlust allein macht ihn nicht "falsch"; die Frage
+    des Latches ist nicht "hat sich der Trade gelohnt", sondern "war der
+    Wiedereinstieg in einen noch laufenden Abwärtstrend hinein".
+
+    `num_reentries_still_open` wird eigens ausgewiesen, statt still bei
+    den unauffälligen mitzulaufen: Ein am Periodenende offener
+    Wiedereinstieg hat schlicht noch keinen Ausgang, und ihn als
+    "nicht falsch" zu zählen wäre eine Aussage, die die Daten nicht
+    hergeben. Die drei Zahlen summieren sich zu `num_reentries`.
+    """
+
+    num_auto_resets: int = 0
+    num_reentries: int = 0
+    num_reentries_stopped_out: int = 0
+    num_reentries_exited_by_signal: int = 0
+    num_reentries_still_open: int = 0
+
+
+def _auto_reset_is_due(
+    params: AutoResetParams,
+    days_since_exit: int,
+    anchor_price: float | None,
+    price: float,
+) -> bool:
+    """
+    Ob der Latch nach einem Stop-Loss-Exit automatisch aufgehoben würde -
+    NUR Analyse, siehe AutoResetParams.
+
+    `anchor_price` ist der Auslösepreis des letzten Stop-Loss-Exits, also
+    der Kurs, zu dem die Position tatsächlich geschlossen wurde - NICHT
+    die rechnerische Schwelle `entry_price * (1 - stop_loss_pct/100)`.
+    Beide fallen im Backtest oft, aber nicht immer zusammen: Fällt der
+    Tagesschlusskurs unter die Schwelle durch, liegt der tatsächliche
+    Ausstieg darunter. Der Ausstiegskurs ist hier die richtige Wahl, und
+    zwar aus einem praktischen Grund: Eine spätere Live-Umsetzung müsste
+    denselben Anker verwenden können, und `TrendStopLoss.pause()`
+    (trend_risk.py) schreibt genau diesen Wert bereits als `exit_price`
+    in die Latch-Datei. Der Mechanismus bräuchte also keinen neuen
+    Zustand - nur eine Auswertung dessen, was ohnehin schon dasteht.
+
+    Die UND-Verknüpfung steht bewusst hier als eigene, testbare Funktion
+    und nicht als Bedingung mitten in der Backtest-Schleife: Sie IST die
+    Frage des Experiments, und sie später versehentlich zu einem ODER zu
+    verschieben wäre eine stille, im Ergebnis aber gravierende Änderung.
+    """
+    if anchor_price is None or anchor_price <= 0:
+        return False
+    if days_since_exit < params.cooldown_days:
+        return False
+    return price >= anchor_price * (1 + params.recovery_threshold_pct / 100)
+
+
 def run_trend_backtest(
     klines: list[dict],
     symbol: str,
@@ -225,6 +361,7 @@ def run_trend_backtest(
     stop_loss_pct: float,
     fee_pct: float,
     reset_cooldown_days: int | None = None,
+    auto_reset: AutoResetParams | None = None,
 ) -> TrendBacktestResult:
     """
     Simuliert die exakt gleiche Entscheidungslogik wie die Live-Strategie
@@ -240,16 +377,39 @@ def run_trend_backtest(
     Menschen, der periodisch auf die Telegram-Nachricht reagiert und
     manuell zurücksetzt. Default None = exaktes Live-Verhalten (Pause
     hält bis zum Ende des Backtest-Zeitraums an).
+
+    `auto_reset`: ebenfalls NUR Analyse (siehe AutoResetParams) - ein
+    echter, parametrisierter Auto-Reset-Mechanismus statt der reinen
+    Zeitregel oben. Default None = unverändertes Live-Verhalten.
+
+    Beide Reset-Parameter gleichzeitig zu setzen ist ein Fehler und
+    wird abgewiesen: Es wären zwei konkurrierende Regeln für denselben
+    Latch, und jede Zahl aus so einem Lauf ließe sich keiner von beiden
+    zuordnen.
     """
     if not klines:
         raise ValueError("Keine Kursdaten zum Backtesten vorhanden.")
+
+    if reset_cooldown_days is not None and auto_reset is not None:
+        raise ValueError(
+            "reset_cooldown_days und auto_reset schließen sich aus - der "
+            "eine simuliert einen periodisch manuell zurücksetzenden "
+            "Menschen, der andere einen echten Mechanismus. Zusammen "
+            "wäre das Ergebnis keiner von beiden Regeln zuzuordnen."
+        )
 
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     generator = TrendSignalGenerator(ema_fast_period, ema_slow_period, min_gap_pct)
 
     open_trade: dict | None = None
     stop_loss_paused = False
+    # Tage seit dem letzten Stop-Loss-Exit. Wird von BEIDEN Analyse-Modi
+    # genutzt - unkritisch, weil sie sich oben gegenseitig ausschließen.
     days_since_pause = 0
+    # Auslösepreis des letzten Stop-Loss-Exits, Anker der
+    # Erholungsschwelle (siehe _auto_reset_is_due).
+    auto_reset_anchor_price: float | None = None
+    auto_reset_stats = AutoResetStats() if auto_reset is not None else None
     realized_total = 0.0
     trade_log: list[dict] = []
     equity_curve: list[float] = []
@@ -280,6 +440,21 @@ def run_trend_backtest(
                 stop_loss_paused = False
                 days_since_pause = 0
 
+        # NUR Analyse-Modus (siehe AutoResetParams): echter automatischer
+        # Reset aus Erholungsschwelle UND Cooldown. Bewusst an derselben
+        # Stelle wie der simulierte manuelle Reset oben, also VOR der
+        # Stop-Loss- und Signalauswertung dieses Tages: Ein Mensch, der
+        # morgens zurücksetzt, gibt den Zyklus desselben Tages ebenfalls
+        # frei - der Einstieg darf also noch in dieser Kerze fallen.
+        if stop_loss_paused and auto_reset is not None:
+            days_since_pause += 1
+            if _auto_reset_is_due(
+                auto_reset, days_since_pause, auto_reset_anchor_price, price
+            ):
+                stop_loss_paused = False
+                days_since_pause = 0
+                auto_reset_stats.num_auto_resets += 1
+
         # Stop-Loss hat Priorität bei Gleichzeitigkeit, analog zur Live-Strategie.
         if open_trade is not None and is_stop_loss_hit(open_trade["entry_price"], price, stop_loss_pct):
             proceeds = open_trade["quantity"] * price * (1 - fee_pct / 100)
@@ -294,11 +469,18 @@ def run_trend_backtest(
                     "exit_reason": "stop_loss",
                     "pnl": pnl,
                     "quantity": open_trade["quantity"],
+                    "is_reentry": open_trade["is_reentry"],
                 }
             )
+            if open_trade["is_reentry"]:
+                auto_reset_stats.num_reentries_stopped_out += 1
             open_trade = None
             stop_loss_paused = True
             days_since_pause = 0
+            # Anker der Erholungsschwelle ist der tatsächliche
+            # Ausstiegskurs, nicht die rechnerische Schwelle - siehe
+            # _auto_reset_is_due.
+            auto_reset_anchor_price = price
         else:
             action = decide_action(confirmed, open_trade is not None, stop_loss_paused)
             if action == "EXIT_SIGNAL" and open_trade is not None:
@@ -314,17 +496,32 @@ def run_trend_backtest(
                         "exit_reason": "signal",
                         "pnl": pnl,
                         "quantity": open_trade["quantity"],
+                        "is_reentry": open_trade["is_reentry"],
                     }
                 )
+                if open_trade["is_reentry"]:
+                    auto_reset_stats.num_reentries_exited_by_signal += 1
                 open_trade = None
             elif action == "ENTER":
                 quantity = (amount_per_trade * (1 - fee_pct / 100)) / price
+                # Ohne Auto-Reset hält der Latch nach dem ersten
+                # Stop-Loss-Exit bis zum Periodenende - jeder Einstieg
+                # nach einem Auto-Reset ist deshalb per Konstruktion
+                # einer, den es sonst nicht gegeben hätte (siehe
+                # AutoResetStats).
+                is_reentry = (
+                    auto_reset_stats is not None
+                    and auto_reset_stats.num_auto_resets > 0
+                )
                 open_trade = {
                     "entry_price": price,
                     "quantity": quantity,
                     "quote_spent": amount_per_trade,
                     "entry_date": date_str,
+                    "is_reentry": is_reentry,
                 }
+                if is_reentry:
+                    auto_reset_stats.num_reentries += 1
 
         unrealized = 0.0
         if open_trade is not None:
@@ -352,6 +549,11 @@ def run_trend_backtest(
     open_position_unrealized_pnl = None
     if open_trade is not None:
         open_position_unrealized_pnl = open_trade["quantity"] * last_price - open_trade["quote_spent"]
+        # Ein am Periodenende offener Wiedereinstieg hat noch keinen
+        # Ausgang - er zählt weder als falsch noch als bestätigt, sondern
+        # eigens (siehe AutoResetStats).
+        if open_trade["is_reentry"]:
+            auto_reset_stats.num_reentries_still_open += 1
 
     return TrendBacktestResult(
         symbol=symbol,
@@ -371,6 +573,7 @@ def run_trend_backtest(
         buy_and_hold_return_pct=buy_and_hold_return_pct,
         stop_loss_paused_at_end=stop_loss_paused,
         trade_log=trade_log,
+        auto_reset_stats=auto_reset_stats,
     )
 
 
@@ -450,7 +653,43 @@ def main() -> None:
         default="0.5,1.0,2.0",
         help="Kommagetrennte Offset-Werte in %% für --analyze-stop-limit-reliability.",
     )
+    parser.add_argument(
+        "--analyze-auto-reset",
+        action="store_true",
+        help=(
+            "NUR Analyse, NICHT das Live-Verhalten: spielt einen echten "
+            "automatischen Stop-Loss-Reset mit Erholungsschwelle UND "
+            "Cooldown über eine kleine Parameter-Grid-Suche durch und "
+            "stellt das Ergebnis dem unveränderten Verhalten ohne "
+            "Auto-Reset gegenüber (siehe AutoResetParams)."
+        ),
+    )
+    parser.add_argument(
+        "--auto-reset-recovery-pcts",
+        default="2,5,10",
+        help=(
+            "Kommagetrennte Erholungsschwellen in %% über dem "
+            "Stop-Loss-Auslösepreis für --analyze-auto-reset."
+        ),
+    )
+    parser.add_argument(
+        "--auto-reset-cooldown-days",
+        default="3,7,14",
+        help=(
+            "Kommagetrennte Cooldown-Werte in Tagen seit dem "
+            "Stop-Loss-Exit für --analyze-auto-reset."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.analyze_auto_reset and args.simulate_reset_after_days is not None:
+        parser.error(
+            "--analyze-auto-reset und --simulate-reset-after-days schließen "
+            "sich aus: Der Referenzwert 'Rendite ohne Auto-Reset' muss das "
+            "unveränderte Live-Verhalten sein (Latch hält bis zum "
+            "Periodenende). Mit einem gleichzeitig simulierten periodischen "
+            "Reset wäre er das nicht mehr."
+        )
 
     if args.simulate_reset_after_days is not None:
         print(
@@ -476,6 +715,27 @@ def main() -> None:
         )
     stop_limit_offsets = [float(v) for v in args.stop_limit_offsets.split(",")]
     reliability_rows: list[tuple[str, StopLimitReliabilityResult]] = []
+
+    auto_reset_grid: list[AutoResetParams] = []
+    auto_reset_rows: list[AutoResetRow] = []
+    if args.analyze_auto_reset:
+        auto_reset_grid = [
+            AutoResetParams(recovery_threshold_pct=recovery, cooldown_days=cooldown)
+            for recovery in (
+                float(v) for v in args.auto_reset_recovery_pcts.split(",")
+            )
+            for cooldown in (
+                int(v) for v in args.auto_reset_cooldown_days.split(",")
+            )
+        ]
+        print(
+            "\n*** ANALYSE-MODUS: automatischer Stop-Loss-Reset "
+            f"({len(auto_reset_grid)} Parameter-Kombinationen je Zeitraum). "
+            "Das ist ein EXPERIMENT und NICHT das Live-Verhalten - der Bot "
+            "resettet seinen Stop-Loss-Latch weiterhin nie automatisch "
+            "(siehe TrendStopLoss in trend_risk.py). Die Spalte 'ohne "
+            "Auto-Reset' ist dieses unveränderte Verhalten. ***"
+        )
 
     for label, start, end in periods:
         print(f"\n\n{'#' * 60}")
@@ -507,11 +767,45 @@ def main() -> None:
                     result.trade_log, klines, args.stop_loss_pct, stop_limit_offsets, args.fee_pct
                 )
                 reliability_rows.append((label, reliability))
+
+            # `result` ist hier per Konstruktion der Referenzlauf: Der
+            # Modus verträgt sich nicht mit --simulate-reset-after-days
+            # (siehe parser.error oben), also lief er ohne jeden Reset -
+            # genau das unveränderte Live-Verhalten. Ihn ein zweites Mal
+            # zu rechnen wäre nicht nur überflüssig, sondern eine zweite
+            # Gelegenheit, versehentlich etwas anderes zu vergleichen.
+            for params in auto_reset_grid:
+                with_reset = run_trend_backtest(
+                    klines,
+                    symbol=args.symbol,
+                    start_date=start,
+                    ema_fast_period=args.ema_fast,
+                    ema_slow_period=args.ema_slow,
+                    min_gap_pct=args.min_gap_pct,
+                    amount_per_trade=args.amount,
+                    stop_loss_pct=args.stop_loss_pct,
+                    fee_pct=args.fee_pct,
+                    auto_reset=params,
+                )
+                auto_reset_rows.append(
+                    AutoResetRow(
+                        label=label,
+                        params=params,
+                        realized_pct_with=with_reset.total_pnl_pct,
+                        unrealized_pct_with=_unrealized_pct(with_reset, args.amount),
+                        realized_pct_without=result.total_pnl_pct,
+                        unrealized_pct_without=_unrealized_pct(result, args.amount),
+                        stats=with_reset.auto_reset_stats,
+                    )
+                )
         except ValueError as exc:
             print(f"Übersprungen: {exc}")
 
     if args.analyze_stop_limit_reliability:
         print_stop_limit_reliability_table(reliability_rows, stop_limit_offsets)
+
+    if args.analyze_auto_reset:
+        print_auto_reset_table(auto_reset_rows)
 
 
 def print_stop_limit_reliability_table(
@@ -567,6 +861,148 @@ def print_stop_limit_reliability_table(
         "Zeitraum/Offset' - siehe die 'ungef.'-Spalten für die genaue Anzahl."
     )
     print(f"{'#' * 70}")
+
+
+def _unrealized_pct(result: TrendBacktestResult, amount_per_trade: float) -> float:
+    """
+    Unrealisierte PnL einer am Periodenende offenen Position, relativ zur
+    Positionsgröße - also auf derselben Basis wie `total_pnl_pct`, damit
+    sich beide addieren lassen.
+
+    Keine offene Position ergibt 0.0 und nicht None: Hier wird addiert,
+    und "es steht nichts mehr offen" ist wirtschaftlich genau ein
+    Beitrag von null.
+    """
+    if result.open_position_unrealized_pnl is None or amount_per_trade <= 0:
+        return 0.0
+    return result.open_position_unrealized_pnl / amount_per_trade * 100
+
+
+@dataclass
+class AutoResetRow:
+    """
+    Eine Zeile der Auto-Reset-Tabelle: ein Zeitraum, eine
+    Parameter-Kombination, plus der unveränderte Referenzwert.
+
+    Realisierter und unrealisierter Anteil werden GETRENNT gehalten und
+    erst in der Ausgabe addiert. Das ist hier kein Detail, sondern die
+    Voraussetzung dafür, dass die Tabelle überhaupt etwas zeigt: Der
+    gesamte Effekt des Auto-Resets in 2023 steckt in einer am
+    Periodenende noch OFFENEN Position. Eine Tabelle, die wie
+    `print_report` nur die realisierte PnL ausweist, zeigt für jede
+    Parameter-Kombination denselben Wert wie ohne Reset - und damit das
+    glatte Gegenteil des tatsächlichen Ergebnisses.
+
+    Die Summe ist zugleich die Größe, auf die sich die bereits
+    dokumentierte Zahl aus trading-bot-projekt.md Abschnitt 6 bezieht
+    (2023: ~55 %) - nur so sind die Spalten mit ihr vergleichbar.
+    """
+
+    label: str
+    params: AutoResetParams
+    realized_pct_with: float
+    unrealized_pct_with: float
+    realized_pct_without: float
+    unrealized_pct_without: float
+    stats: AutoResetStats
+
+    @property
+    def total_pct_with(self) -> float:
+        return self.realized_pct_with + self.unrealized_pct_with
+
+    @property
+    def total_pct_without(self) -> float:
+        return self.realized_pct_without + self.unrealized_pct_without
+
+
+def print_auto_reset_table(rows: list[AutoResetRow]) -> None:
+    print(f"\n\n{'#' * 100}")
+    print("# Automatischer Stop-Loss-Reset - EXPERIMENT, NICHT das Live-Verhalten")
+    print(f"{'#' * 100}")
+    print(
+        "Der Live-Bot hebt seinen Stop-Loss-Latch weiterhin AUSSCHLIESSLICH manuell auf\n"
+        "(python -m dca_bot.reset_trend_stop_loss, siehe TrendStopLoss in trend_risk.py).\n"
+        "Diese Tabelle beantwortet nur die Frage, was ein automatischer Reset gebracht\n"
+        "hätte - sie ändert nichts am Produktivcode und ist keine Empfehlung.\n"
+        "\n"
+        "Der Latch wird aufgehoben, sobald BEIDE Bedingungen erfüllt sind (UND, nicht ODER):\n"
+        "  - Erholung: Preis >= Auslösepreis des Stop-Loss * (1 + Erholung%/100)\n"
+        "  - Cooldown: mindestens so viele Tage seit dem Stop-Loss-Exit\n"
+        "\n"
+        "'Rendite' ist realisierte PLUS unrealisierte PnL relativ zur Positionsgröße - und\n"
+        "das ist hier wesentlich, nicht kosmetisch: Der gesamte Effekt des Auto-Resets in\n"
+        "2023 steckt in einer am Periodenende noch offenen Position. Nur die realisierte\n"
+        "PnL auszuweisen (wie im Hauptreport oben) zeigte für jede Kombination denselben\n"
+        "Wert wie ohne Reset. Die Aufteilung steht je Zeitraum unter der Tabelle.\n"
+        "\n"
+        "'Resets' ist, wie oft der Latch automatisch aufgehoben wurde. Die Spalte steht\n"
+        "neben den Wiedereinstiegen, weil sie zwei sehr verschiedene Nullen unterscheidet:\n"
+        "'Latch nie aufgehoben' gegen 'aufgehoben, aber danach kam kein Einstiegssignal'.\n"
+        "\n"
+        "'Wiedereinstiege' sind Einstiege, die es ohne Auto-Reset nicht gegeben hätte (ohne\n"
+        "ihn hält der Latch bis zum Periodenende). 'davon falsch' = Wiedereinstiege, die\n"
+        "selbst wieder im Stop-Loss endeten statt per Signal-Umkehr - genau der Whipsaw,\n"
+        "gegen den der Latch gebaut ist. Ein Wiedereinstieg, der per Signal-Umkehr endet,\n"
+        "war die richtige Entscheidung, auch wenn er Verlust gemacht hat. Ein am Ende noch\n"
+        "offener Wiedereinstieg hat keinen Ausgang und wird eigens als 'offen' ausgewiesen."
+    )
+
+    header = (
+        f"{'Zeitraum':<32} | {'Erhol.':>6} | {'Cool.':>5} | {'Resets':>6} | "
+        f"{'Rendite m. Reset':>16} | {'Rendite o. Reset':>16} | "
+        f"{'Wiedereinst.':>12} | {'davon falsch':>13}"
+    )
+    print(f"\n{header}")
+    print("-" * len(header))
+
+    previous_label: str | None = None
+    for row in rows:
+        if previous_label is not None and row.label != previous_label:
+            print("-" * len(header))
+        previous_label = row.label
+
+        open_note = ""
+        if row.stats.num_reentries_still_open:
+            open_note = f" ({row.stats.num_reentries_still_open} offen)"
+
+        print(
+            f"{row.label:<32} | {row.params.recovery_threshold_pct:>5.1f}% | "
+            f"{row.params.cooldown_days:>5} | {row.stats.num_auto_resets:>6} | "
+            f"{row.total_pct_with:>+15.2f}% | {row.total_pct_without:>+15.2f}% | "
+            f"{row.stats.num_reentries:>12} | "
+            f"{str(row.stats.num_reentries_stopped_out) + open_note:>13}"
+        )
+
+    print("-" * len(header))
+
+    # Aufteilung realisiert/unrealisiert - bewusst je ZEITRAUM und nicht
+    # je Zeile: Die Werte wiederholen sich innerhalb eines Zeitraums, und
+    # 27 identische Fußnoten würden die eine Aussage begraben, auf die es
+    # ankommt.
+    print("\nAufteilung realisiert / unrealisiert (am Periodenende offene Position):")
+    seen: set[str] = set()
+    for row in rows:
+        key = (
+            f"{row.label}|{row.realized_pct_with:.4f}|{row.unrealized_pct_with:.4f}"
+            f"|{row.realized_pct_without:.4f}|{row.unrealized_pct_without:.4f}"
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        print(
+            f"  {row.label:<32} mit Reset: {row.realized_pct_with:+.2f}% realisiert "
+            f"{row.unrealized_pct_with:+.2f}% unrealisiert | ohne Reset: "
+            f"{row.realized_pct_without:+.2f}% realisiert "
+            f"{row.unrealized_pct_without:+.2f}% unrealisiert"
+        )
+
+    print(
+        "\nLesehilfe: 0 Resets heißt, dass der Stop-Loss im Zeitraum nie ausgelöst hat oder\n"
+        "die beiden Bedingungen nie gemeinsam erfüllt waren - dann ist die Rendite\n"
+        "zwangsläufig identisch zum Referenzwert. 0 Wiedereinstiege bei Resets > 0 heißt\n"
+        "dagegen, dass der Latch zwar fiel, danach aber kein bestätigtes Aufwärtssignal kam."
+    )
+    print(f"{'#' * 100}")
 
 
 if __name__ == "__main__":
