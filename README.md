@@ -24,6 +24,16 @@ Alle vier teilen sich nur die Binance-/Telegram-Zugangsdaten in der `.env` -
 Zustand (Trade-Historie, Notaus, Stop-Loss) ist für jeden Bot komplett
 getrennt, sie können unabhängig voneinander (auch gleichzeitig) laufen.
 
+## Dashboard-App
+
+Ein separates, read-only Web-Dashboard zur Anzeige der Bot-Stats (aktuelle
+Positionen, Gesamtgewinn/-verlust, Trade-Export für die Steuererklärung)
+liegt in einem eigenen Repository:
+[crypto-bot-app](https://github.com/EliasNein/crypto-bot-app).
+
+Komplett unabhängig von diesem Projekt - liest nur die Ledger-Dateien, hat
+keinen Zugriff auf API-Keys oder Trading-Funktionen.
+
 ## 1. Voraussetzungen
 
 - Python 3.10+
