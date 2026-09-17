@@ -140,6 +140,8 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 
 **Bewusst noch offen:** Die konkreten `*_AMOUNT_PER_LEVEL`/`*_AMOUNT_PER_TRADE`-Werte sowie bei Grid die Preisspanne/`GRID_SPACING_PCT` werden NICHT jetzt schon festgelegt – hängen vom aktuellen BTC-Kurs zum Zeitpunkt des Live-Starts sowie von den Erkenntnissen aus dem noch bevorstehenden monatelangen Paper-Trade-Test (mit aktiviertem Allocator-Opt-in, geplant nach Abschluss der übrigen Live-Gang-Vorbereitungen aus 6d) ab. Positionsgrößen-Kalibrierung ist als eigener Schritt kurz vor dem tatsächlichen Live-Start eingeplant, nicht heute schon mit möglicherweise überholten Platzhalter-Werten.
 
+*(Aktualisiert 17.09.2026: Für den **Grid-Bot** trifft dieser Satz nicht mehr zu — `GRID_AMOUNT_PER_LEVEL` ist auf dem Homeserver auf 9,38 € gesetzt, siehe „W16 umgesetzt" in 6g. Das ist ausdrücklich keine Kurs-Kalibrierung, sondern das Einhalten der 150-€-Obergrenze aus diesem Abschnitt, die ohnehin feststand: Der Grid-Bot hat bewusst kein Tageslimit, Stufenzahl × Betrag ist dort die einzige Bremse, und sie lag mit 240 € um 60 % daneben. Preisspanne und `GRID_SPACING_PCT` bleiben unverändert offen — sie hängen am Kursniveau und verschieben, anders als der Betrag, auch das Strategieprofil. Für `DCA_QUOTE_AMOUNT` und `TREND_AMOUNT_PER_TRADE` gilt der Satz vollständig weiter.)*
+
 ---
 
 ## 6. Nächste Schritte / Fortschritts-Log
@@ -540,6 +542,8 @@ Der erste Anlauf dieser Messung war selbst fehlerhaft und meldete für jede Muta
 
 Keine Code-Änderung und keine Änderung an den Werten — laut 5b ist die Positionsgrößen-Kalibrierung eine bewusste, spätere Entscheidung. Hier steht nur die Rechnung, damit sie vorliegt.
 
+*(Aktualisiert 17.09.2026: Der erste Satz gilt für den Homeserver nicht mehr — die erste Stellschraube aus der Tabelle unten ist dort inzwischen angewendet, siehe „W16 umgesetzt" direkt im Anschluss. Die Rechnung selbst bleibt unverändert stehen, sie ist die Grundlage der Änderung.)*
+
 Die Formel steckt bereits im Code (`grid_strategy.py`, Log-Zeile beim Start): `(Anzahl Stufen − 1) × GRID_AMOUNT_PER_LEVEL`. Die oberste Stufe ist reine Verkaufsstufe, `find_triggered_buy_levels()` iteriert über `levels[:-1]` — es gibt immer eine Kaufstufe weniger als Stufen.
 
 | | Spanne | Abstand | Stufen | Kaufstufen | Betrag/Stufe | Max. Kapitalbindung |
@@ -550,7 +554,9 @@ Die Formel steckt bereits im Code (`grid_strategy.py`, Log-Zeile beim Start): `(
 
 **Ergebnis: Die aktuelle Konfiguration passt nicht zum geplanten Topf.** Der VPS liegt 70 % darüber, der Homeserver 60 %.
 
-Datenherkunft, damit klar ist was gemessen und was abgeleitet ist: Die VPS-Zeile ist direkt belegt — dieselbe Konfiguration lief am 10.09. lokal, und `logs/grid_bot.log` enthält wörtlich `Grid initialisiert: 18 Stufen von 68000.00 bis 87585.38 (Abstand 1.50%, max. Kapitalbindung ca. 255.00)`. Die Homeserver-Zeile ist **abgeleitet**: 6e protokolliert nur „Grid mit 17 Stufen initialisiert", und 17 Stufen ergeben sich exakt aus den `.env.example`-Werten (70.000–90.000 @ 1,5 %) — plausibel, weil der Homeserver frisch aus dem Repo aufgesetzt wurde. Gegenzuprüfen mit `grep -E 'GRID_(LOWER|UPPER|SPACING|AMOUNT)' .env` bzw. `grep "Grid initialisiert" logs/grid_bot.log`.
+Datenherkunft, damit klar ist was gemessen und was abgeleitet ist: Die VPS-Zeile ist direkt belegt — dieselbe Konfiguration lief am 10.09. lokal, und `logs/grid_bot.log` enthält wörtlich `Grid initialisiert: 18 Stufen von 68000.00 bis 87585.38 (Abstand 1.50%, max. Kapitalbindung ca. 255.00)`. Die Homeserver-Zeile war zum Zeitpunkt dieser Rechnung **abgeleitet**: 6e protokolliert nur „Grid mit 17 Stufen initialisiert", und 17 Stufen ergeben sich exakt aus den `.env.example`-Werten (70.000–90.000 @ 1,5 %) — plausibel, weil der Homeserver frisch aus dem Repo aufgesetzt wurde. Gegenzuprüfen mit `grep -E 'GRID_(LOWER|UPPER|SPACING|AMOUNT)' .env` bzw. `grep "Grid initialisiert" logs/grid_bot.log`.
+
+*(Aktualisiert 17.09.2026: Die Homeserver-Zeile ist **inzwischen direkt belegt**, der Vorbehalt „abgeleitet" ist damit erledigt. Der Neustart nach der Betragsänderung (siehe „W16 umgesetzt" unten) hat wörtlich geloggt: `Grid initialisiert: 17 Stufen von 70000.00 bis 88828.99 (Abstand 1.50%, max. Kapitalbindung ca. 150.08)`. Bestätigt sind damit die Struktur — 17 Stufen, also 16 Kaufstufen — und die Spanne, deren Obergrenze mit 88.828,99 genau dort liegt, wo die Tabelle sie ausweist. Die 240,00 € der Tabelle waren der Stand mit 15,00 € pro Stufe und sind seit der Änderung historisch; die Rechnung als solche stimmt, nur der Faktor ist ein anderer. Dass die Prüfung überhaupt nötig war, ist der Punkt: Die 9,38 € stehen auf genau dieser Stufenzahl — wären es 18 Stufen gewesen, läge die Bindung bei 17 × 9,38 = 159,46 € und der Topf wäre weiterhin überschritten.)*
 
 Drei Punkte, die an dieser Rechnung wichtig sind:
 
@@ -567,6 +573,14 @@ Stellschrauben, falls 150 € der Zielwert bleibt:
 | Abstand vergrößern | auf ~2,6 % bei gleicher Spanne | | weniger, dafür größere Trades |
 
 Nur die erste Zeile skaliert ausschließlich die Größe und lässt das Verhalten sonst unverändert. Bei den anderen beiden verschiebt sich, wo und wie oft der Bot überhaupt handelt — die Backtest-Ergebnisse aus Abschnitt 6 („2021 Seitwärts: 109 Trades") gälten dann nicht mehr unverändert.
+
+### W16 umgesetzt (17.09.2026)
+
+Auf dem Homeserver wurde die saubere Stellschraube aus der W16-Rechnung angewendet: `GRID_AMOUNT_PER_LEVEL` von 15,00 € auf **9,38 €** gesenkt (150 € / 16 Kaufstufen). Maximale Kapitalbindung jetzt ca. **150,08 €** statt zuvor 240 € — passt zum 150-€-Grid-Topf aus 5b. Anzahl Stufen und Spanne unverändert, damit bleiben die Backtest-Ergebnisse aus Abschnitt 6 weiterhin gültig (nur die Größe skaliert, nicht das Strategieprofil).
+
+Bewusst nur auf dem Homeserver, nicht auf dem VPS (der zum 12.10. ohnehin abgeschaltet wird). Bereits offene Grid-Positionen behalten ihren ursprünglichen Einsatz (15,00 €), nur neue Käufe nutzen den reduzierten Betrag.
+
+Kein Code-Change, reine `.env`-Anpassung plus Neustart des Grid-Bots.
 
 ### W14 — Grid ohne börsenseitigen Stop-Loss: bewusst zurückgestellt (16.09.2026)
 
