@@ -141,7 +141,8 @@ trading-bot/
 │   ├── audit_positions.py         # CLI: Bestand aller drei Bots + Kontoabgleich (nur lesend)
 │   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
-│   └── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
+│   ├── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
+│   └── fix_dry_run_quote_spent.py # CLI: einmalige Korrektur verfälschter Dry-Run-Beträge
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -979,10 +980,37 @@ Weitere Eigenschaften:
   Bots entscheiden - zwei getrennte Toleranzen für dieselbe Frage wären
   der sichere Weg zu einem Audit, das einem Bot widerspricht.
 
+### 11.2 Einmalige Datenkorrektur (Dry-Run-Beträge)
+
+```bash
+python -m dca_bot.fix_dry_run_quote_spent            # nur Bericht
+python -m dca_bot.fix_dry_run_quote_spent --apply    # schreibt
+```
+
+Einmaliges Korrektur-Werkzeug zum Fund vom 22.09.2026 (siehe
+`trading-bot-projekt.md` Abschnitt 6g): Seit dem K3-Fix quantisierten
+alle drei Bots im Dry-Run die Kaufmenge, buchten als `quote_spent` aber
+weiter den konfigurierten Rohbetrag – die weggerundete Teilmenge wurde
+nie gekauft, stand aber in der Kostenbasis. Die realisierte PnL
+geschlossener Dry-Run-Positionen wurde dadurch systematisch zu negativ
+und konnte trotz gestiegenem Kurs im Minus landen.
+
+Das Skript rechnet `quote_spent` und `realized_pnl` betroffener Einträge
+aus der tatsächlich gehaltenen Menge neu. **Ohne `--apply` wird nichts
+geschrieben**, nur berichtet. Einträge mit `dry_run: false` bleiben
+unangetastet – dort ist `quote_spent` der von der Börse gemeldete
+`cummulativeQuoteQty` und damit die Quelle der Wahrheit; fehlt das
+`dry_run`-Feld, wird ebenfalls nicht geraten, sondern gemeldet. Der Lauf
+ist idempotent (Einträge von vor dem K3-Fix sind ein No-op), legt vor dem
+Schreiben eine zeitgestempelte Kopie an und holt dabei dasselbe Lock wie
+der jeweilige Bot – er läuft also nicht neben einem laufenden Bot, dessen
+nächster Zyklus die Korrektur sonst überschriebe.
+
 ## 12. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions tests.test_trend_auto_reset -v
+python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions tests.test_trend_auto_reset \
+    tests.test_fix_dry_run_quote_spent -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten

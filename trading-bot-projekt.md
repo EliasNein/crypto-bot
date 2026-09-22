@@ -335,9 +335,68 @@ Zwei zusammenhängende Befunde, die beide erst im Echtgeld-Betrieb zugeschlagen 
 
 **Dry-Run:** Mengen werden quantisiert (damit Paper-Trade-Zahlen wie Live-Zahlen aussehen), eine Gebühr aber bewusst **nicht** simuliert – es gibt keinen Fill, ein geschätzter Satz wäre erfundene Zahl.
 
+> **Korrektur 22.09.2026: Dieser Absatz beschrieb die Änderung als vollständig, die sie nicht war.** Quantisiert wurde nur die *Menge*; der zugehörige `quote_spent` blieb in allen drei Strategien der konfigurierte Rohbetrag. Damit hielt jede simulierte Position weniger, als ihre eigene Kostenbasis behauptete. Gefunden am 22.09. an den VPS-Live-Daten, behoben am selben Tag – siehe „Folgefund aus K3" direkt unten.
+
 **Bekannte Restlücke, bewusst offen:** Antworten von `get_order()` (also der Pfad „exchange-seitige Stop-Order war bereits gefüllt") enthalten keine `fills` – dort bleibt die Verkaufsgebühr mangels Daten unberücksichtigt, der PnL dieses einen Exit-Pfads ist also weiterhin um ca. 0,1% zu optimistisch. Sauber lösbar nur über eine zusätzliche `myTrades`-Abfrage.
 
 **Tests:** 36 neue. `tests/test_order_utils.py` (22, reine Funktionen inkl. der Decimal-Off-by-one-Falle und des „Menge exakt gleich stepSize"-Falls), `tests/test_dca_fee_adjustment.py` (5), plus `TrendTradingRulesTestCase` (7) und `GridTradingRulesTestCase` (7). Beide Fake-Clients liefern jetzt realistische `fills` mit `commission`/`commissionAsset` und implementieren `get_symbol_trading_rules` – der Gebührensatz bleibt per Default 0.0, weil das exakt dem beobachteten Testnet-Verhalten entspricht; die neuen Tests setzen 0,1%. Gesamtstand: 87 Tests, alle grün.
+
+### Folgefund aus K3: `quote_spent` im Dry-Run-Kaufpfad (22.09.2026)
+
+Beim Auswerten der laufenden VPS-Live-Daten aufgefallen: mehrere geschlossene Grid-Positionen mit **negativer** `realized_pnl`, obwohl der Kurs zwischen Kauf und Verkauf gestiegen war. Kein Rundungsrest, sondern ein Vorzeichenfehler.
+
+**Der Befund.** Der K3-Fix baute in alle drei Strategien denselben Dry-Run-Zweig ein – und in alle drei denselben Fehler:
+
+```python
+quantity    = quantize_quantity(amount / price, step)   # abgerundet
+quote_spent = amount                                    # NICHT abgerundet
+```
+
+Die weggerundete Teilmenge wurde nie gekauft, stand aber trotzdem in der Kostenbasis. Die Verkaufsseite rechnet im Dry-Run korrekt mit `quantity * price` – daraus entsteht die Asymmetrie: Der Erlös folgt der quantisierten Menge, die Kosten folgen dem Wunschbetrag.
+
+**Warum das keine Nachkommastelle ist.** Bei `stepSize` 1e-5 und einem 15-USDT-Auftrag ist *eine* Mengenstufe bei BTC ≈ 80.000 rund 0,80 USDT, also bis zu ~5 % des Auftrags – mehr als der Grid-Stufenabstand von 1,5 %, den die Strategie überhaupt verdienen soll. Deshalb kippt das Vorzeichen, statt das Ergebnis nur zu verschieben.
+
+Der konkrete Beleg (Position `569fff51`):
+
+| | |
+|---|---|
+| `buy_price` / `quantity` / `quote_spent` | 79.964,55 / 0,00018 / 15,00 |
+| tatsächlicher Wert der Menge beim Kauf | **14,39** |
+| Fehler in der Kostenbasis | +0,61 (4,04 %) |
+| gebuchte `realized_pnl` | −0,36 |
+| korrekt | **+0,25** |
+
+**Alle drei Bots waren betroffen**, mit unterschiedlichem Schadensbild:
+
+| Bot | Stelle | Wirkung |
+|---|---|---|
+| Grid | `grid_strategy._process_buys()` | `realized_pnl` jeder geschlossenen Dry-Run-Position zu negativ |
+| Trend | `trend_strategy._open_position()` | dasselbe; wiegt schwerer, weil es wenige große Trades sind – und mit aktivem Allocator-Opt-in ist `amount` kleiner, dieselbe Mengenstufe macht relativ also **mehr** aus |
+| DCA | `strategy.execute_once()` | kein `realized_pnl` (verkauft nie), und der Portfolio-Stop-Loss sieht Dry-Run-Käufe gar nicht (`TradeLedger.position()` filtert sie). Aber `day_summary()` summiert über **alle** Käufe: der Bot buchte gegen sein Tageslimit einen Betrag, den er nie ausgegeben hat, und meldete ihn so auch in der Tageszusammenfassung |
+
+**Der Homeserver ist nicht betroffen, und das ist keine Glückssache.** Dort laufen echte Orders (`dry_run: false`). Ein Market-Buy geht über `quoteOrderQty` – Binance gibt den vollen Betrag aus und meldet mit `cummulativeQuoteQty` den tatsächlich belasteten. Menge und Betrag stammen damit aus derselben Quelle und passen per Konstruktion zueinander; es gibt lokal nichts nachzurechnen. Nur der Dry-Run-Pfad muss den Betrag selbst herleiten – und tat es nicht. Genau daran war der Fehler auch zu erkennen: Auf dem Homeserver sind die Werte krumm (14,526203 / 8,9345333), auf dem VPS glatt 15,00. **Ein glatter `quote_spent` neben einer quantisierten Menge ist selbst schon das Symptom.**
+
+**Ebenfalls geprüft und nicht betroffen:** die Reconciliation-Pfade aller drei Bots (schreiben immer `dry_run=False` und lesen `cummulativeQuoteQty`), `_close_from_filled_stop_order()` (kann eine Dry-Run-Position nicht erreichen – dort existiert keine Stop-Order) und **alle Backtests**: die quantisieren gar nicht, dort ist `quantity = amount/price` und `quote_spent = amount` in sich konsistent. Die in 5a/6i dokumentierten Backtest-Zahlen sind von diesem Fund also unberührt.
+
+**Umgesetzt:** In allen drei Dry-Run-Zweigen kommt `quote_spent` jetzt aus der quantisierten Menge (`quantity * price`) – die Entsprechung dessen, was ein echter Fill als `cummulativeQuoteQty` liefert. Bewusst ohne zusätzliche Rundung auf die Quote-Präzision: Nur so gilt für simulierte Trades wieder exakt `realized_pnl = quantity * (Verkauf − Kauf)`, eine Invariante, die man nachrechnen kann und die genau die verletzte Aussage ist. Die K3-Entscheidung, im Dry-Run **keine** Gebühr zu schätzen, bleibt unangetastet.
+
+**Bestehende Daten korrigiert** über ein einmaliges, versioniertes Skript `dca_bot/fix_dry_run_quote_spent.py` (im Repo statt als Wegwerf-Einzeiler, damit der Eingriff reproduzierbar und im Git-Log auffindbar ist). Es rechnet für Einträge mit `dry_run: true` den Betrag aus `quantity × Kaufpreis` und die PnL aus `quantity × Verkaufspreis − quote_spent` neu. Eigenschaften, die dabei zählten:
+
+- **Bericht ist der Default**, geschrieben wird nur mit `--apply` – gleiche Haltung wie `audit_positions.py`.
+- **`dry_run` wird nie geraten.** `false` bleibt unangetastet (dort ist `quote_spent` die Ground Truth der Börse; es zu überschreiben wäre genau der umgekehrte Fehler), ein fehlendes Feld ebenfalls, mit lauter Meldung – dieselbe Regel wie `[GRID-POSITION-UNKLAR]`.
+- **Idempotent per Konstruktion:** geschrieben wird nur oberhalb einer Toleranz. Für Einträge von **vor** dem K3-Fix ist die Neuberechnung ein No-op (die Menge war dort unquantisiert, die Rückrechnung trifft den Ausgangswert). Es braucht deshalb weder Datumsfilter noch „schon korrigiert"-Markierung. An den lokalen Ledgern vom 10.09. verifiziert: 0 Änderungen.
+- **Läuft nicht neben einem laufenden Bot** – vor dem Schreiben wird dasselbe Lock geholt, das der Bot hält. Sonst überschriebe dessen nächster Zyklus die Korrektur mit seinem eigenen Stand.
+- **Zeitgestempelte Kopie vor dem Schreiben.** Das weicht bewusst von der Entscheidung in 6i ab, auf `.bak`-Kopien zu verzichten – die galt dem *laufenden* Schreibpfad, der durch atomare Writes, VM-Snapshots und Git abgedeckt ist. Hier schreibt ein einmaliges Skript Historie um, die sich aus nichts anderem rekonstruieren lässt. Unterschiedliche Lage, unterschiedliche Antwort.
+
+**Was der Fund über die Testabdeckung sagt.** Grid und Trend hatten je einen Test, dass die Dry-Run-Menge quantisiert wird – aber keiner prüfte den Betrag dazu. Die Zusicherung war einseitig, und die fehlende Hälfte *war* der Bug. Dass die 523 bestehenden Tests nach dem Fix unverändert grün blieben, ist der Beleg dafür. Dieselbe Fehlerklasse wie bei den Funden in 6i, nur eine Ebene tiefer: nicht ein Test, dessen Prämisse nicht stimmt, sondern ein Test, der nur die Hälfte seiner Aussage prüft.
+
+**Tests:** 24 neue – 3 in `test_grid_sell_safety.py`, 4 in `test_trend_stop_loss.py`, 3 in `test_dca_fee_adjustment.py`, 14 in der neuen `tests/test_fix_dry_run_quote_spent.py`. Jeder der drei Bots bekommt dieselben drei Aussagen: Betrag folgt der Menge (**mit Gegenprobe**, dass die Quantisierung an der gewählten Preislage überhaupt greift – sonst wäre der Test auch dort grün, wo es nichts abzuschneiden gibt), Rundlauf bei gestiegenem Kurs ergibt positive PnL (das reproduzierte Live-Symptom), und eine Regression für echte Orders, bei der die Börse bewusst einen von `quantity * price` **abweichenden** Betrag meldet – sonst wäre nicht unterscheidbar, ob der Code den gemeldeten Wert übernimmt oder ihn zufällig gleich ausrechnet. Gesamtstand: **547 Tests, alle grün.**
+
+**Wirksamkeit gemessen, in beide Richtungen.** Kontrolllauf ohne Mutation: 0 Fehlschläge. Dry-Run-Zweig auf den Rohbetrag zurückgedreht → Grid 2, Trend 3, DCA 2 Fehlschläge. Gegenrichtung (Echt-Order-Pfad rechnet lokal nach, statt `cummulativeQuoteQty` zu übernehmen) → Grid 1, Trend 1, DCA 2. Beim Korrektur-Skript werden 6 von 7 Mutationen gefangen (Echt-Einträge ungeschützt → 1, fehlendes `dry_run` wird geraten → 1, Bericht schreibt trotzdem → 2, keine Sicherungskopie → 1, PnL gegen die alte Kostenbasis → 5, Toleranz aufgehoben → 3).
+
+Die siebte Mutation (der DCA-Aufruf bekommt ein Verkaufspreis-Feld gesetzt) meldet 0 Fehlschläge – und das ist diesmal **weder** ein mehrdeutiges Suchmuster noch eine Testlücke, die beiden Ursachen aus 6i. `TradeRecord` hat schlicht kein `sell_price`-Feld (nachgeprüft, nicht angenommen), die Bedingung für den PnL-Zweig kann dort also nie wahr werden; die Mutation ist ohne beobachtbare Wirkung. Festgehalten statt weggelassen, weil „0 Fehlschläge" im Projekt bisher zweimal ein echtes Problem angezeigt hat – die Unterscheidung ist nur etwas wert, wenn auch der harmlose Fall benannt wird.
+
+**Zwei Nebenbeobachtungen aus der Messung:** Erstens traf die Gegenmutation im DCA-Bot zunächst die falsche Stelle – `quote_spent = float(order.get("cummulativeQuoteQty", amount))` steht in `strategy.py` **zweimal** (Reconcile-Pfad und Kaufpfad), und die Ersetzung erwischte die erste. Exakt dieselbe Falle wie bei `split_locked_by_bot` in 6i, Stufe 2. Zweitens meldeten drei Tests nach dem Zurücksetzen einer Mutation weiterhin Fehlschläge: Mutation und Restore lagen in derselben Sekunde, und Python prüft die Gültigkeit seines Bytecode-Caches sekundengenau über `mtime` – die Messung lief gegen ein `.pyc` der mutierten Fassung. Die Messreihe wurde deshalb mit `-B` wiederholt. Beide Male war das Warnsignal dasselbe wie in 6i: ein Messergebnis, das zum offensichtlich einschlägigen Test nicht passt.
 
 ### K2: Order ohne Ledger-Eintrag (16.09.2026)
 

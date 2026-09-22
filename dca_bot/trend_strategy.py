@@ -175,7 +175,16 @@ class TrendFollowingStrategy:
             # abgezogen - die Menge wird aber quantisiert, damit simulierte
             # und echte Werte vergleichbar bleiben.
             quantity = quantize_quantity(amount / price, rules.step_size)
-            quote_spent = amount
+            # Der Betrag muss der quantisierten Menge folgen: die
+            # weggerundete Teilmenge wurde nie gekauft. Ein echter Fill
+            # liefert oben cummulativeQuoteQty, also den tatsaechlich
+            # belasteten Betrag - `quantity * price` ist dessen
+            # Entsprechung im Dry-Run. Sonst stuende eine zu hohe
+            # Kostenbasis im Ledger und die realisierte PnL dieses Trades
+            # waere um die Differenz zu negativ. Mit aktivem Allocator
+            # wiegt das zusaetzlich schwerer, weil `amount` dann kleiner
+            # ist und dieselbe Mengenstufe relativ mehr ausmacht.
+            quote_spent = quantity * price
 
         trade = TrendTrade.new(
             entry_price=price,

@@ -75,6 +75,11 @@ class FakeGridClient:
         # Gebuehrenkorrektur setzen 0.001 (Live-Standardsatz).
         self.commission_rate = 0.0
         self.commission_asset = "BTC"
+        # Erlaubt einem Test, die Boerse einen Betrag melden zu lassen,
+        # der bewusst NICHT `quantity * price` entspricht - nur so ist
+        # unterscheidbar, ob der Produktivcode den gemeldeten Wert
+        # uebernimmt oder ihn zufaellig gleich ausrechnet.
+        self.quote_qty_override: float | None = None
         self.force_trading_rules_failure = False
         self.trading_rules_calls = 0
         # Seit dem K2-Fix reicht jede place_*-Methode einen `context` an
@@ -122,10 +127,13 @@ class FakeGridClient:
         if not self.trading_enabled:
             return None
         executed_qty = quote_order_qty / self.price
+        reported_quote_qty = (
+            quote_order_qty if self.quote_qty_override is None else self.quote_qty_override
+        )
         return {
             "clientOrderId": self._new_client_order_id(),
             "executedQty": executed_qty,
-            "cummulativeQuoteQty": quote_order_qty,
+            "cummulativeQuoteQty": reported_quote_qty,
             "fills": [
                 {
                     "price": self.price,
@@ -479,6 +487,96 @@ class GridTradingRulesTestCase(GridStrategyTestBase):
         still_open = strategy._ledger.open_positions()
         self.assertEqual(len(still_open), 1, "Position bleibt unverändert offen")
         self.assertIsNone(still_open[0]["realized_pnl"])
+
+    # -- Dry-Run: quote_spent muss der quantisierten Menge folgen --
+    #
+    # Gefunden am 22.09.2026 beim Auswerten der VPS-Live-Daten: die Menge
+    # wurde seit dem K3-Fix quantisiert, der Betrag aber weiterhin als
+    # konfigurierter Rohbetrag gebucht. Die weggerundete Teilmenge wurde
+    # nie gekauft - sie stand trotzdem in der Kostenbasis.
+
+    def test_dry_run_quote_spent_matches_quantized_quantity(self):
+        """
+        Der gebuchte Betrag ist der Wert der Menge, die die Position
+        tatsaechlich haelt - nicht der konfigurierte Wunschbetrag.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=77_000.0)
+
+        position, level_price = self._buy_one_level(strategy, client)
+
+        self.assertTrue(position["dry_run"])
+        self.assertAlmostEqual(
+            position["quote_spent"], position["quantity"] * level_price, places=10
+        )
+        # Gegenprobe: Ohne sie waere dieser Test auch an einer Preislage
+        # gruen, an der die Quantisierung gar nichts abschneidet - und
+        # genau dort liegt der Fehler nicht. Bei stepSize 1e-5 und einem
+        # 15-USDT-Auftrag ist eine Mengenstufe rund 0,80 USDT.
+        self.assertLess(
+            position["quote_spent"],
+            15.0,
+            "Quantisierung greift an dieser Preislage nicht - Test ohne Aussage",
+        )
+
+    def test_dry_run_round_trip_is_profitable_when_price_rises(self):
+        """
+        Das reproduzierte Live-Symptom: Kauf auf einer Stufe, Verkauf auf
+        der naechsthoeheren - der Kurs ist gestiegen, die realisierte PnL
+        muss positiv sein.
+
+        Vor dem Fix war sie negativ, weil der Erloes der quantisierten
+        Menge folgte (`quantity * price`), die Kostenbasis aber dem vollen
+        konfigurierten Betrag. Die Differenz (~5 % des Auftrags) ist
+        groesser als der Grid-Stufenabstand von 1,5 % und kippt damit das
+        Vorzeichen.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=77_000.0)
+
+        position, buy_price = self._buy_one_level(strategy, client, level_index=3)
+        sell_price = position["target_sell_price"]
+        self.assertGreater(sell_price, buy_price, "Testaufbau: Kurs muss steigen")
+
+        client.price = sell_price
+        strategy._process_sells(sell_price)
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertGreater(
+            closed["realized_pnl"],
+            0.0,
+            "Gestiegener Kurs muss eine positive realisierte PnL ergeben",
+        )
+        # Fuer eine simulierte Position gilt exakt quantity * (Verkauf -
+        # Kauf): beide Seiten rechnen mit derselben Menge. Genau diese
+        # Invariante war verletzt.
+        self.assertAlmostEqual(
+            closed["realized_pnl"],
+            position["quantity"] * (sell_price - buy_price),
+            places=10,
+        )
+
+    def test_real_buy_keeps_exchange_reported_quote_spent(self):
+        """
+        Regression fuer echte Orders: dort bleibt `cummulativeQuoteQty`
+        die Quelle der Wahrheit und wird NICHT lokal nachgerechnet.
+
+        Der gemeldete Betrag weicht hier bewusst von `quantity * price`
+        ab - sonst waere nicht unterscheidbar, ob der Code den Wert der
+        Boerse uebernimmt oder ihn zufaellig gleich ausrechnet.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=77_000.0)
+        client.quote_qty_override = 14.97
+
+        position, level_price = self._buy_one_level(strategy, client)
+
+        self.assertFalse(position["dry_run"])
+        self.assertAlmostEqual(position["quote_spent"], 14.97, places=10)
+        self.assertNotAlmostEqual(
+            position["quote_spent"],
+            position["quantity"] * level_price,
+            places=4,
+            msg="Testaufbau: gemeldeter Betrag muss abweichen, sonst prueft der Test nichts",
+        )
 
     def test_no_rules_lookup_when_nothing_to_sell(self):
         """
