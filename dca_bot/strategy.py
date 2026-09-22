@@ -304,7 +304,19 @@ class DCAStrategy:
             # die Menge aber trotzdem quantisiert, damit simulierte und
             # echte Werte vergleichbar bleiben.
             quantity = quantize_quantity(amount / price, rules.step_size)
-            quote_spent = amount
+            # Der Betrag muss der quantisierten Menge folgen: die
+            # weggerundete Teilmenge wurde nie gekauft. Ein echter Fill
+            # liefert oben cummulativeQuoteQty, also den tatsaechlich
+            # belasteten Betrag - `quantity * price` ist dessen
+            # Entsprechung im Dry-Run. Beim DCA-Bot gibt es zwar keine
+            # realisierte PnL (er verkauft nie) und der Portfolio-
+            # Stop-Loss sieht Dry-Run-Kaeufe gar nicht erst
+            # (TradeLedger.position filtert sie heraus) - day_summary()
+            # summiert aber ueber ALLE Kaeufe inklusive der simulierten.
+            # Der Rohbetrag liess den Bot also einen Betrag gegen sein
+            # Tageslimit buchen, den er in der Simulation nie ausgegeben
+            # hat, und meldete ihn so auch in der Tageszusammenfassung.
+            quote_spent = quantity * price
 
         self._ledger.record(
             TradeRecord(

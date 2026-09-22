@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -42,6 +43,11 @@ class FakeDCAClient:
         self.price = price
         self.commission_rate = 0.0
         self.commission_asset = "BTC"
+        # Erlaubt einem Test, die Boerse einen Betrag melden zu lassen,
+        # der bewusst NICHT `quantity * price` entspricht - nur so ist
+        # unterscheidbar, ob der Produktivcode den gemeldeten Wert
+        # uebernimmt oder ihn zufaellig gleich ausrechnet.
+        self.quote_qty_override: float | None = None
         self.force_trading_rules_failure = False
         self.market_buy_calls: list[tuple] = []
         # Siehe FakeTradingClient in tests/test_trend_stop_loss.py: seit
@@ -67,10 +73,13 @@ class FakeDCAClient:
             return None
         self._next_client_order_id += 1
         executed_qty = quote_order_qty / self.price
+        reported_quote_qty = (
+            quote_order_qty if self.quote_qty_override is None else self.quote_qty_override
+        )
         return {
             "clientOrderId": f"dca-test-{self._next_client_order_id}",
             "executedQty": executed_qty,
-            "cummulativeQuoteQty": quote_order_qty,
+            "cummulativeQuoteQty": reported_quote_qty,
             "fills": [
                 {
                     "price": self.price,
@@ -167,6 +176,74 @@ class DCAFeeAdjustmentTestCase(unittest.TestCase):
         steps = record["quantity"] / FAKE_TRADING_RULES.step_size
         self.assertAlmostEqual(steps, round(steps), places=6)
         self.assertLessEqual(record["quantity"], 15.0 / 51_234.56)
+
+    # -- Dry-Run: quote_spent muss der quantisierten Menge folgen --
+    #
+    # Gefunden am 22.09.2026 an den VPS-Live-Daten des Grid-Bots; derselbe
+    # Fehler stand seit dem K3-Fix in allen drei Strategien. Beim DCA-Bot
+    # gibt es keine realisierte PnL (er verkauft nie) und der
+    # Portfolio-Stop-Loss sieht Dry-Run-Kaeufe gar nicht - der falsche
+    # Betrag landete hier stattdessen im Tageslimit.
+
+    def test_dry_run_quote_spent_matches_quantized_quantity(self):
+        strategy, client = self._make_strategy(trading_enabled=False, price=51_234.56)
+
+        with mock.patch("dca_bot.strategy.send_notification"):
+            strategy.execute_once()
+
+        record = strategy._ledger._read()[0]
+        self.assertTrue(record["dry_run"])
+        self.assertAlmostEqual(
+            record["quote_spent"], record["quantity"] * 51_234.56, places=10
+        )
+        # Gegenprobe: ohne sie waere der Test auch an einer Preislage
+        # gruen, an der die Quantisierung nichts abschneidet.
+        self.assertLess(
+            record["quote_spent"],
+            15.0,
+            "Quantisierung greift an dieser Preislage nicht - Test ohne Aussage",
+        )
+
+    def test_dry_run_daily_spend_counts_the_corrected_amount(self):
+        """
+        Die Verdrahtung, nicht nur die Rechnung: `day_summary()` summiert
+        ueber ALLE Kaeufe inklusive der simulierten (anders als
+        `position()`, das Dry-Run-Kaeufe fuer den Portfolio-Stop-Loss
+        herausfiltert). Der Betrag, der gegen das Tageslimit zaehlt, muss
+        deshalb derselbe korrigierte sein - sonst bucht der Bot gegen
+        seine Notbremse etwas, das er nie ausgegeben hat.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=51_234.56)
+
+        with mock.patch("dca_bot.strategy.send_notification"):
+            strategy.execute_once()
+
+        record = strategy._ledger._read()[0]
+        day = datetime.fromisoformat(record["timestamp"]).date()
+        spent = strategy._ledger.spent_on_day("BTCUSDT", day)
+        self.assertAlmostEqual(spent, record["quote_spent"], places=10)
+        self.assertLess(spent, 15.0)
+
+    def test_real_buy_keeps_exchange_reported_quote_spent(self):
+        """
+        Regression fuer echte Orders: dort bleibt `cummulativeQuoteQty`
+        die Quelle der Wahrheit und wird NICHT lokal nachgerechnet.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.quote_qty_override = 14.97
+
+        with mock.patch("dca_bot.strategy.send_notification"):
+            strategy.execute_once()
+
+        record = strategy._ledger._read()[0]
+        self.assertFalse(record["dry_run"])
+        self.assertAlmostEqual(record["quote_spent"], 14.97, places=10)
+        self.assertNotAlmostEqual(
+            record["quote_spent"],
+            record["quantity"] * 50_000.0,
+            places=4,
+            msg="Testaufbau: gemeldeter Betrag muss abweichen, sonst prueft der Test nichts",
+        )
 
 
 if __name__ == "__main__":

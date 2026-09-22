@@ -460,7 +460,18 @@ class GridTradingStrategy:
                 quantity = quantize_quantity(
                     self._config.amount_per_level / price, rules.step_size
                 )
-                quote_spent = self._config.amount_per_level
+                # Und genau deshalb muss auch der Betrag aus der
+                # quantisierten Menge kommen: die weggerundete Teilmenge
+                # wurde nie gekauft. Ein echter Fill liefert oben
+                # cummulativeQuoteQty, also den tatsaechlich belasteten
+                # Betrag - `quantity * price` ist dessen Entsprechung im
+                # Dry-Run. Mit dem konfigurierten Rohbetrag staende eine
+                # zu hohe Kostenbasis im Ledger, und jede realisierte PnL
+                # dieser Position waere um die Differenz zu negativ: bei
+                # 15 USDT und stepSize 1e-5 ist eine Mengenstufe rund
+                # 0,80 USDT, also ~5 % des Auftrags und damit mehr als
+                # der Grid-Stufenabstand selbst.
+                quote_spent = quantity * price
 
             position = GridPosition.new(
                 level_index=level_index,

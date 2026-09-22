@@ -20,8 +20,10 @@ Ausführen mit:  python -m unittest tests.test_trend_stop_loss -v
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -105,6 +107,11 @@ class FakeTradingClient:
         # Gebuehrenkorrektur pruefen, setzen einen realistischen Wert
         # (0.001 = 0,1%, der Live-Standardsatz).
         self.commission_rate = 0.0
+        # Erlaubt einem Test, die Boerse einen Betrag melden zu lassen,
+        # der bewusst NICHT `quantity * price` entspricht - nur so ist
+        # unterscheidbar, ob der Produktivcode den gemeldeten Wert
+        # uebernimmt oder ihn zufaellig gleich ausrechnet.
+        self.quote_qty_override: float | None = None
         # Gebuehren-Waehrung: normalerweise das Base-Asset (BTC), bei
         # aktivem BNB-Rabatt stattdessen "BNB" - dann darf die Menge NICHT
         # gekuerzt werden.
@@ -199,10 +206,13 @@ class FakeTradingClient:
         if not self.trading_enabled:
             return None
         executed_qty = quote_order_qty / self.price
+        reported_quote_qty = (
+            quote_order_qty if self.quote_qty_override is None else self.quote_qty_override
+        )
         return {
             "clientOrderId": self._new_client_order_id(),
             "executedQty": executed_qty,
-            "cummulativeQuoteQty": quote_order_qty,
+            "cummulativeQuoteQty": reported_quote_qty,
             # Wie eine echte Binance-Antwort: die Gebuehr steht in den
             # Fills, nicht in einem Top-Level-Feld.
             "fills": [
@@ -1351,6 +1361,120 @@ class TrendTradingRulesTestCase(TrendStrategyTestBase):
         self.assertLessEqual(quantity, raw)
         steps = quantity / FAKE_TRADING_RULES.step_size
         self.assertAlmostEqual(steps, round(steps), places=6)
+
+
+    # -- Dry-Run: quote_spent muss der quantisierten Menge folgen --
+    #
+    # Gefunden am 22.09.2026 an den VPS-Live-Daten des Grid-Bots; derselbe
+    # Fehler stand seit dem K3-Fix in allen drei Strategien.
+
+    def test_dry_run_quote_spent_matches_quantized_quantity(self):
+        """
+        Der gebuchte Betrag ist der Wert der Menge, die die Position
+        tatsaechlich haelt - nicht der konfigurierte Wunschbetrag.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=51_234.0)
+
+        strategy._open_position(51_234.0)
+
+        open_trade = strategy._ledger.open_position()
+        self.assertTrue(open_trade["dry_run"])
+        self.assertAlmostEqual(
+            open_trade["quote_spent"], open_trade["quantity"] * 51_234.0, places=10
+        )
+        # Gegenprobe: ohne sie waere der Test auch an einer Preislage
+        # gruen, an der die Quantisierung nichts abschneidet.
+        self.assertLess(
+            open_trade["quote_spent"],
+            15.0,
+            "Quantisierung greift an dieser Preislage nicht - Test ohne Aussage",
+        )
+
+    def test_dry_run_round_trip_is_profitable_when_price_rises(self):
+        """
+        Das reproduzierte Symptom: Einstieg, Kurs steigt, Ausstieg per
+        Signal-Umkehr - die realisierte PnL muss positiv sein.
+
+        Vor dem Fix war sie negativ, weil der Erloes der quantisierten
+        Menge folgte, die Kostenbasis aber dem vollen konfigurierten
+        Betrag.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=51_234.0)
+        strategy._open_position(51_234.0)
+        open_trade = strategy._ledger.open_position()
+
+        exit_price = 51_234.0 * 1.02
+        client.price = exit_price
+        strategy._close_position(open_trade, price=exit_price, reason="signal")
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertGreater(
+            closed["realized_pnl"],
+            0.0,
+            "Gestiegener Kurs muss eine positive realisierte PnL ergeben",
+        )
+        # Fuer eine simulierte Position gilt exakt quantity * (Ausstieg -
+        # Einstieg) - genau diese Invariante war verletzt.
+        self.assertAlmostEqual(
+            closed["realized_pnl"],
+            open_trade["quantity"] * (exit_price - 51_234.0),
+            places=10,
+        )
+
+    def test_dry_run_quote_spent_follows_allocator_scaled_amount(self):
+        """
+        Mit aktivem Allocator ist `amount` kleiner als
+        TREND_AMOUNT_PER_TRADE - dieselbe Mengenstufe macht dann relativ
+        MEHR aus, der Fehler waere also groesser gewesen, nicht kleiner.
+
+        Geprueft wird deshalb an der skalierten Groesse, dass der Betrag
+        weiterhin aus der quantisierten Menge kommt und nicht aus dem
+        (hier ebenfalls falschen) Zwischenwert `amount`.
+        """
+        allocator_file = str(Path(self._tmpdir.name) / "allocator_state.json")
+        with open(allocator_file, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "trend_fraction": 0.5,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "interval_minutes": 60,
+                },
+                fh,
+            )
+        strategy, client = self._make_strategy(
+            trading_enabled=False, price=51_234.0, allocator_state_file=allocator_file
+        )
+
+        strategy._open_position(51_234.0)
+
+        open_trade = strategy._ledger.open_position()
+        self.assertAlmostEqual(
+            open_trade["quote_spent"], open_trade["quantity"] * 51_234.0, places=10
+        )
+        # Testaufbau-Nachweis: der Allocator hat tatsaechlich halbiert.
+        self.assertLess(open_trade["quote_spent"], 7.5)
+        self.assertGreater(open_trade["quote_spent"], 6.0)
+
+    def test_real_entry_keeps_exchange_reported_quote_spent(self):
+        """
+        Regression fuer echte Orders: dort bleibt `cummulativeQuoteQty`
+        die Quelle der Wahrheit und wird NICHT lokal nachgerechnet.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.quote_qty_override = 14.97
+
+        strategy._open_position(50_000.0)
+
+        open_trade = strategy._ledger.open_position()
+        self.assertFalse(open_trade["dry_run"])
+        self.assertAlmostEqual(open_trade["quote_spent"], 14.97, places=10)
+        self.assertNotAlmostEqual(
+            open_trade["quote_spent"],
+            open_trade["quantity"] * 50_000.0,
+            places=4,
+            msg="Testaufbau: gemeldeter Betrag muss abweichen, sonst prueft der Test nichts",
+        )
 
 
 class StopFillFeeCorrectionTestCase(TrendStrategyTestBase):
