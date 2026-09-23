@@ -111,6 +111,10 @@ def _open_records(records: list[dict]) -> list[dict]:
     return [r for r in records if r.get("status") == "open"]
 
 
+def _closed_records(records: list[dict]) -> list[dict]:
+    return [r for r in records if r.get("status") == "closed"]
+
+
 def _print_header(title: str, path: Path) -> None:
     print()
     print("=" * 78)
@@ -163,6 +167,93 @@ def _quantity_of(record: dict) -> float:
         return float(record.get("quantity", 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _float_or_none(value: object) -> float | None:
+    """
+    Wie `_quantity_of`, aber ohne Ersatzwert: Hier ist der Unterschied
+    zwischen "steht nicht drin" und "steht als 0.0 drin" wichtig, weil
+    auf dem Ergebnis ein Vorzeichenvergleich beruht.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class NegativePnlFinding:
+    """Eine geschlossene Dry-Run-Grid-Position mit negativer realisierter PnL."""
+
+    position_id: str
+    level_index: Any
+    buy_price: float | None
+    sell_price: float | None
+    quantity: float | None
+    quote_spent: float | None
+    realized_pnl: float
+
+
+def negative_dry_run_pnl(records: list[dict]) -> list[NegativePnlFinding]:
+    """
+    Sucht geschlossene Dry-Run-Positionen, deren `realized_pnl` negativ
+    ist. Das ist beim Grid-Bot strukturell unmöglich - ein Treffer
+    bedeutet also, dass die Daten nicht zur Logik passen.
+
+    **Warum es unmöglich sein sollte.** Der Grid-Bot verkauft eine
+    Position ausschließlich, wenn ihr individuelles Ziel erreicht ist
+    (`is_sell_target_hit(price, target_sell_price)`, also
+    `price >= target_sell_price`), und `target_sell_price` ist die
+    nächsthöhere Grid-Stufe, liegt per Konstruktion also ÜBER dem
+    Kaufpreis. Im Dry-Run gibt es keinen Fill und damit keine Gebühr, die
+    etwas abziehen könnte: der Erlös ist `quantity * price`, und seit dem
+    Folgefund aus K3 (22.09.2026, siehe trading-bot-projekt.md 6g) ist
+    die Kostenbasis `quantity * buy_price`. Damit gilt
+    `realized_pnl = quantity * (price - buy_price)` mit
+    `price >= target_sell_price > buy_price` - der Wert kann nicht
+    negativ werden.
+
+    Genau diese Invariante war vor dem Fix verletzt: `quote_spent` folgte
+    dem Rohbetrag statt der quantisierten Menge, wodurch geschlossene
+    Positionen trotz gestiegenem Kurs im Minus landeten. Der Check ist
+    die Sichtbarmachung dieses Musters - er findet sowohl noch nicht
+    korrigierte Altdaten als auch eine künftige Regression derselben Art.
+
+    **Bewusst nur Dry-Run, und bewusst nur Grid.** Bei einer ECHTEN
+    Position wird die in USDT abgerechnete Verkaufsgebühr vom Erlös
+    abgezogen (`net_proceeds`), ein knapp erreichtes Ziel kann dort also
+    legitim im Minus enden - dasselbe Ergebnis wäre kein Befund. Und beim
+    Trend-Bot ist ein Verlust der Normalfall eines Stop-Loss-Exits, dort
+    existiert die Invariante überhaupt nicht. Einträge ohne
+    `dry_run`-Feld bleiben ebenfalls draußen: deren Modus wird im ganzen
+    Projekt nie geraten (siehe `_dry_run_label` und
+    `fix_dry_run_quote_spent.py`).
+
+    Rein informativ wie der Rest des Skripts: Es wird gemeldet, nicht
+    korrigiert. Das Korrektur-Werkzeug dafür ist
+    `python -m dca_bot.fix_dry_run_quote_spent`.
+    """
+    findings: list[NegativePnlFinding] = []
+    for record in _closed_records(records):
+        if record.get("dry_run") is not True:
+            continue
+        realized_pnl = _float_or_none(record.get("realized_pnl"))
+        if realized_pnl is None or realized_pnl >= 0:
+            continue
+        findings.append(
+            NegativePnlFinding(
+                position_id=str(record.get("id", "?")),
+                level_index=record.get("level_index", "?"),
+                buy_price=_float_or_none(record.get("buy_price")),
+                sell_price=_float_or_none(record.get("sell_price")),
+                quantity=_float_or_none(record.get("quantity")),
+                quote_spent=_float_or_none(record.get("quote_spent")),
+                realized_pnl=realized_pnl,
+            )
+        )
+    return findings
 
 
 @dataclass(frozen=True)
@@ -377,6 +468,42 @@ def audit_dca(path: Path, symbol: str) -> None:
         )
 
 
+def _print_negative_pnl_findings(findings: list[NegativePnlFinding]) -> None:
+    """
+    Gibt die Treffer des Invarianten-Checks aus (siehe
+    `negative_dry_run_pnl` für die Begründung, warum das gar nicht
+    vorkommen kann). Rein informativ - das Skript ändert nichts.
+    """
+    if not findings:
+        return
+
+    print()
+    print(
+        f"  *** BEFUND: {len(findings)} geschlossene Dry-Run-Position(en) mit "
+        "negativer realisierter PnL. ***"
+    )
+    for f in findings:
+        print(
+            f"    Stufe {str(f.level_index):>3}  "
+            f"Kauf {_fmt(f.buy_price, '.2f')} -> Verkauf {_fmt(f.sell_price, '.2f')}  "
+            f"Menge {_fmt(f.quantity, '.8f')}  Einsatz {_fmt(f.quote_spent, '.2f')}  "
+            f"realisiert {f.realized_pnl:+.8f}"
+        )
+        print(f"      ID: {f.position_id}")
+    print(
+        "\n  Der Grid-Bot verkauft nur, wenn der Preis das Ziel der Position\n"
+        "  erreicht - und das ist die nächsthöhere Grid-Stufe, liegt also über\n"
+        "  dem Kaufpreis. Im Dry-Run gibt es keine Gebühr, die etwas abziehen\n"
+        "  könnte. Ein Minus ist hier deshalb kein schlechter Trade, sondern\n"
+        "  ein Datenfehler.\n"
+        "  Bekannte Ursache: der Folgefund aus K3 (siehe trading-bot-projekt.md\n"
+        "  Abschnitt 6g) - `quote_spent` folgte im Dry-Run dem Rohbetrag statt\n"
+        "  der quantisierten Menge. Korrigieren mit:\n"
+        "      python -m dca_bot.fix_dry_run_quote_spent          # nur Bericht\n"
+        "      python -m dca_bot.fix_dry_run_quote_spent --apply  # schreibt"
+    )
+
+
 def audit_grid(path: Path) -> None:
     _print_header("GRID-BOT - offene Positionen", path)
     records, error = _load_records(path)
@@ -386,6 +513,12 @@ def audit_grid(path: Path) -> None:
 
     open_records = _open_records(records)
     _print_counts(records, open_records)
+
+    # Bewusst VOR dem Abbruch bei "nichts offen": Der Check gilt
+    # geschlossenen Positionen, und ein Ledger ohne eine einzige offene
+    # Position ist gerade der Fall, in dem er etwas zu sagen hat.
+    _print_negative_pnl_findings(negative_dry_run_pnl(records))
+
     if not open_records:
         return
 
