@@ -40,6 +40,7 @@ from dca_bot.audit_positions import (
     compare_with_account,
     dca_claim,
     grid_claim,
+    negative_dry_run_pnl,
     trend_claim,
 )
 from dca_bot.balance_guard import FOREIGN_ORDERS, split_locked_by_bot
@@ -487,6 +488,140 @@ class ReadOnlyClientTestCase(unittest.TestCase):
         einer clientOrderId auftaucht - das Skript platziert nichts.
         """
         self.assertNotIn(_ReadOnlyClientConfig.bot_name, BOT_NAMES)
+
+
+class NegativeDryRunPnlTestCase(unittest.TestCase):
+    """
+    Der Invarianten-Check fuer geschlossene Dry-Run-Grid-Positionen.
+
+    **Die Invariante.** Der Grid-Bot verkauft nur bei erreichtem
+    Sell-Target, und das ist die naechsthoehere Grid-Stufe, liegt also
+    ueber dem Kaufpreis. Im Dry-Run gibt es keinen Fill und damit keine
+    Gebuehr; Erloes ist `quantity * price`, Kostenbasis seit dem
+    Folgefund aus K3 `quantity * buy_price`. Eine negative `realized_pnl`
+    ist deshalb kein schlechter Trade, sondern ein Datenfehler - genau
+    das Symptom, an dem der Fund vom 22.09.2026 ueberhaupt aufgefallen
+    ist (siehe trading-bot-projekt.md 6g).
+
+    **Warum die Gegenproben hier den Inhalt tragen.** Ein Check, der
+    meldet, waere auch dann gruen, wenn er ALLES meldete. Die Haelfte der
+    Aussage ist deshalb, wovon er schweigt: echte Positionen (dort zieht
+    die Verkaufsgebuehr ab, ein knapp erreichtes Ziel darf legitim im
+    Minus enden), Eintraege ohne `dry_run`-Feld (Modus wird im Projekt
+    nie geraten) und offene Positionen (haben noch gar keine PnL).
+
+    Geprueft wird die reine Funktion, nicht die Ausgabe - gleiche
+    Begruendung wie im Modul-Docstring oben.
+    """
+
+    def _closed(self, realized_pnl, dry_run=True, **overrides) -> dict:
+        record = {
+            "id": "pos-1",
+            "level_index": 3,
+            "buy_price": 79_964.55,
+            "target_sell_price": 81_164.02,
+            "sell_price": 81_164.02,
+            "quantity": 0.00018,
+            "quote_spent": 15.0,
+            "status": "closed",
+            "realized_pnl": realized_pnl,
+        }
+        if dry_run is not None:
+            record["dry_run"] = dry_run
+        record.update(overrides)
+        return record
+
+    def test_a_negative_dry_run_position_is_reported(self):
+        """Der reproduzierte Live-Fall: Position 569fff51 aus 6g."""
+        findings = negative_dry_run_pnl([self._closed(-0.36)])
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].position_id, "pos-1")
+        self.assertEqual(findings[0].level_index, 3)
+        self.assertAlmostEqual(findings[0].realized_pnl, -0.36, places=9)
+
+    def test_the_same_position_with_a_positive_pnl_is_not_reported(self):
+        """
+        Gegenprobe zum Test darueber: Dieselbe Position, nur mit dem
+        korrigierten Wert (+0,25 laut 6g), ist kein Befund. Ohne das
+        waere "der Check meldet" auch dann erfuellt, wenn er unabhaengig
+        vom Vorzeichen meldete.
+        """
+        self.assertEqual(negative_dry_run_pnl([self._closed(0.25)]), [])
+
+    def test_a_real_position_with_a_negative_pnl_is_not_reported(self):
+        """
+        Bei einer echten Order zieht die in USDT abgerechnete
+        Verkaufsgebuehr vom Erloes ab (`net_proceeds`) - ein knapp
+        erreichtes Ziel darf dort im Minus enden, und `quote_spent` ist
+        ohnehin die von der Boerse gemeldete Ground Truth.
+        """
+        self.assertEqual(negative_dry_run_pnl([self._closed(-0.36, dry_run=False)]), [])
+
+    def test_a_position_without_a_dry_run_field_is_not_reported(self):
+        """
+        Derselbe Grundsatz wie in `_dry_run_label` und im
+        Korrektur-Skript: Der Modus wird nie geraten.
+        """
+        self.assertEqual(negative_dry_run_pnl([self._closed(-0.36, dry_run=None)]), [])
+
+    def test_an_open_position_is_not_reported(self):
+        """
+        Eine offene Position hat noch keine realisierte PnL. Steht dort
+        trotzdem ein negativer Wert, ist das kein Fall fuer diesen Check
+        - er redet ueber abgeschlossene Rundlaeufe.
+        """
+        self.assertEqual(
+            negative_dry_run_pnl([self._closed(-0.36, status="open")]), []
+        )
+
+    def test_a_pnl_of_exactly_zero_is_not_reported(self):
+        """
+        Grenzfall: Der Check fragt nach einem MINUS, nicht nach
+        "nicht positiv". Ein Rundlauf genau auf Null ist rechnerisch
+        moeglich (Kauf- gleich Verkaufspreis) und kein Datenfehler.
+        """
+        self.assertEqual(negative_dry_run_pnl([self._closed(0.0)]), [])
+
+    def test_a_missing_or_unreadable_pnl_is_not_reported(self):
+        """
+        Ohne lesbare Zahl gibt es kein Vorzeichen, ueber das sich etwas
+        aussagen liesse. Der Check behauptet nur, was er belegen kann.
+        """
+        self.assertEqual(negative_dry_run_pnl([self._closed(None)]), [])
+        self.assertEqual(negative_dry_run_pnl([self._closed("kaputt")]), [])
+
+    def test_every_affected_position_is_listed_not_just_the_first(self):
+        """
+        Auf dem VPS waren es mehrere Positionen gleichzeitig (8
+        Korrekturen, 4 davon mit Vorzeichenwechsel) - ein Check, der nach
+        dem ersten Treffer aufhoert, haette das Ausmass verschwiegen.
+        """
+        records = [
+            self._closed(-0.36, id="a"),
+            self._closed(0.25, id="b"),
+            self._closed(-0.11, id="c"),
+        ]
+        findings = negative_dry_run_pnl(records)
+        self.assertEqual([f.position_id for f in findings], ["a", "c"])
+
+    def test_a_clean_ledger_yields_no_findings(self):
+        """Der Normalfall nach der Korrektur: nichts zu melden."""
+        self.assertEqual(negative_dry_run_pnl([]), [])
+        self.assertEqual(negative_dry_run_pnl([self._closed(2.98)]), [])
+
+    def test_the_finding_carries_the_numbers_needed_to_judge_it(self):
+        """
+        Der Befund soll ohne zweiten Blick ins Ledger einzuordnen sein:
+        Kauf- und Verkaufspreis zeigen, dass der Kurs gestiegen ist,
+        waehrend die PnL negativ ist - genau der Widerspruch, um den es
+        geht.
+        """
+        finding = negative_dry_run_pnl([self._closed(-0.36)])[0]
+        self.assertAlmostEqual(finding.buy_price, 79_964.55, places=2)
+        self.assertAlmostEqual(finding.sell_price, 81_164.02, places=2)
+        self.assertGreater(finding.sell_price, finding.buy_price)
+        self.assertAlmostEqual(finding.quantity, 0.00018, places=9)
+        self.assertAlmostEqual(finding.quote_spent, 15.0, places=9)
 
 
 if __name__ == "__main__":

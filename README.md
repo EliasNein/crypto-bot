@@ -925,6 +925,21 @@ Pfade kommen aus `DCA_BOT_STATE_FILE`/`GRID_STATE_FILE`/
 `TREND_STATE_FILE` bzw. den üblichen Defaults, alternativ über
 `--dca-file` / `--grid-file` / `--trend-file`.
 
+**Invarianten-Check auf geschlossene Grid-Positionen:** Zusätzlich meldet
+der Grid-Abschnitt jede **geschlossene Dry-Run-Position mit negativer
+`realized_pnl`**. Das sollte strukturell gar nicht vorkommen können: Der
+Grid-Bot verkauft nur bei erreichtem Sell-Target, und das ist die
+nächsthöhere Grid-Stufe, liegt also über dem Kaufpreis - und im Dry-Run
+gibt es keine Gebühr, die etwas abziehen könnte. Ein Minus ist dort
+deshalb kein schlechter Trade, sondern ein Datenfehler; es war genau das
+Symptom, an dem der Folgefund aus K3 aufgefallen ist (siehe
+`trading-bot-projekt.md` Abschnitt 6g und 11.2 unten). Rein informativ
+wie der Rest des Skripts: es wird gemeldet, nicht korrigiert. Echte
+Positionen bleiben bewusst draußen - dort zieht die Verkaufsgebühr vom
+Erlös ab, ein knapp erreichtes Ziel darf legitim im Minus enden. Beim
+Trend-Bot existiert die Invariante ohnehin nicht (ein Stop-Loss-Exit
+macht per Definition Verlust).
+
 ### 11.1 Bot-übergreifender Kontoabgleich
 
 Sind Binance-Zugangsdaten vorhanden, hängt das Skript einen zweiten
