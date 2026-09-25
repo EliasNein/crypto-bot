@@ -216,28 +216,34 @@ class GridTradingStrategy:
                 sold_this_cycle += float(record["quantity"])
 
             if order is not None:
+                # Tatsaechlicher Fuellpreis statt des vorher abgefragten
+                # Tickers - siehe die Begruendung im Kaufpfad
+                # (_process_buys) und _record_reconciled_sell, das es schon
+                # immer so macht.
+                sell_price = average_fill_price(order, fallback=price)
                 # Netto, also abzüglich der in USDT abgerechneten
                 # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
                 proceeds = net_proceeds(order, rules, fallback=record["quantity"] * price)
             else:
+                sell_price = price
                 proceeds = record["quantity"] * price
             realized_pnl = proceeds - record["quote_spent"]
 
             sold_at = datetime.now(timezone.utc).isoformat()
-            self._ledger.record_sell(record["id"], price, sold_at, realized_pnl)
+            self._ledger.record_sell(record["id"], sell_price, sold_at, realized_pnl)
             self._failed_sell_notified.discard(record["id"])
 
             logger.info(
                 "Grid-Verkauf: Stufe %d, Kauf @ %.2f -> Verkauf @ %.2f, realisiert %.2f",
                 record["level_index"],
                 record["buy_price"],
-                price,
+                sell_price,
                 realized_pnl,
             )
             tag = "[GRID-VERKAUF]" if order is not None else "[GRID-VERKAUF DRY-RUN]"
             send_notification(
                 f"{tag} Stufe {record['level_index']}: {record['quantity']:.8f} "
-                f"{self._config.symbol} @ {price:.2f} verkauft "
+                f"{self._config.symbol} @ {sell_price:.2f} verkauft "
                 f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}"
             )
 
@@ -509,6 +515,16 @@ class GridTradingStrategy:
                 continue
 
             if order is not None:
+                # Tatsaechlicher Fuellpreis aus der Order-Antwort
+                # (cummulativeQuoteQty / executedQty), nicht der vor der
+                # Order abgefragte Ticker - gleiche Quelle wie im
+                # Reconciliation-Pfad (_record_reconciled_buy). Bis zum
+                # 25.09.2026 stand hier der Ticker; die PnL war davon nicht
+                # betroffen (sie rechnet mit quantity/quote_spent), aber
+                # der angezeigte Kaufpreis in Dashboard und Steuer-Export
+                # wich vom echten Fill ab. Das Verkaufsziel bleibt die
+                # naechsthoehere Grid-Stufe, es haengt nicht am Fill.
+                buy_price = average_fill_price(order, fallback=price)
                 # Menge abzüglich der in BTC abgezogenen Kaufgebühr - genau
                 # diese Menge steht später für den Verkauf zur Verfügung.
                 quantity = net_executed_quantity(
@@ -516,6 +532,8 @@ class GridTradingStrategy:
                 )
                 quote_spent = float(order.get("cummulativeQuoteQty", self._config.amount_per_level))
             else:
+                # Dry-Run: der beobachtete Preis IST der simulierte Fill.
+                buy_price = price
                 # Dry-Run: keine echte Gebühr bekannt, deshalb keine
                 # geschätzte abgezogen - die Menge wird aber quantisiert,
                 # damit simulierte und echte Werte vergleichbar bleiben.
@@ -537,7 +555,7 @@ class GridTradingStrategy:
 
             position = GridPosition.new(
                 level_index=level_index,
-                buy_price=price,
+                buy_price=buy_price,
                 target_sell_price=self._levels[level_index + 1],
                 quantity=quantity,
                 quote_spent=quote_spent,
@@ -549,13 +567,13 @@ class GridTradingStrategy:
             logger.info(
                 "Grid-Kauf: Stufe %d @ %.2f (Ziel-Verkauf @ %.2f)",
                 level_index,
-                price,
+                buy_price,
                 position.target_sell_price,
             )
             tag = "[GRID-KAUF]" if order is not None else "[GRID-KAUF DRY-RUN]"
             send_notification(
                 f"{tag} Stufe {level_index}: {quantity:.8f} {self._config.symbol} "
-                f"@ {price:.2f} (Ziel-Verkauf @ {position.target_sell_price:.2f})"
+                f"@ {buy_price:.2f} (Ziel-Verkauf @ {position.target_sell_price:.2f})"
             )
 
     def verify_state_readable(self) -> None:

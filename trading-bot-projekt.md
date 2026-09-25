@@ -905,6 +905,23 @@ Dafür ist `CycleErrorNotifier` aus `main_grid.py` in ein eigenes Modul `dca_bot
 
 Die Testdatei heißt entsprechend `tests/test_cycle_error_notification.py`. Die Unit-Tests prüfen die gemeinsame Klasse, die vier `main()`-Tests laufen über eine gemeinsame Basis einmal für den Grid-Bot und einmal für den Allocator. Dazu kommt eine Prüfung, dass jede Meldung den richtigen Marker trägt. Gesamtstand **607, alle grün**. Wirksamkeit erneut gemessen, Kontrolllauf 0 Fehlschläge, alle 9 Mutationen gefangen: je Prozess das alte Verhalten (4) und ein fehlender `report_success()`-Aufruf (1); Allocator mit dem Grid-Marker (4); an der Klasse kein Reset (3), Sperre für alle Typen (1), Unterdrückung ohne Log (1), erster Fehler nicht gemeldet (12).
 
+#### Priorität 4: Füllpreis statt Tickerpreis im Grid-Ledger (25.09.2026)
+
+**Befund.** Bei echten Grid-Orders standen als `buy_price` und `sell_price` die Tickerpreise, die der Bot *vor* der Order abgefragt hatte, nicht der tatsächliche Füllpreis. Der Reconciliation-Pfad (`_record_reconciled_buy`/`_record_reconciled_sell`) nahm dagegen schon immer den echten Füllpreis über `average_fill_price()`. Die PnL war nicht betroffen, sie rechnet mit `quantity`, `quote_spent` und dem gemeldeten Erlös. Die angezeigten Preise waren aber ungenau, und genau die lesen Dashboard-App und Steuer-Export.
+
+**Umgesetzt.** Im direkten Kauf- und Verkaufspfad von `grid_strategy.py` kommt der Preis einer echten Order jetzt aus der Order-Antwort (`average_fill_price(order, fallback=price)`, also `cummulativeQuoteQty / executedQty`). Das ist dieselbe Funktion wie im Reconciliation-Pfad, beide Wege schreiben also denselben Preis. Log-Zeile und Telegram-Meldung nennen ebenfalls den Füllpreis, damit Nachricht und Ledger übereinstimmen. Zwei Abgrenzungen:
+
+- **Das Verkaufsziel hängt weiter an der Grid-Stufe** (`levels[i+1]`), nicht am Füllpreis. Das ist das Grid-Design: Jede Position gehört zu einer Stufe und wird auf der nächsten verkauft.
+- **Im Dry-Run bleibt der beobachtete Preis.** Dort gibt es keine Order-Antwort, der Tickerpreis *ist* der simulierte Fill.
+
+Der Ticker bleibt als Fallback, falls einer Antwort `executedQty` oder `cummulativeQuoteQty` fehlt. Für eine echte Market-Order-Antwort kommt das bei Binance nicht vor.
+
+Bereits geschriebene Ledger-Einträge bleiben unverändert. Eine rückwirkende Korrektur ginge nur über die Order-Historie bei Binance (`myTrades` je `clientOrderId`). **Entscheidung: nicht jetzt.** Es ist eine reine Anzeigeungenauigkeit, kein PnL-Fehler. **Vorgemerkt für den Zeitpunkt, an dem der Steuer-Export tatsächlich ansteht**, nicht vorher. Einträge ohne `clientOrderId` (vor dem K2-Fix) wären dabei gesondert zu betrachten.
+
+**Tests:** 3 neue in `tests/test_grid_sell_safety.py`, Gesamtstand **610, alle grün**. Der Fake-Client füllt dafür bewusst zu einem anderen Preis als dem Ticker (neues Feld `fill_price`), sonst wäre nicht unterscheidbar, welcher der beiden im Ledger landet. Seine Verkaufsantwort enthält außerdem jetzt `executedQty`, wie jede echte Market-Order-Antwort. Ohne das Feld ließe sich aus ihr kein Füllpreis ableiten. Geprüft werden: echter Kauf → `buy_price` = Fill, Verkaufsziel weiter die Grid-Stufe, Meldung mit Fill; echter Verkauf → `sell_price` = Fill und PnL passend zum gemeldeten Erlös; Dry-Run → beobachteter Preis, auch wenn am Fake ein anderer Fill gesetzt ist.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 6 Mutationen gefangen (je 1 Fehlschlag): Ticker statt Fill beim Kauf, Ticker statt Fill beim Verkauf, `record_sell` bekommt den Ticker, Kaufmeldung nennt den Ticker, Verkaufsmeldung nennt den Ticker, Verkaufsziel aus dem Fill statt aus der Grid-Stufe abgeleitet.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

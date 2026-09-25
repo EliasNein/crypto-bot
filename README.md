@@ -484,6 +484,12 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   Stufe oberhalb des Startpreises gleichzeitig kaufen. Fällt der Preis in
   einem Intervall durch mehrere Stufen auf einmal (z.B. bei einem Crash),
   werden alle tatsächlich durchquerten Stufen gekauft.
+- Kauf- und Verkaufspreis einer echten Position im Ledger sind der
+  tatsächliche Füllpreis aus der Order-Antwort (`cummulativeQuoteQty /
+  executedQty`), nicht der kurz vorher abgefragte Ticker - dieselbe
+  Quelle wie beim Nachtragen über die Reconciliation. Im Dry-Run ist
+  der beobachtete Preis der simulierte Fill. Das Verkaufsziel bleibt
+  unabhängig davon die nächsthöhere Grid-Stufe.
 - Maximale Kapitalbindung ist durch das Design von selbst begrenzt: Anzahl
   Grid-Stufen × `GRID_AMOUNT_PER_LEVEL` - kein zusätzliches Tageslimit nötig.
 - **Dieselbe Entscheidungslogik** (`compute_grid_levels`,
