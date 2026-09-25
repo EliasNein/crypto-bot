@@ -113,6 +113,12 @@ class FakeTradingClient:
         # unterscheidbar, ob der Produktivcode den gemeldeten Wert
         # uebernimmt oder ihn zufaellig gleich ausrechnet.
         self.quote_qty_override: float | None = None
+        # Preis, zu dem die Boerse eine Market-Order tatsaechlich fuellt.
+        # None = zum Tickerpreis (`price`). Ein Test, der pruefen will,
+        # ob der Produktivcode den echten Fuellpreis oder den vorher
+        # abgefragten Ticker verwendet, setzt hier bewusst einen ANDEREN
+        # Wert - sonst waeren beide nicht unterscheidbar.
+        self.fill_price: float | None = None
         # Gebuehren-Waehrung: normalerweise das Base-Asset (BTC), bei
         # aktivem BNB-Rabatt stattdessen "BNB" - dann darf die Menge NICHT
         # gekuerzt werden.
@@ -206,7 +212,8 @@ class FakeTradingClient:
         self.order_contexts.append(context)
         if not self.trading_enabled:
             return None
-        executed_qty = quote_order_qty / self.price
+        fill_price = self.price if self.fill_price is None else self.fill_price
+        executed_qty = quote_order_qty / fill_price
         reported_quote_qty = (
             quote_order_qty if self.quote_qty_override is None else self.quote_qty_override
         )
@@ -218,7 +225,7 @@ class FakeTradingClient:
             # Fills, nicht in einem Top-Level-Feld.
             "fills": [
                 {
-                    "price": self.price,
+                    "price": fill_price,
                     "qty": executed_qty,
                     "commission": executed_qty * self.commission_rate,
                     "commissionAsset": self.commission_asset,
@@ -236,15 +243,19 @@ class FakeTradingClient:
             return None
         if self.force_market_sell_failure:
             return None
-        gross = quantity * self.price
+        fill_price = self.price if self.fill_price is None else self.fill_price
+        gross = quantity * fill_price
+        # executedQty gehoert zu jeder echten Market-Order-Antwort - ohne
+        # es liesse sich aus der Antwort kein Fuellpreis ableiten.
         return {
             "clientOrderId": self._new_client_order_id(),
+            "executedQty": quantity,
             "cummulativeQuoteQty": gross,
             # Beim Verkauf rechnet Binance die Gebuehr in der
             # Quote-Waehrung ab (USDT), nicht im Base-Asset.
             "fills": [
                 {
-                    "price": self.price,
+                    "price": fill_price,
                     "qty": quantity,
                     "commission": gross * self.commission_rate,
                     "commissionAsset": "USDT",
@@ -1257,6 +1268,116 @@ class TrendStopLossProtectionTestCase(TrendStrategyTestBase):
 
         self.assertEqual(dry_client.stop_order_calls, [])
         self.assertEqual(dry_strategy._ledger.open_position()["unprotected_cycles"], 1)
+
+
+class TrendFillPriceTestCase(TrendStrategyTestBase):
+    """
+    Einstiegs- und Ausstiegspreis aus dem tatsaechlichen Fill statt aus
+    dem vorher abgefragten Ticker (Code-Ueberpruefung vom 25.09.2026,
+    Prioritaet 5).
+
+    Anders als beim Grid-Bot (Prioritaet 4) ist das hier keine reine
+    Anzeigefrage: aus `entry_price` entsteht die Stop-Loss-Schwelle - fuer
+    die Order an der Boerse, fuer den internen Check `is_stop_loss_hit()`
+    und fuer jede spaeter neu platzierte Absicherung.
+
+    Der Fake fuellt bewusst zu einem ANDEREN Preis als dem Ticker - sonst
+    waere nicht unterscheidbar, auf welcher Basis gerechnet wurde.
+    """
+
+    TICKER = 50_000.0
+    FILL = 50_100.0  # 0,2 % Slippage beim Kauf
+
+    def _open_with_slippage(self) -> tuple[TrendFollowingStrategy, FakeTradingClient]:
+        strategy, client = self._make_strategy(trading_enabled=True, price=self.TICKER)
+        client.fill_price = self.FILL
+        strategy._open_position(self.TICKER)
+        return strategy, client
+
+    def test_entry_price_is_the_fill_price(self):
+        with mock.patch("dca_bot.trend_strategy.send_notification") as notify:
+            strategy, _ = self._open_with_slippage()
+
+        open_trade = strategy._ledger.open_position()
+        self.assertAlmostEqual(open_trade["entry_price"], self.FILL, places=6)
+        entry_messages = [c.args[0] for c in notify.call_args_list if "[TREND-EINSTIEG]" in c.args[0]]
+        self.assertEqual(len(entry_messages), 1)
+        self.assertIn(f"@ {self.FILL:.2f}", entry_messages[0])
+
+    def test_exchange_stop_order_threshold_is_based_on_the_fill_price(self):
+        _, client = self._open_with_slippage()
+
+        _, _, stop_price, limit_price = client.stop_order_calls[0]
+        expected_stop = self.FILL * (1 - 0.10)
+        self.assertAlmostEqual(stop_price, expected_stop, places=2)
+        self.assertAlmostEqual(limit_price, expected_stop * (1 - 0.005), places=2)
+        # Praemisse: die tickerbasierte Schwelle waere eine andere Zahl.
+        self.assertGreater(abs(stop_price - self.TICKER * (1 - 0.10)), 50.0)
+
+    def test_internal_stop_loss_check_uses_the_fill_based_threshold(self):
+        """
+        Die Folge im laufenden Betrieb: 45.050 liegt unter der Schwelle
+        des Fills (45.090), aber ueber der des Tickers (45.000). Nur mit
+        dem Fill als Einstiegspreis loest der interne Stop-Loss hier aus.
+        """
+        strategy, client = self._open_with_slippage()
+        crash_price = 45_050.0
+        self.assertFalse(
+            is_stop_loss_hit(self.TICKER, crash_price, 10.0),
+            "Testaufbau: mit dem Ticker als Basis darf hier nichts ausloesen",
+        )
+        self.assertTrue(is_stop_loss_hit(self.FILL, crash_price, 10.0))
+
+        client.price = crash_price
+        client.fill_price = None
+        strategy.execute_once()
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["exit_reason"], "stop_loss")
+
+    def test_exit_price_is_the_fill_price(self):
+        strategy, client = self._open_with_slippage()
+        open_trade = strategy._ledger.open_position()
+        client.fill_price = 51_900.0  # Verkauf unter dem Ticker von 52.000
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as notify:
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        closed = strategy._ledger._read()[0]
+        self.assertAlmostEqual(closed["exit_price"], 51_900.0, places=6)
+        exit_messages = [c.args[0] for c in notify.call_args_list if "[TREND-AUSSTIEG]" in c.args[0]]
+        self.assertIn("@ 51900.00", exit_messages[0])
+
+    def test_stop_loss_latch_stores_the_fill_price(self):
+        """
+        Der Ausstiegskurs in der Latch-Datei ist der vorgesehene Anker
+        eines spaeteren automatischen Resets (trading-bot-projekt.md 6i).
+        """
+        strategy, client = self._open_with_slippage()
+        open_trade = strategy._ledger.open_position()
+        client.fill_price = 44_900.0
+
+        strategy._close_position(open_trade, price=45_000.0, reason="stop_loss")
+
+        latch = json.loads(Path(self.stop_loss_state_file).read_text(encoding="utf-8"))
+        self.assertAlmostEqual(latch["exit_price"], 44_900.0, places=6)
+        self.assertAlmostEqual(latch["loss_pct"], (1 - 44_900.0 / self.FILL) * 100, places=6)
+
+    def test_dry_run_keeps_the_observed_price(self):
+        """
+        Abgrenzung: Im Dry-Run gibt es keine Order-Antwort, der
+        beobachtete Preis IST der simulierte Fill. Ein gesetzter
+        Fuellpreis am Fake darf dort nichts aendern.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=self.TICKER)
+        client.fill_price = 12_345.0
+
+        strategy._open_position(self.TICKER)
+
+        self.assertEqual(strategy._ledger.open_position()["entry_price"], self.TICKER)
+        _, _, stop_price, _ = client.stop_order_calls[0]
+        self.assertAlmostEqual(stop_price, self.TICKER * (1 - 0.10), places=2)
 
 
 class TrendTradingRulesTestCase(TrendStrategyTestBase):

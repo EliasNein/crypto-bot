@@ -163,6 +163,16 @@ class TrendFollowingStrategy:
             return
 
         if order is not None:
+            # Tatsaechlicher Fuellpreis aus der Order-Antwort
+            # (cummulativeQuoteQty / executedQty), nicht der vor der Order
+            # abgefragte Ticker - gleiche Quelle wie im Reconciliation-Pfad
+            # (_record_reconciled_entry). Hier zaehlt das mehr als beim
+            # Grid-Bot, wo es "nur" die Anzeige betraf: aus entry_price
+            # entsteht die Stop-Loss-Schwelle - fuer die Order an der Boerse
+            # unten, fuer is_stop_loss_hit() und fuer jede spaeter neu
+            # platzierte Absicherung. Bis zum 25.09.2026 stand hier der
+            # Ticker, die Schwelle lag also um die Slippage des Kaufs daneben.
+            entry_price = average_fill_price(order, fallback=price)
             # Menge abzüglich der in BTC abgezogenen Kaufgebühr. Das ist
             # hier besonders wichtig: mit dieser Menge wird gleich die
             # exchange-seitige Stop-Loss-Order platziert - über die
@@ -171,6 +181,8 @@ class TrendFollowingStrategy:
             quantity = net_executed_quantity(order, rules, fallback=amount / price)
             quote_spent = float(order.get("cummulativeQuoteQty", amount))
         else:
+            # Dry-Run: der beobachtete Preis IST der simulierte Fill.
+            entry_price = price
             # Dry-Run: keine echte Gebühr bekannt, deshalb keine geschätzte
             # abgezogen - die Menge wird aber quantisiert, damit simulierte
             # und echte Werte vergleichbar bleiben.
@@ -187,7 +199,7 @@ class TrendFollowingStrategy:
             quote_spent = quantity * price
 
         trade = TrendTrade.new(
-            entry_price=price,
+            entry_price=entry_price,
             quantity=quantity,
             quote_spent=quote_spent,
             dry_run=not self._config.trading_enabled,
@@ -213,7 +225,7 @@ class TrendFollowingStrategy:
         # Order (siehe binance_client.py) und gibt None zurück - die
         # Position bleibt dann wie bisher rein per is_stop_loss_hit()
         # software-intern überwacht.
-        stop_price = price * (1 - self._config.stop_loss_pct / 100)
+        stop_price = entry_price * (1 - self._config.stop_loss_pct / 100)
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
         stop_order = self._client.place_stop_loss_limit_sell(
             self._config.symbol,
@@ -256,10 +268,12 @@ class TrendFollowingStrategy:
                 "Position aktuell nur software-intern abgesichert."
             )
 
-        logger.info("Trend-Einstieg: %s @ %.2f (Menge: %.8f)", self._config.symbol, price, quantity)
+        logger.info(
+            "Trend-Einstieg: %s @ %.2f (Menge: %.8f)", self._config.symbol, entry_price, quantity
+        )
         tag = "[TREND-EINSTIEG]" if order is not None else "[TREND-EINSTIEG DRY-RUN]"
         send_notification(
-            f"{tag} Long {quantity:.8f} {self._config.symbol} @ {price:.2f}"
+            f"{tag} Long {quantity:.8f} {self._config.symbol} @ {entry_price:.2f}"
         )
 
     def _resolve_stop_order_before_close(self, open_trade: dict) -> str:
@@ -476,35 +490,44 @@ class TrendFollowingStrategy:
                 return
 
         if order is not None:
+            # Tatsaechlicher Fuellpreis statt des vorher abgefragten
+            # Tickers - siehe _open_position; _record_reconciled_exit macht
+            # es schon immer so. Er landet auch als exit_price in der
+            # Latch-Datei, dem vorgesehenen Anker eines spaeteren
+            # automatischen Resets (trading-bot-projekt.md 6i, Punkt 16).
+            exit_price = average_fill_price(order, fallback=price)
             # Netto, also abzüglich der in USDT abgerechneten
             # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
             proceeds = net_proceeds(order, rules, fallback=open_trade["quantity"] * price)
         else:
+            exit_price = price
             proceeds = open_trade["quantity"] * price
         realized_pnl = proceeds - open_trade["quote_spent"]
 
         exit_time = datetime.now(timezone.utc).isoformat()
-        self._ledger.record_exit(open_trade["id"], price, exit_time, reason, realized_pnl)
+        self._ledger.record_exit(open_trade["id"], exit_price, exit_time, reason, realized_pnl)
 
         reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
         logger.info(
             "Trend-Ausstieg (%s): %s @ %.2f (Einstieg @ %.2f), realisiert %.2f",
             reason_label,
             self._config.symbol,
-            price,
+            exit_price,
             open_trade["entry_price"],
             realized_pnl,
         )
         tag = "[TREND-AUSSTIEG]" if order is not None else "[TREND-AUSSTIEG DRY-RUN]"
         send_notification(
             f"{tag} ({reason_label}): {open_trade['quantity']:.8f} {self._config.symbol} "
-            f"@ {price:.2f} (Einstieg @ {open_trade['entry_price']:.2f}), "
+            f"@ {exit_price:.2f} (Einstieg @ {open_trade['entry_price']:.2f}), "
             f"realisiert: {realized_pnl:+.2f}"
         )
 
         if reason == "stop_loss":
-            loss_pct = (1 - price / open_trade["entry_price"]) * 100
-            self._stop_loss.pause(self._config.symbol, open_trade["entry_price"], price, loss_pct)
+            loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
+            self._stop_loss.pause(
+                self._config.symbol, open_trade["entry_price"], exit_price, loss_pct
+            )
 
     def _sell_is_covered(self, open_trade: dict) -> bool:
         """
