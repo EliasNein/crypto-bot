@@ -35,7 +35,11 @@ from unittest import mock
 import requests
 from binance.exceptions import BinanceAPIException
 
-from dca_bot.binance_client import ORDER_DOES_NOT_EXIST_CODE, TradingClient
+from dca_bot.binance_client import (
+    ORDER_DOES_NOT_EXIST_CODE,
+    TradingClient,
+    _execution_status_unknown,
+)
 from dca_bot.config import Config
 from dca_bot.pending_orders import (
     KIND_MARKET,
@@ -353,9 +357,19 @@ class ResolvePendingOrderTestCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def api_exception(code: int, message: str) -> BinanceAPIException:
+def api_exception(code: int, message: str, status_code: int = 400) -> BinanceAPIException:
     """Baut eine echte BinanceAPIException mit gesetztem `code`."""
-    return BinanceAPIException(None, 400, json.dumps({"code": code, "msg": message}))
+    return BinanceAPIException(None, status_code, json.dumps({"code": code, "msg": message}))
+
+
+def server_error_without_json(status_code: int = 503) -> BinanceAPIException:
+    """
+    Eine 5xx-Antwort ohne lesbaren Fehlertext, wie python-binance sie aus
+    einer HTML-Fehlerseite baut: `code` bleibt 0, nur der Status traegt
+    die Information.
+    """
+    response = mock.Mock(text="<html>503 Service Temporarily Unavailable</html>")
+    return BinanceAPIException(response, status_code, response.text)
 
 
 class FakeRawBinanceClient:
@@ -615,7 +629,7 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
         self.assertEqual(self._pending_ids(), [])
         notify.assert_not_called()
         self.assertTrue(
-            any("trotz des Verbindungsfehlers" in line for line in captured.output)
+            any("trotz des Verbindungs- oder Serverfehlers" in line for line in captured.output)
         )
 
     def test_network_error_on_sell_is_resolved_the_same_way(self):
@@ -865,6 +879,139 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
         with self.assertRaises(ValueError):
             client.place_market_buy("BTCUSDT", 15.0)
         self.assertEqual(raw.placed_client_order_ids, [])
+
+
+class ServerErrorWithUnknownOutcomeTestCase(TradingClientTestBase):
+    """
+    HTTP 5xx sowie die Codes -1006/-1007 bei der Order-Platzierung
+    (Nebenbefund zu Punkt B der Code-Ueberpruefung vom 25.09.2026).
+
+    python-binance wirft dafuer eine BinanceAPIException - genau wie fuer
+    eine echte Ablehnung. Laut Binance-Doku ist der Ausgang aber UNBEKANNT
+    ("could have been a success"). Bis dahin wurde der Pending-Eintrag
+    geloescht und "kein Trade" gemeldet; jetzt wird nachgefragt wie nach
+    einem Verbindungsfehler.
+    """
+
+    def _place_buy(self, client, level: str = "WARNING"):
+        with mock.patch("dca_bot.binance_client.send_notification") as notify:
+            with self.assertLogs("dca_bot", level=level) as captured:
+                order = client.place_market_buy("BTCUSDT", 15.0)
+        return order, notify, captured.output
+
+    def test_http_5xx_with_filled_order_is_booked(self):
+        client, raw = self._make_client()
+        raw.order_behaviour = api_exception(-1001, "Internal error.", status_code=503)
+        raw.status_payload = {"status": "FILLED", "executedQty": "0.00019480"}
+
+        order, notify, log_lines = self._place_buy(client)
+
+        self.assertIsNotNone(order, "Die ausgefuehrte Order muss verbucht werden")
+        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(
+            raw.get_order_calls[0]["origClientOrderId"], raw.placed_client_order_ids[0]
+        )
+        self.assertEqual(self._pending_ids(), [])
+        notify.assert_not_called()
+        self.assertTrue(any("HTTP 503" in line for line in log_lines), log_lines)
+
+    def test_http_5xx_without_readable_error_is_detected_by_status(self):
+        """Eine HTML-Fehlerseite ergibt `code == 0` - der Status reicht."""
+        client, raw = self._make_client()
+        raw.order_behaviour = server_error_without_json(500)
+        self.assertEqual(raw.order_behaviour.code, 0, "Testaufbau: kein Code vorhanden")
+
+        order, _, _ = self._place_buy(client)
+
+        self.assertIsNotNone(order)
+        self.assertEqual(len(raw.get_order_calls), 1, "Es wurde nachgefragt")
+
+    def test_minus_1007_is_detected_by_code_regardless_of_status(self):
+        """
+        Die Doku nennt fuer -1007 keinen HTTP-Status - erkannt wird am
+        Code. Bewusst mit einem Status unter 500, damit der Test nicht
+        ueber die 5xx-Regel gruen wird.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = api_exception(
+            -1007, "Timeout waiting for response from backend server.", status_code=408
+        )
+
+        order, _, _ = self._place_buy(client)
+
+        self.assertIsNotNone(order)
+        self.assertEqual(len(raw.get_order_calls), 1)
+
+    def test_minus_1006_is_detected_by_code(self):
+        client, raw = self._make_client()
+        raw.order_behaviour = api_exception(
+            -1006, "An unexpected response was received from the message bus.", status_code=400
+        )
+
+        order, _, _ = self._place_buy(client)
+
+        self.assertIsNotNone(order)
+        self.assertEqual(len(raw.get_order_calls), 1)
+
+    def test_minus_1007_then_unknown_keeps_the_entry_for_the_next_start(self):
+        """
+        Das Zusammenspiel mit B1: nach -1007 kann die Matching Engine noch
+        arbeiten, die sofortige Rueckfrage liefert dann -2013. Der
+        Eintrag bleibt fuer die Reconciliation beim naechsten Start.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = api_exception(-1007, "Timeout.", status_code=408)
+        raw.status_behaviour = "not_found"
+
+        order, notify, _ = self._place_buy(client)
+
+        self.assertIsNone(order)
+        self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
+        notify.assert_not_called()
+
+    def test_server_error_and_failed_lookup_escalates(self):
+        client, raw = self._make_client()
+        raw.order_behaviour = server_error_without_json(502)
+        raw.status_behaviour = requests.exceptions.ReadTimeout("weg")
+
+        order, notify, log_lines = self._place_buy(client, level="ERROR")
+
+        self.assertIsNone(order)
+        self.assertEqual(len(self._pending_ids()), 1)
+        notify.assert_called_once()
+        self.assertIn("[ORDER-UNKLAR]", notify.call_args.args[0])
+        self.assertTrue(any("UNKLARER ORDER-ZUSTAND" in line for line in log_lines))
+
+    def test_rate_limit_stays_a_definite_rejection(self):
+        """
+        Gegenprobe: 4xx heisst laut Doku "the issue is on the sender's
+        side" - die Order wurde nicht angenommen. Ohne diese Abgrenzung
+        waere "es wird nachgefragt" auch gruen, wenn JEDE API-Exception
+        nachfragen wuerde.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = api_exception(-1003, "Too many requests.", status_code=429)
+
+        order, _, _ = self._place_buy(client, level="ERROR")
+
+        self.assertIsNone(order)
+        self.assertEqual(raw.get_order_calls, [], "Keine Rueckfrage bei einer Ablehnung")
+        self.assertEqual(self._pending_ids(), [])
+
+    def test_classification_table(self):
+        cases = [
+            ("HTTP 500", server_error_without_json(500), True),
+            ("HTTP 503 mit Code", api_exception(-1001, "x", status_code=503), True),
+            ("-1006 bei HTTP 400", api_exception(-1006, "x"), True),
+            ("-1007 bei HTTP 408", api_exception(-1007, "x", status_code=408), True),
+            ("-2010 Guthaben", api_exception(-2010, "x"), False),
+            ("-1003 Rate-Limit", api_exception(-1003, "x", status_code=429), False),
+            ("-1013 Filter", api_exception(-1013, "x"), False),
+            ("Verbindungsfehler (anderer Weg)", requests.exceptions.ReadTimeout("x"), False),
+        ]
+        for label, exc, expected in cases:
+            with self.subTest(fall=label):
+                self.assertIs(_execution_status_unknown(exc), expected)
 
 
 class OrderFillsEnrichmentTestCase(TradingClientTestBase):
