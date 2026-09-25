@@ -36,6 +36,15 @@ from .version import get_code_version
 # Notaus ausgelöst wurde - kurz genug, um "sofort" zu wirken.
 KILL_SWITCH_POLL_SECONDS = 5
 
+# Request-Timeout gegen die Binance-API in Sekunden, statt des
+# python-binance-Standards von 10 s. Hintergrund: nächtliche
+# "HTTPSConnectionPool(host='testnet.binance.vision', ...): Read timed out"-
+# Fehlalarme, bei denen das Testnet zwar noch antwortete, aber knapp zu
+# langsam. Betroffen war nur der Grid-Bot, weil er alle 5 Minuten abfragt
+# statt einmal am Tag (siehe trading-bot-projekt.md 6g). Bewusst nur hier
+# gesetzt - DCA, Trend und Allocator bleiben beim Bibliotheks-Default.
+REQUEST_TIMEOUT_SECONDS = 20
+
 
 def setup_logging(log_file: str) -> None:
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -119,7 +128,7 @@ def main() -> None:
         enable_var_name="GRID_BOT_ENABLE_TRADING",
     )
 
-    client = TradingClient(config)
+    client = TradingClient(config, request_timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     strategy = GridTradingStrategy(config, client)
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="GRID_BOT_HALT")
 
