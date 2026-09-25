@@ -97,7 +97,7 @@ class GridTradingStrategy:
 
         Ob dabei tatsächlich eine echte Order platziert wird, hängt NICHT
         nur am aktuellen Trading-Modus, sondern zusätzlich am `dry_run`-Flag
-        der jeweiligen Position im Ledger (siehe README.md Abschnitt 8.4):
+        der jeweiligen Position im Ledger (siehe trading-bot-projekt.md 7.2):
         eine im Dry-Run "gekaufte" Position existiert an der Börse gar
         nicht und darf deshalb auch nach einem Umschalten auf echtes
         Trading niemals real verkauft werden. Umgekehrt wird eine ECHTE

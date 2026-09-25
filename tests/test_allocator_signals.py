@@ -58,7 +58,7 @@ SMOOTHING_MULTIPLIER = 0.5
 # Nachrechnen, identische Logik. Der Allocator fuettert den Generator
 # bewusst mit min_gap_pct=0 - er braucht den rohen, kontinuierlichen
 # EMA-Abstand, nicht die Bestaetigungslogik fuer binaere Entscheidungen
-# (siehe allocator.py und README Abschnitt 10.3).
+# (siehe allocator.py und trading-bot-projekt.md 7.4).
 FAST_PERIOD = 3
 SLOW_PERIOD = 5
 ALLOCATOR_MIN_GAP_PCT = 0.0
