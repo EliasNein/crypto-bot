@@ -71,6 +71,9 @@ class Config:
     # process_lock.py). Zwei Prozesse auf demselben Ledger würden sich
     # gegenseitig Einträge überschreiben.
     lock_file: str = "data/dca_bot.lock"
+    # Heartbeat-Status fuer externe Betrachter (Dashboard-App), siehe
+    # heartbeat_status.py. Eigene Datei pro Bot, wird nur geschrieben.
+    heartbeat_status_file: str = "data/heartbeat_dca.json"
 
     # --- Kapital-Allocator (optional, siehe allocator.py) ---
     # Leer = deaktiviert (Default): der Bot verhält sich dann exakt wie
@@ -176,6 +179,9 @@ def load_config() -> Config:
             "DCA_PENDING_ORDERS_FILE", "data/pending_orders_dca.json"
         ),
         lock_file=env_text("DCA_LOCK_FILE", "data/dca_bot.lock"),
+        heartbeat_status_file=env_text(
+            "DCA_HEARTBEAT_STATUS_FILE", "data/heartbeat_dca.json"
+        ),
         # Leer ist hier die gültige Bedeutung "Allocator-Anbindung aus".
         allocator_state_file=env_text(
             "DCA_ALLOCATOR_STATE_FILE", "", required=False

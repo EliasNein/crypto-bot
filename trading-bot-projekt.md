@@ -1049,6 +1049,20 @@ Nicht angefasst ist `cancel_order()`: Dort gilt ein fehlgeschlagener Aufruf ohne
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 7 Mutationen gefangen: altes Verhalten, bei dem jede API-Exception eine Ablehnung ist (6); 5xx-Regel entfernt (5); Grenze `>= 500` zu `> 500` (2); −1006 fehlt (2); −1007 fehlt (3); jede API-Exception gilt als unbekannt (5); Log ohne HTTP-Status und Code (1).
 
+### Heartbeat-Statusdateien für die Dashboard-App (25.09.2026)
+
+**Anlass.** Der Zeitpunkt des letzten erfolgreichen Zyklus lebte seit Priorität 2 (oben) korrekt als `last_cycle_at`, aber nur im Prozessspeicher. Die separate Dashboard-App ([crypto-bot-app](https://github.com/EliasNein/crypto-bot-app)) liest nur Dateien aus `data/` und importiert keinen Bot-Code; sie konnte den Status also nicht sehen.
+
+**Umgesetzt.** Jeder der vier Bots schreibt nach jedem Zyklus eine eigene JSON-Datei (`data/heartbeat_<bot>.json`) mit `last_successful_cycle`, `last_cycle_attempt` und `consecutive_failures`. Neues Modul `dca_bot/heartbeat_status.py`, aufgerufen im selben `except`/`else` der Schleife, das auch `last_cycle_at` setzt; eine eigene Erfolgslogik gibt es nicht. Bewusst festgelegt:
+
+- **Nur schreiben, nie lesen.** Kein Bot liest eine Heartbeat-Datei, der Writer hat keine Lesefunktion.
+- **Beim Notaus wird nichts geschrieben**, weil das weder Erfolg noch Fehlschlag ist.
+- **Kein `process_started_at`.** Die Werte gelten pro Prozesslauf, wie beim Telegram-Heartbeat; nach einem Neustart zeigt die Datei bis zum ersten Zyklus noch den alten Stand.
+
+Details in 7.1 („Heartbeat-Statusdateien für externe Betrachter“). `data/` ist per `.gitignore` ausgeschlossen, die Dateien landen nicht im Repo.
+
+**Tests:** 27 neue in `tests/test_heartbeat_status_file.py`: der Writer (Inhalt, Absturz mitten in der Ausgabe und beim Umbenennen, Schreibfehler), die echte `main()` aller vier Bots mit der Zyklusfolge Fehler, Erfolg, Fehler, Fehler, Erfolg sowie Notaus und nicht beschreibbarer Datei, dazu eine Quelltext-Prüfung, dass der Pfad nur in den Configs und an der Konstruktor-Stelle vorkommt. Die beiden bestehenden Test-Dateien, die `main()` voll durchlaufen, schreiben den Status jetzt ins temporäre Verzeichnis statt nach `data/`. Gesamtstand **657, alle grün**. **Wirksamkeit gemessen:** Kontrolllauf 0 Fehlschläge, alle 17 Mutationen gefangen, darunter je ein fehlender `record_success`/`record_failure`-Aufruf in allen vier Einstiegspunkten (je 1), Write beim Notaus (1), ein Lesezugriff im Trend-Bot (1), fehlender Zähler-Reset (5), direkter Write ohne temporäre Datei (2) und eine durchgereichte Exception (9).
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
@@ -1395,6 +1409,27 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   galt jeder Durchlauf). Bewusst **kein** Heartbeat beim
   Start: ein Bot in einer Neustartschleife würde sonst im Minutentakt
   "ich lebe" melden.
+- **Heartbeat-Statusdateien für externe Betrachter**
+  (`dca_bot/heartbeat_status.py`, seit 25.09.2026): Jeder der vier Bots
+  schreibt nach jedem Zyklus eine eigene kleine JSON-Datei,
+  `data/heartbeat_dca.json`, `data/heartbeat_grid.json`,
+  `data/heartbeat_trend.json` und `data/heartbeat_allocator.json`
+  (Pfade über `DCA_`/`GRID_`/`TREND_`/`ALLOCATOR_HEARTBEAT_STATUS_FILE`).
+  Inhalt: `last_successful_cycle` (ISO-Zeitstempel in UTC oder `null`),
+  `last_cycle_attempt` (letzter Versuch, erfolgreich oder nicht) und
+  `consecutive_failures`. Was als Erfolg zählt, ist dasselbe wie beim
+  Lebenszeichen oben, der Writer bekommt genau diesen Zeitstempel. Beim
+  Notaus wird nichts geschrieben. Die Dateien sind **reine Ausgabe** für
+  die Dashboard-App: Kein Bot liest seine eigene oder eine fremde
+  Heartbeat-Datei, damit entsteht keine Kopplung zwischen den Prozessen.
+  Eine Datei pro Bot statt einer gemeinsamen, weil vier unabhängige
+  Prozesse sich sonst gegenseitig überschreiben könnten. Geschrieben wird
+  atomar (temporäre Datei, fsync, `os.replace`) wie bei den Ledgern. Ein
+  Schreibfehler wird abgefangen und einmal pro Fehlerserie geloggt, auf
+  Handel, Notaus und Telegram wirkt er nicht. Die Werte gelten **pro
+  Prozesslauf**: Nach einem Neustart beginnt alles wieder bei `null`/0,
+  und bis zum ersten Zyklus zeigt die Datei noch den Stand des vorherigen
+  Prozesses (bei DCA und Trend wegen der Startwartezeit bis zu 24 h).
 - **Kein doppelter Bot-Start** (`dca_bot/process_lock.py`): Jeder der vier
   Prozesse hält beim Start ein exklusives Lock auf einer eigenen
   `.lock`-Datei (`fcntl`/`msvcrt`). Ein zweiter Start desselben Bots

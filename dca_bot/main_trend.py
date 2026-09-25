@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from .binance_client import TradingClient
 from .heartbeat import Heartbeat
+from .heartbeat_status import HeartbeatStatusWriter
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
@@ -177,6 +178,9 @@ def main() -> None:
     heartbeat = Heartbeat("Trend-Following-Bot", config.heartbeat_interval_hours)
     # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
     last_cycle_at: datetime | None = None
+    # Derselbe Status zusaetzlich als Datei fuer die Dashboard-App -
+    # nur geschrieben, von keinem Bot gelesen (siehe heartbeat_status.py).
+    status_file = HeartbeatStatusWriter(config.heartbeat_status_file, logger)
 
     interval_seconds = config.interval_hours * 60 * 60
 
@@ -195,8 +199,10 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Trend-Zyklus.")
                 send_notification(f"[TREND-FEHLER] Unerwarteter Fehler im Trend-Zyklus: {exc}")
+                status_file.record_failure(datetime.now(timezone.utc), last_cycle_at)
             else:
                 last_cycle_at = datetime.now(timezone.utc)
+                status_file.record_success(last_cycle_at)
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.

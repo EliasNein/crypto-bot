@@ -175,6 +175,7 @@ class DcaHeartbeatLastCycleTestCase(_HeartbeatLastCycleMixin, unittest.TestCase)
             stop_loss_state_file=str(tmp / "stop_loss_paused.json"),
             pending_orders_file=str(tmp / "pending_orders_dca.json"),
             lock_file=str(tmp / "dca_bot.lock"),
+            heartbeat_status_file=str(tmp / "heartbeat_dca.json"),
             log_file=str(tmp / "dca_bot.log"),
         )
 
@@ -201,6 +202,7 @@ class GridHeartbeatLastCycleTestCase(_HeartbeatLastCycleMixin, unittest.TestCase
             stop_loss_state_file=str(tmp / "grid_stop_loss_paused.json"),
             pending_orders_file=str(tmp / "pending_orders_grid.json"),
             lock_file=str(tmp / "grid_bot.lock"),
+            heartbeat_status_file=str(tmp / "heartbeat_grid.json"),
             log_file=str(tmp / "grid_bot.log"),
         )
 
@@ -219,6 +221,7 @@ class TrendHeartbeatLastCycleTestCase(_HeartbeatLastCycleMixin, unittest.TestCas
             stop_loss_state_file=str(tmp / "trend_stop_loss_paused.json"),
             pending_orders_file=str(tmp / "pending_orders_trend.json"),
             lock_file=str(tmp / "trend_bot.lock"),
+            heartbeat_status_file=str(tmp / "heartbeat_trend.json"),
             log_file=str(tmp / "trend_bot.log"),
         )
 
@@ -235,6 +238,7 @@ class AllocatorHeartbeatLastCycleTestCase(_HeartbeatLastCycleMixin, unittest.Tes
             api_secret="test",
             state_file=str(tmp / "allocator_state.json"),
             lock_file=str(tmp / "allocator.lock"),
+            heartbeat_status_file=str(tmp / "heartbeat_allocator.json"),
             log_file=str(tmp / "allocator.log"),
         )
 

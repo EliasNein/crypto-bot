@@ -64,6 +64,9 @@ class GridConfig:
     bot_name: str = "grid"
     pending_orders_file: str = "data/pending_orders_grid.json"
     lock_file: str = "data/grid_bot.lock"
+    # Heartbeat-Status fuer externe Betrachter (Dashboard-App), siehe
+    # heartbeat_status.py. Eigene Datei pro Bot, wird nur geschrieben.
+    heartbeat_status_file: str = "data/heartbeat_grid.json"
 
     # --- Benachrichtigungen (optional, gleiche Zugangsdaten wie der DCA-Bot) ---
     telegram_bot_token: str = ""
@@ -154,6 +157,9 @@ def load_grid_config() -> GridConfig:
             "GRID_PENDING_ORDERS_FILE", "data/pending_orders_grid.json"
         ),
         lock_file=env_text("GRID_LOCK_FILE", "data/grid_bot.lock"),
+        heartbeat_status_file=env_text(
+            "GRID_HEARTBEAT_STATUS_FILE", "data/heartbeat_grid.json"
+        ),
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
