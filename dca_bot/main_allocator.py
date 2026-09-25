@@ -127,6 +127,8 @@ def main() -> None:
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="ALLOCATOR_HALT")
 
     heartbeat = Heartbeat("Kapital-Allocator", config.heartbeat_interval_hours)
+    # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
+    last_cycle_at: datetime | None = None
 
     interval_seconds = config.interval_minutes * 60
 
@@ -142,10 +144,11 @@ def main() -> None:
             except Exception as exc:
                 logger.exception("Unerwarteter Fehler im Allocator-Zyklus.")
                 send_notification(f"[ALLOCATOR-FEHLER] Unerwarteter Fehler: {exc}")
+            else:
+                last_cycle_at = datetime.now(timezone.utc)
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
-            last_cycle_at = datetime.now(timezone.utc)
             heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %d Minuten bis zur nächsten Berechnung ...", config.interval_minutes)

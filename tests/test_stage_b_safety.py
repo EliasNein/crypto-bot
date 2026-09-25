@@ -424,7 +424,7 @@ class HeartbeatTestCase(unittest.TestCase):
         self.assertIn("[HEARTBEAT]", message)
         self.assertIn("Grid-Bot", message)
         self.assertIn("Version", message)
-        self.assertIn("letzter Zyklus", message)
+        self.assertIn("letzter erfolgreicher Zyklus", message)
 
     def test_sends_only_once_per_interval(self):
         """
@@ -456,7 +456,7 @@ class HeartbeatTestCase(unittest.TestCase):
         with mock.patch("dca_bot.heartbeat.send_notification") as notify:
             heartbeat.maybe_send(None)
 
-        self.assertIn("noch kein abgeschlossener Zyklus", notify.call_args.args[0])
+        self.assertIn("noch kein erfolgreicher Zyklus", notify.call_args.args[0])
 
     def test_stale_cycle_timestamp_is_visible_in_the_message(self):
         """

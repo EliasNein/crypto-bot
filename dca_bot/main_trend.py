@@ -175,6 +175,8 @@ def main() -> None:
     )
 
     heartbeat = Heartbeat("Trend-Following-Bot", config.heartbeat_interval_hours)
+    # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
+    last_cycle_at: datetime | None = None
 
     interval_seconds = config.interval_hours * 60 * 60
 
@@ -193,10 +195,11 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Trend-Zyklus.")
                 send_notification(f"[TREND-FEHLER] Unerwarteter Fehler im Trend-Zyklus: {exc}")
+            else:
+                last_cycle_at = datetime.now(timezone.utc)
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
-            last_cycle_at = datetime.now(timezone.utc)
             heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %d Stunden bis zum nächsten Zyklus ...", config.interval_hours)

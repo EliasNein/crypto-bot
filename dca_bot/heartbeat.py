@@ -73,11 +73,15 @@ class Heartbeat:
         (5-Minuten-Takt) bedeutet das eine Nachricht pro Tag, nicht eine
         alle fuenf Minuten.
 
-        `last_cycle_at` ist der Zeitpunkt des letzten abgeschlossenen
-        Zyklus. Er steht mit in der Nachricht, weil "Prozess laeuft" und
-        "Prozess arbeitet" nicht dasselbe sind: haengt ein Bot in einem
-        Netzwerk-Timeout fest, laeuft er zwar, aber der Zeitstempel
-        bleibt stehen - und genau das faellt in der Nachricht auf.
+        `last_cycle_at` ist der Zeitpunkt des letzten ERFOLGREICHEN
+        Zyklus, `None` heisst "in diesem Prozesslauf noch keiner". Er
+        steht mit in der Nachricht, weil "Prozess laeuft" und "Prozess
+        arbeitet" nicht dasselbe sind: haengt ein Bot in einem
+        Netzwerk-Timeout fest oder scheitert jeder Zyklus, laeuft er
+        zwar, aber der Zeitstempel bleibt stehen - und genau das faellt
+        in der Nachricht auf. Bis zum 25.09.2026 setzten die main*.py
+        ihn auch nach einem abgebrochenen Zyklus auf "jetzt", womit
+        diese Unterscheidung ins Leere lief.
         """
         if self._interval is None:
             return
@@ -88,13 +92,15 @@ class Heartbeat:
         self._last_sent = now
 
         if last_cycle_at is None:
-            cycle_text = "noch kein abgeschlossener Zyklus"
+            cycle_text = "noch kein erfolgreicher Zyklus"
         else:
-            cycle_text = last_cycle_at.strftime("%Y-%m-%d %H:%M UTC")
+            cycle_text = "letzter erfolgreicher Zyklus " + last_cycle_at.strftime(
+                "%Y-%m-%d %H:%M UTC"
+            )
 
         message = (
             f"[HEARTBEAT] {self._bot_name} laeuft, Version {self._version}, "
-            f"letzter Zyklus {cycle_text}"
+            f"{cycle_text}"
         )
         logger.info("%s", message)
         send_notification(message)
