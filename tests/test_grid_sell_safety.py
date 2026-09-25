@@ -38,6 +38,7 @@ from unittest import mock
 
 from dca_bot.grid_config import GridConfig
 from dca_bot.grid_risk import GridPosition
+from dca_bot.grid_signals import find_triggered_buy_levels
 from dca_bot.order_utils import SymbolTradingRules, quantize_quantity
 from dca_bot.grid_strategy import GridTradingStrategy
 
@@ -256,22 +257,122 @@ class GridSellSafetyTestCase(GridStrategyTestBase):
         self.assertIsNotNone(closed["realized_pnl"])
         self.assertEqual(strategy._ledger.open_positions(), [])
 
-    def test_real_position_is_simulated_when_bot_runs_in_dry_run(self):
+    # -- Spiegelbild zu K4: echte Position wird bei deaktiviertem Trading
+    #    weder verkauft noch simuliert geschlossen --
+    #
+    # Bis zum 25.09.2026 stand hier ein Test, der genau das Gegenteil
+    # festschrieb: echte Position + Dry-Run -> Position "closed", mit der
+    # Begruendung "unkritisch, da keine Order platziert wird". Fuer die
+    # Boerse stimmte das, fuers Ledger nicht: es behauptete einen Verkauf,
+    # waehrend das BTC weiter an der Boerse lag (Schadensbild wie K1).
+
+    def test_real_position_stays_open_when_trading_disabled(self):
+        strategy, client = self._make_strategy(trading_enabled=False, price=79_000.0)
+        record = self._add_open_position(strategy, dry_run=False)
+
+        with mock.patch("dca_bot.grid_strategy.send_notification") as mock_notify:
+            with self.assertLogs("grid_bot", level="INFO") as captured:
+                strategy._process_sells(79_000.0)
+
+        self.assertEqual(client.market_sell_calls, [], "Kein (simulierter) Verkaufsaufruf")
+        still_open = strategy._ledger.open_positions()
+        self.assertEqual(len(still_open), 1, "Position muss OFFEN bleiben")
+        self.assertEqual(still_open[0]["id"], record["id"])
+        # Kein erfundener Erlös, kein Verkaufspreis, kein Zeitpunkt.
+        self.assertIsNone(still_open[0]["realized_pnl"])
+        self.assertIsNone(still_open[0]["sell_price"])
+        self.assertIsNone(still_open[0]["sold_at"])
+
+        warnings = [line for line in captured.output if "[GRID-VERKAUF-GESPERRT]" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0].startswith("WARNING"))
+
+        mock_notify.assert_called_once()
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[GRID-VERKAUF-GESPERRT]", text)
+        self.assertIn("GRID_BOT_ENABLE_TRADING=true", text)
+
+    def test_blocked_real_position_keeps_its_level_occupied(self):
         """
-        Umgekehrter Fall aus der Vorgabe: echte Position, aber der Bot
-        läuft gerade im Dry-Run (z.B. Config zurückgestellt). Bleibt wie
-        bisher simuliert - unkritisch, da keine Order platziert wird.
+        Die eigentliche Folge des alten Verhaltens: die Stufe galt nach dem
+        simulierten Schliessen als frei und wurde beim naechsten
+        Durchqueren ein zweites Mal gekauft. Jetzt bleibt sie belegt.
         """
+        strategy, client = self._make_strategy(trading_enabled=False, price=79_000.0)
+        record = self._add_open_position(strategy, dry_run=False)
+
+        with mock.patch("dca_bot.grid_strategy.send_notification"):
+            strategy._process_sells(79_000.0)
+
+            # Kurs faellt von oberhalb durch genau diese Stufe.
+            level_price = strategy._levels[record["level_index"]]
+            strategy._last_seen_price = level_price * 1.0001
+            # Praemisse: ohne die offene Position wuerde genau diese Stufe
+            # gekauft - sonst waere "kein Kauf" auch ohne Belegung wahr.
+            self.assertEqual(
+                find_triggered_buy_levels(
+                    strategy._levels, strategy._last_seen_price, level_price, set()
+                ),
+                [record["level_index"]],
+            )
+            strategy._process_buys(level_price)
+
+        self.assertEqual(client.market_buy_calls, [], "Stufe ist belegt - kein zweiter Kauf")
+        self.assertEqual(len(strategy._ledger.open_positions()), 1)
+
+    def test_blocked_real_position_is_logged_every_cycle_but_notified_once(self):
         strategy, client = self._make_strategy(trading_enabled=False, price=79_000.0)
         self._add_open_position(strategy, dry_run=False)
 
-        strategy._process_sells(79_000.0)
+        with mock.patch("dca_bot.grid_strategy.send_notification") as mock_notify:
+            with self.assertLogs("grid_bot", level="INFO") as captured:
+                strategy._process_sells(79_000.0)
+                strategy._process_sells(79_000.0)
+                strategy._process_sells(79_000.0)
 
-        # place_market_sell wird aufgerufen, gibt im Dry-Run-Modus aber
-        # None zurück und loggt nur - exakt wie beim echten Client.
-        self.assertEqual(len(client.market_sell_calls), 1)
+        self.assertEqual(
+            len([line for line in captured.output if "[GRID-VERKAUF-GESPERRT]" in line]),
+            3,
+            "Jeder Zyklus wird geloggt",
+        )
+        self.assertEqual(mock_notify.call_count, 1, "Telegram nur einmal pro Prozesslauf")
+        self.assertEqual(len(strategy._ledger.open_positions()), 1)
+
+    def test_same_real_position_is_sold_once_trading_is_enabled(self):
+        """
+        Gegenprobe: dasselbe Ledger, derselbe Kurs, nur Trading an - dann
+        wird regulaer verkauft. Belegt, dass es die neue Sperre ist, die
+        oben den Verkauf verhindert, und nicht etwa ein verfehltes Ziel.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=79_000.0)
+        self._add_open_position(strategy, dry_run=False)
+        with mock.patch("dca_bot.grid_strategy.send_notification"):
+            strategy._process_sells(79_000.0)
+        self.assertEqual(len(strategy._ledger.open_positions()), 1, "Vorbedingung: gesperrt")
+
+        live_client = FakeGridClient(trading_enabled=True, price=79_000.0)
+        live_strategy = GridTradingStrategy(self._make_config(True), live_client)
+        with mock.patch("dca_bot.grid_strategy.send_notification"):
+            live_strategy._process_sells(79_000.0)
+
+        self.assertEqual(len(live_client.market_sell_calls), 1)
+        self.assertEqual(live_strategy._ledger.open_positions(), [])
+
+    def test_dry_run_position_is_still_simulated_when_trading_disabled(self):
+        """
+        Abgrenzung: Die Sperre gilt nur fuer ECHTE Positionen. Eine
+        Dry-Run-Position im Dry-Run-Modus wird weiterhin simuliert
+        geschlossen - das ist der normale Paper-Trade-Betrieb.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=79_000.0)
+        self._add_open_position(strategy, dry_run=True)
+
+        with mock.patch("dca_bot.grid_strategy.send_notification"):
+            strategy._process_sells(79_000.0)
+
         closed = strategy._ledger._read()[0]
         self.assertEqual(closed["status"], "closed")
+        self.assertIsNotNone(closed["realized_pnl"])
 
     # -- K1: fehlgeschlagener echter Verkauf schließt die Position NICHT --
 

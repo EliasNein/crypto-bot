@@ -365,7 +365,10 @@ class TrendFollowingStrategy:
         des Ledger-Eintrags (siehe README.md Abschnitt 9.5): eine im
         Dry-Run "gekaufte" Position existiert an der Börse gar nicht und
         darf deshalb auch nach einem Umschalten auf echtes Trading niemals
-        real verkauft werden.
+        real verkauft werden. Umgekehrt wird eine ECHTE Position bei
+        deaktiviertem Trading gar nicht angefasst - weder ihre Stop-Order
+        storniert noch simuliert geschlossen (siehe
+        _report_exit_blocked_by_dry_run).
         """
         position_dry_run = open_trade.get("dry_run")
         if position_dry_run is None:
@@ -381,6 +384,33 @@ class TrendFollowingStrategy:
                 open_trade["id"],
                 reason,
             )
+            return
+
+        if not position_dry_run and not self._config.trading_enabled:
+            # Spiegelbild zu K4 (siehe unten): eine ECHTE Position,
+            # waehrend der Bot im Dry-Run laeuft. Bis zu diesem Fix lief der
+            # Ausstieg hier einfach weiter - _resolve_stop_order_before_close()
+            # stornierte die ECHTE Stop-Order an der Boerse (cancel_order
+            # pruefte trading_enabled damals nicht - seither wirft es dort,
+            # als zweite Sicherung hinter dieser), place_market_sell() simulierte
+            # nur, und die Position wurde mit erfundenem Erloes geschlossen.
+            # Ergebnis: echtes BTC, weder im Ledger noch durch eine
+            # Stop-Order abgesichert.
+            #
+            # Deshalb bewusst VOR jeder Aktion an der Boerse und vor dem
+            # Regel-Abruf: kein Stornieren, kein Verkauf, kein record_exit
+            # und kein Stop-Loss-Latch (es hat kein Ausstieg
+            # stattgefunden - gleiche Logik wie bei K1). Die Stop-Order an
+            # der Boerse bleibt liegen und schuetzt die Position weiter.
+            self._report_exit_blocked_by_dry_run(open_trade, price, reason)
+            # Die Position ueberlebt diesen Zyklus - also dieselbe Pruefung
+            # wie in execute_once() fuer eine offene Position: fehlt die
+            # Stop-Order, wird gezaehlt und ab der Schwelle gemeldet. Der
+            # Grund, warum sie dort erst NACH den Ausstiegs-Entscheidungen
+            # laeuft (eine neue Order laege bei ausgeloestem Stop-Loss
+            # unter der Schwelle und wuerde abgelehnt), gilt hier nicht:
+            # bei deaktiviertem Trading wird ohnehin nichts platziert.
+            self._ensure_stop_loss_protection(open_trade)
             return
 
         # Siehe _open_position: Regeln vor der ersten Order holen, damit
@@ -542,6 +572,43 @@ class TrendFollowingStrategy:
         )
         return False
 
+    def _report_exit_blocked_by_dry_run(
+        self, open_trade: dict, price: float, reason: str
+    ) -> None:
+        """
+        Meldet, dass fuer eine ECHTE Position ein Ausstieg faellig waere,
+        der Bot ihn aber nicht ausfuehren kann, weil
+        TREND_BOT_ENABLE_TRADING=false ist (siehe _close_position).
+
+        Telegram bei jedem Versuch: beim 24-Stunden-Takt ist das hoechstens
+        eine Nachricht pro Tag und damit eine Erinnerung, dass eine echte
+        Position ohne handlungsfaehigen Bot an der Boerse liegt - gleiche
+        Ueberlegung wie bei _warn_on_partially_filled_stop_order().
+        """
+        reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
+        stop_order_id = open_trade.get("stop_loss_order_id")
+        protection = (
+            f"Stop-Order {stop_order_id} an der Boerse bleibt bestehen"
+            if stop_order_id
+            else "KEINE Stop-Order an der Boerse hinterlegt"
+        )
+        logger.warning(
+            "[TREND-AUSSTIEG-GESPERRT] Ausstieg (%s) fuer die echte Position %s "
+            "waere faellig (Preis ~%.2f), aber TREND_BOT_ENABLE_TRADING ist "
+            "false - es wird NICHTS storniert, verkauft oder gebucht. Position "
+            "bleibt offen (%s). Zum Aussteigen Trading wieder aktivieren.",
+            reason_label,
+            open_trade["id"],
+            price,
+            protection,
+        )
+        send_notification(
+            f"[TREND-AUSSTIEG-GESPERRT] {self._config.symbol}: Ausstieg "
+            f"({reason_label}) @ {price:.2f} waere faellig, Trading ist aber "
+            f"deaktiviert. Echte Position bleibt offen ({protection}). Zum "
+            "Aussteigen TREND_BOT_ENABLE_TRADING=true setzen."
+        )
+
     def _handle_failed_real_sell(
         self, open_trade: dict, price: float, cause: str | None = None
     ) -> None:
@@ -669,15 +736,51 @@ class TrendFollowingStrategy:
         `uncertain_cycles`). Bei Erfolg wird der Zähler zurückgesetzt.
 
         Bewusst NICHT betroffen: Dry-Run-Positionen (existieren an der
-        Börse nicht, siehe K4) und der Dry-Run-Modus selbst (dort wird nie
-        eine echte Order platziert).
+        Börse nicht, siehe K4). Eine Position OHNE `dry_run`-Feld wird
+        ebenfalls nicht angefasst, sondern als `[TREND-POSITION-UNKLAR]`
+        gemeldet - bis zum 25.09.2026 galt sie hier als echt und hätte
+        mit Trading an eine echte Stop-Order für eine Position
+        unbekannter Art bekommen.
+
+        Im Dry-Run-MODUS (Trading aus) wird für eine ECHTE Position zwar
+        keine Order platziert, der Zustand aber trotzdem gezählt und ab
+        der Schwelle gemeldet. Bis zum 25.09.2026 stieg die Methode dort
+        sofort aus - verschwand die Stop-Order einer echten Position,
+        während der Bot auf Dry-Run stand, blieb das ungezählt und
+        ungemeldet.
         """
-        if not self._config.trading_enabled or open_trade.get("dry_run"):
+        position_dry_run = open_trade.get("dry_run")
+        if position_dry_run is None:
+            logger.warning(
+                "%s[TREND-POSITION-UNKLAR] Position %s hat kein dry_run-Feld im "
+                "Ledger - es wird keine Stop-Loss-Order platziert und nichts "
+                "gezählt. Bitte manuell prüfen (python -m dca_bot.audit_positions).",
+                log_prefix,
+                open_trade["id"],
+            )
+            return
+        if position_dry_run:
             return
         if open_trade.get("stop_loss_order_id"):
             return  # bereits abgesichert, nichts zu tun
 
         previous_count = open_trade.get("unprotected_cycles", 0)
+
+        if not self._config.trading_enabled:
+            # Keine Platzierung (der Bot darf im Dry-Run keine echte Order
+            # setzen), aber dieselbe Zählung und dieselbe Schwelle wie im
+            # Fehlschlag-Pfad unten. Die Schwelle bleibt bewusst bei 3: Der
+            # realistischste Weg in diesen Zustand - eine verschwundene
+            # Stop-Order - meldet sich in _forget_dead_stop_order() ohnehin
+            # sofort per Telegram.
+            self._count_unprotected_cycle(
+                open_trade,
+                previous_count,
+                log_prefix,
+                cause="Trading ist deaktiviert, eine neue Order kann nicht "
+                "platziert werden",
+            )
+            return
 
         stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
@@ -722,17 +825,40 @@ class TrendFollowingStrategy:
                 )
             return
 
+        self._count_unprotected_cycle(
+            open_trade,
+            previous_count,
+            log_prefix,
+            cause="eine neue konnte nicht platziert werden",
+        )
+
+    def _count_unprotected_cycle(
+        self, open_trade: dict, previous_count: int, log_prefix: str, cause: str
+    ) -> None:
+        """
+        Zählt einen weiteren Zyklus, in dem eine offene, echte Position
+        ohne exchange-seitige Stop-Loss-Order bleibt, und meldet ab
+        UNPROTECTED_CYCLES_WARNING_THRESHOLD per Telegram.
+
+        Gemeinsam für beide Ursachen - Neuplatzierung gescheitert, oder
+        Trading deaktiviert -, damit Zählung, Schwelle und Entwarnung
+        (siehe _ensure_stop_loss_protection) für beide identisch sind.
+        `cause` steht wörtlich in Log und Telegram: ob sich der Zustand
+        mit dem nächsten Versuch von selbst beheben kann oder erst mit
+        wieder eingeschaltetem Trading, ist für die manuelle Prüfung der
+        entscheidende Unterschied.
+        """
         count = previous_count + 1
         self._ledger.set_unprotected_cycles(open_trade["id"], count)
         open_trade["unprotected_cycles"] = count
 
         logger.warning(
             "%sOffene Position %s hat KEINE exchange-seitige Stop-Loss-Order "
-            "und eine neue konnte nicht platziert werden (%d. Zyklus in "
-            "Folge) - sie ist nur software-intern abgesichert, also nur "
-            "solange dieser Prozess laeuft.",
+            "und %s (%d. Zyklus in Folge) - sie ist nur software-intern "
+            "abgesichert, also nur solange dieser Prozess laeuft.",
             log_prefix,
             open_trade["id"],
+            cause,
             count,
         )
 
@@ -747,9 +873,8 @@ class TrendFollowingStrategy:
             send_notification(
                 f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: offene "
                 f"Position seit {count} Zyklen ohne exchange-seitige "
-                "Stop-Loss-Order (kein Schutz bei Bot-Ausfall), "
-                "Neuplatzierung schlaegt weiterhin fehl. Manuelle Pruefung "
-                "empfohlen."
+                f"Stop-Loss-Order (kein Schutz bei Bot-Ausfall) - {cause}. "
+                "Manuelle Pruefung empfohlen."
             )
 
     def _close_from_filled_stop_order(
@@ -968,7 +1093,8 @@ class TrendFollowingStrategy:
         `_ensure_stop_loss_protection()` dauerhaft blockieren, das bei
         jeder vorhandenen `stop_loss_order_id` sofort aussteigt. Nach dem
         Leeren platziert derselbe Zyklus (bzw. der Reconciliation-Schritt
-        beim Start) automatisch Ersatz.
+        beim Start) automatisch Ersatz - bei deaktiviertem Trading nicht,
+        dann wird nur gezählt und ab der Schwelle gemeldet.
 
         Der `open_trade`-Dict wird mitgezogen, damit die aufrufende Seite
         im laufenden Zyklus nicht mit einem veralteten Stand
@@ -985,23 +1111,40 @@ class TrendFollowingStrategy:
         open_trade["stop_limit_price"] = None
 
         order_state = status.get("status") if isinstance(status, dict) else None
+        # Im Dry-Run-Modus kann KEIN Ersatz platziert werden (siehe
+        # _ensure_stop_loss_protection) - die Meldung darf dann nicht das
+        # Gegenteil behaupten.
+        if self._config.trading_enabled:
+            log_next_step = (
+                "Die Zuordnung im Ledger wurde gelöst, damit noch in diesem "
+                "Durchlauf eine neue Order platziert wird."
+            )
+            notify_next_step = "Der Bot platziert automatisch Ersatz"
+        else:
+            log_next_step = (
+                "Die Zuordnung im Ledger wurde gelöst. Ersatz kann NICHT "
+                "platziert werden, solange TREND_BOT_ENABLE_TRADING=false ist."
+            )
+            notify_next_step = (
+                "Ersatz ist NICHT möglich, solange Trading deaktiviert ist "
+                "(TREND_BOT_ENABLE_TRADING=false) - die Position ist bis dahin "
+                "an der Börse ungeschützt"
+            )
         logger.warning(
             "%sExchange-seitige Stop-Loss-Order %s existiert nicht mehr "
             "(Status %s, ohne ausgeführte Menge) - die Position %s ist damit "
-            "aktuell NUR software-intern abgesichert. Die Zuordnung im Ledger "
-            "wurde gelöst, damit noch in diesem Durchlauf eine neue Order "
-            "platziert wird.",
+            "aktuell NUR software-intern abgesichert. %s",
             log_prefix,
             order_id,
             order_state,
             open_trade["id"],
+            log_next_step,
         )
         send_notification(
             f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: die "
             f"exchange-seitige Stop-Loss-Order {order_id} ist beendet "
-            f"(Status {order_state}), ohne verkauft zu haben. Der Bot "
-            "platziert automatisch Ersatz - falls die Order manuell "
-            "storniert wurde, bitte beachten."
+            f"(Status {order_state}), ohne verkauft zu haben. {notify_next_step} "
+            "- falls die Order manuell storniert wurde, bitte beachten."
         )
 
     def _warn_on_partially_filled_stop_order(
