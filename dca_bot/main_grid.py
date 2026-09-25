@@ -46,6 +46,70 @@ KILL_SWITCH_POLL_SECONDS = 5
 REQUEST_TIMEOUT_SECONDS = 20
 
 
+class CycleErrorNotifier:
+    """
+    Mengenlimit fuer `[GRID-FEHLER]`-Meldungen aus der Zyklus-Schleife.
+
+    Der Grid-Bot laeuft alle 5 Minuten. Bis zum 25.09.2026 ging jeder
+    fehlgeschlagene Zyklus per Telegram raus - bei einer laengeren
+    Stoerung (Internet weg, Testnet down) also zwoelf Meldungen pro
+    Stunde mit identischem Inhalt. Konkreter Anlass ist die naechtliche
+    Zwangstrennung des Homeserver-Anschlusses (trading-bot-projekt.md
+    6g): heute eine Meldung pro Nacht, bei einer echten Stoerung aber
+    genau das Muster, das man nicht will.
+
+    Regel: Die erste Meldung eines Fehlertyps geht raus, weitere
+    desselben Typs nur noch ins Log - bis ein Zyklus wieder erfolgreich
+    war, dann ist alles zurueckgesetzt. Gleiches Muster wie
+    `_report_failed_sell` in grid_strategy.py ("einmal pro Lauf"), nur
+    mit Reset bei Erfolg: ein Fehler, der naechste Nacht wiederkommt, ist
+    ein neues Ereignis und soll wieder gemeldet werden.
+
+    "Fehlertyp" ist die Exception-Klasse. Ein NEUER Typ mitten in einer
+    Fehlerserie wird gemeldet - aus einem Timeout wird dann z.B. ein
+    Verbindungsfehler, und das ist eine andere Information. Der Zustand
+    lebt nur im Prozessspeicher, wie bei `_failed_sell_notified`.
+    """
+
+    def __init__(self, logger: logging.Logger):
+        self._logger = logger
+        self._notified_types: set[type] = set()
+        self._failed_cycles = 0
+
+    def report_failure(self, exc: Exception) -> None:
+        """Nach einem fehlgeschlagenen Zyklus aufrufen (das Log hat der
+        Aufrufer bereits geschrieben, inklusive Traceback)."""
+        self._failed_cycles += 1
+        error_type = type(exc)
+        if error_type in self._notified_types:
+            self._logger.warning(
+                "[GRID-FEHLER] Gleichartiger Fehler (%s), %d. Fehlzyklus in "
+                "Folge - bereits per Telegram gemeldet, bis zum naechsten "
+                "erfolgreichen Zyklus nur im Log.",
+                error_type.__name__,
+                self._failed_cycles,
+            )
+            return
+
+        self._notified_types.add(error_type)
+        send_notification(
+            f"[GRID-FEHLER] Unerwarteter Fehler im Grid-Zyklus: {exc} "
+            f"(weitere {error_type.__name__}-Fehler bis zum naechsten "
+            "erfolgreichen Zyklus nur im Log)"
+        )
+
+    def report_success(self) -> None:
+        """Nach einem erfolgreichen Zyklus aufrufen: hebt die Sperre auf."""
+        if self._failed_cycles:
+            self._logger.info(
+                "Grid-Zyklus wieder erfolgreich nach %d Fehlzyklus/-zyklen in "
+                "Folge - Zyklusfehler werden wieder per Telegram gemeldet.",
+                self._failed_cycles,
+            )
+        self._notified_types.clear()
+        self._failed_cycles = 0
+
+
 def setup_logging(log_file: str) -> None:
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     logging.basicConfig(
@@ -174,6 +238,7 @@ def main() -> None:
     heartbeat = Heartbeat("Grid-Bot", config.heartbeat_interval_hours)
     # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
     last_cycle_at: datetime | None = None
+    error_notifier = CycleErrorNotifier(logger)
 
     interval_seconds = config.interval_minutes * 60
 
@@ -189,11 +254,14 @@ def main() -> None:
             except Exception as exc:
                 # Ein einzelner fehlgeschlagener Zyklus soll den Bot nicht
                 # komplett beenden - loggen und beim nächsten Intervall
-                # erneut versuchen.
+                # erneut versuchen. Ins Log geht jeder Fehlschlag, per
+                # Telegram nur der erste seiner Art (siehe
+                # CycleErrorNotifier).
                 logger.exception("Unerwarteter Fehler im Grid-Zyklus.")
-                send_notification(f"[GRID-FEHLER] Unerwarteter Fehler im Grid-Zyklus: {exc}")
+                error_notifier.report_failure(exc)
             else:
                 last_cycle_at = datetime.now(timezone.utc)
+                error_notifier.report_success()
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
