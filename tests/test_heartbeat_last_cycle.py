@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from dca_bot import cycle_errors
 from dca_bot import main as dca_main
 from dca_bot import main_allocator, main_grid, main_trend
 from dca_bot.allocator_config import AllocatorConfig
@@ -113,6 +114,8 @@ class _HeartbeatLastCycleMixin:
                 stack.enter_context(mock.patch.object(module, name, **kwargs))
             if hasattr(module, "safe_startup_reconciliation"):
                 stack.enter_context(mock.patch.object(module, "safe_startup_reconciliation"))
+            # Grid und Allocator melden Zyklusfehler ueber cycle_errors.py.
+            stack.enter_context(mock.patch.object(cycle_errors, "send_notification"))
             for patch in self.extra_patches():
                 stack.enter_context(patch)
 

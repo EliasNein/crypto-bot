@@ -899,6 +899,12 @@ Bewusst nur beim Grid-Bot: DCA und Trend laufen einmal am Tag, dort ist jeder Fe
 | unterdrückter Fehler wird nicht geloggt | 1 |
 | erster Fehler wird nicht gemeldet | 8 |
 
+**Nachtrag (25.09.2026): auch beim Allocator.** Nach Vorlage ausdrücklich erweitert. Der Allocator war nicht Teil des Befunds, hat aber strukturell dasselbe Problem: stündlicher Takt, dieselbe mögliche nächtliche Störung, bei einer längeren Störung also eine `[ALLOCATOR-FEHLER]`-Meldung pro Stunde. Der Satz oben, der Allocator sei „nicht angefasst“, ist damit überholt.
+
+Dafür ist `CycleErrorNotifier` aus `main_grid.py` in ein eigenes Modul `dca_bot/cycle_errors.py` umgezogen. Telegram-Marker und Zyklusname sind jetzt Parameter, die Regel ist unverändert. Dieselbe Logik zweimal zu implementieren wäre der als N3 kritisierte Weg. Die Allocator-Meldung heißt jetzt `[ALLOCATOR-FEHLER] Unerwarteter Fehler im Allocator-Zyklus: …` statt `[ALLOCATOR-FEHLER] Unerwarteter Fehler: …`, mit demselben Hinweis auf die Sperre wie beim Grid-Bot. Beim Verzicht auf eine Entwarnung per Telegram bleibt es für beide Prozesse, auch das nach Rückfrage bestätigt.
+
+Die Testdatei heißt entsprechend `tests/test_cycle_error_notification.py`. Die Unit-Tests prüfen die gemeinsame Klasse, die vier `main()`-Tests laufen über eine gemeinsame Basis einmal für den Grid-Bot und einmal für den Allocator. Dazu kommt eine Prüfung, dass jede Meldung den richtigen Marker trägt. Gesamtstand **607, alle grün**. Wirksamkeit erneut gemessen, Kontrolllauf 0 Fehlschläge, alle 9 Mutationen gefangen: je Prozess das alte Verhalten (4) und ein fehlender `report_success()`-Aufruf (1); Allocator mit dem Grid-Marker (4); an der Klasse kein Reset (3), Sperre für alle Typen (1), Unterdrückung ohne Log (1), erster Fehler nicht gemeldet (12).
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

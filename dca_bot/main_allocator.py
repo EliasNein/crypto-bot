@@ -28,6 +28,7 @@ from .config_guard import (
     report_config_error,
 )
 from .binance_client import TradingClient
+from .cycle_errors import CycleErrorNotifier
 from .heartbeat import Heartbeat
 from .notifier import init as init_notifier
 from .notifier import send_notification
@@ -129,6 +130,7 @@ def main() -> None:
     heartbeat = Heartbeat("Kapital-Allocator", config.heartbeat_interval_hours)
     # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
     last_cycle_at: datetime | None = None
+    error_notifier = CycleErrorNotifier(logger, "[ALLOCATOR-FEHLER]", "Allocator-Zyklus")
 
     interval_seconds = config.interval_minutes * 60
 
@@ -142,10 +144,15 @@ def main() -> None:
                 send_notification(f"[ALLOCATOR-NOTAUS] Gestoppt: {exc}")
                 break
             except Exception as exc:
+                # Ins Log geht jeder Fehlschlag, per Telegram nur der erste
+                # seiner Art bis zum naechsten erfolgreichen Zyklus (siehe
+                # cycle_errors.py) - bei stuendlichem Takt waere eine
+                # laengere Stoerung sonst eine Meldung pro Stunde.
                 logger.exception("Unerwarteter Fehler im Allocator-Zyklus.")
-                send_notification(f"[ALLOCATOR-FEHLER] Unerwarteter Fehler: {exc}")
+                error_notifier.report_failure(exc)
             else:
                 last_cycle_at = datetime.now(timezone.utc)
+                error_notifier.report_success()
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.

@@ -117,6 +117,7 @@ trading-bot/
 │   ├── pending_orders.py # Idempotente Order-Platzierung + Ground-Truth-Abgleich (geteilt)
 │   ├── process_lock.py   # Schutz gegen doppelten Bot-Start (geteilt)
 │   ├── heartbeat.py      # Tägliches Lebenszeichen aller vier Bots (geteilt)
+│   ├── cycle_errors.py   # Mengenlimit für Zyklusfehler-Meldungen (Grid + Allocator)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
 │   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss (DCA)
 │   ├── notifier.py       # Telegram-Benachrichtigungen (optional, geteilt)
@@ -939,6 +940,9 @@ Trend-Bot).
   Orders, der Notaus stoppt hier nur die Berechnung/State-Aktualisierung.
 - **Telegram-Benachrichtigungen**: `[ALLOCATION-UPDATE]` (bei
   signifikanter Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
+  Für `[ALLOCATOR-FEHLER]` gilt dasselbe Mengenlimit wie beim Grid-Bot
+  (siehe 8.4): pro Fehlertyp eine Meldung, bis ein Zyklus wieder
+  erfolgreich war.
 
 ## 11. Positions-Audit (offene Positionen prüfen)
 
@@ -1063,7 +1067,7 @@ nächster Zyklus die Korrektur sonst überschriebe.
 ```bash
 python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions tests.test_trend_auto_reset \
     tests.test_fix_dry_run_quote_spent tests.test_request_timeout \
-    tests.test_heartbeat_last_cycle tests.test_grid_cycle_error_notification -v
+    tests.test_heartbeat_last_cycle tests.test_cycle_error_notification -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
