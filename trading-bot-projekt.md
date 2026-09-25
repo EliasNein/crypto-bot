@@ -943,6 +943,18 @@ Bereits geschriebene Ledger-Einträge bleiben unverändert. Eine rückwirkende K
 
 Bei der Messung trat die aus 6i bekannte Falle zum dritten Mal auf: Zwei Suchmuster standen je **zweimal** in `trend_strategy.py`. Die `TrendTrade.new(entry_price=…)`-Zeile gibt es auch im Reconciliation-Einstieg, den `pause(…, exit_price, …)`-Aufruf auch im Ausstieg über die gefüllte Stop-Order. Diesmal hat das Messskript vor jeder Mutation geprüft, dass der Anker genau einmal vorkommt, und die beiden übersprungen, statt die falsche Stelle zu verändern. Mit eindeutigen Ankern werden beide gefangen.
 
+#### Priorität 6: Füllpreis im DCA-Ledger (25.09.2026)
+
+**Befund.** Bei der Vorlage von Priorität 4 gefunden und auf Entscheidung als eigener Punkt nach Priorität 5 umgesetzt. Die Begründung ist dieselbe wie bei Priorität 1: Wären Grid und Trend korrigiert, DCA aber nicht, stünde genau die Inkonsistenz im Code, um die es geht. `strategy.execute_once()` schrieb bei echten Käufen den Tickerpreis vor der Order in `TradeRecord.price`. Im Bot liest niemand diesen Wert, Portfolio-Stop-Loss, Tageslimit und Positions-Audit rechnen mit `quantity` und `quote_spent`. Dashboard und Steuer-Export zeigen ihn aber an. Der Reconciliation-Pfad (`_record_reconciled_buy`) nahm schon immer den Füllpreis.
+
+**Umgesetzt.** Für eine echte Order kommt der Preis aus der Order-Antwort (`average_fill_price(order, fallback=price)`), ebenso in Log-Zeile und `[KAUF]`-Meldung. Der Tickerpreis bleibt dort, wo er richtig ist: beim Stop-Loss-Check vor dem Kauf, der den aktuellen Marktwert braucht und für den es noch keinen Fill gibt. Im Dry-Run bleibt der beobachtete Preis.
+
+Damit schreiben alle drei handelnden Bots bei echten Orders denselben Preis wie ihr jeweiliger Reconciliation-Pfad. Die README fasst das in Abschnitt 6 botübergreifend zusammen. Für bereits geschriebene Einträge gilt die Entscheidung aus Priorität 4: keine rückwirkende Korrektur jetzt, vorgemerkt für den Steuer-Export.
+
+**Tests:** 3 neue in `tests/test_dca_fee_adjustment.py`, Gesamtstand **619, alle grün**. Der DCA-Fake-Client hat dasselbe Feld `fill_price` bekommen wie die Fakes von Grid und Trend. Geprüft werden: echter Kauf → `price` und `[KAUF]`-Meldung sind der Füllpreis; der gespeicherte Preis passt zu Betrag und Menge derselben Order-Antwort; Dry-Run → beobachteter Preis, auch wenn am Fake ein anderer Fill gesetzt ist.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 4 Mutationen gefangen: Ticker statt Fill (2), Ledger bekommt den Ticker (2), `[KAUF]`-Meldung nennt den Ticker (1), Dry-Run mit erfundenem Fill (1). `price=price` steht in `strategy.py` zweimal (Reconciliation und Kaufpfad), dieselbe Stelle, an der schon in 6g eine Gegenmutation die falsche Zeile traf. Das Messskript hat die Eindeutigkeit diesmal vor jeder Mutation geprüft.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

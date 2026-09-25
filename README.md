@@ -376,6 +376,15 @@ trading-bot/
   gibt es keinen Fill und damit keine bekannte Gebühr - sie wird bewusst
   **nicht** geschätzt, die Menge aber trotzdem quantisiert, damit
   simulierte und echte Werte vergleichbar bleiben.
+- **Füllpreis statt Tickerpreis** (DCA, Grid, Trend, seit 25.09.2026):
+  Der Preis, den ein Bot zu einer echten Order ins Ledger schreibt, ist
+  der tatsächliche Durchschnitts-Füllpreis aus der Order-Antwort
+  (`cummulativeQuoteQty / executedQty`), nicht der kurz vorher
+  abgefragte Ticker. Das ist dieselbe Quelle, die die Reconciliation
+  immer schon verwendet hat. Beim Trend-Bot hängt daran die
+  Stop-Loss-Schwelle (siehe 9.5), bei DCA und Grid die Anzeige in
+  Dashboard und Steuer-Export. Im Dry-Run ist der beobachtete Preis der
+  simulierte Fill. Vorher geschriebene Einträge sind unverändert.
 
 ## 7. Telegram-Benachrichtigungen (optional)
 

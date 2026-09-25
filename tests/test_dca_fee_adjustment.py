@@ -48,6 +48,10 @@ class FakeDCAClient:
         # unterscheidbar, ob der Produktivcode den gemeldeten Wert
         # uebernimmt oder ihn zufaellig gleich ausrechnet.
         self.quote_qty_override: float | None = None
+        # Preis, zu dem die Boerse den Kauf tatsaechlich fuellt. None = zum
+        # Tickerpreis (`price`). Siehe FakeGridClient: ein anderer Wert
+        # macht unterscheidbar, ob Fill oder Ticker im Ledger landet.
+        self.fill_price: float | None = None
         self.force_trading_rules_failure = False
         self.market_buy_calls: list[tuple] = []
         # Siehe FakeTradingClient in tests/test_trend_stop_loss.py: seit
@@ -72,7 +76,8 @@ class FakeDCAClient:
         if not self.trading_enabled:
             return None
         self._next_client_order_id += 1
-        executed_qty = quote_order_qty / self.price
+        fill_price = self.price if self.fill_price is None else self.fill_price
+        executed_qty = quote_order_qty / fill_price
         reported_quote_qty = (
             quote_order_qty if self.quote_qty_override is None else self.quote_qty_override
         )
@@ -82,7 +87,7 @@ class FakeDCAClient:
             "cummulativeQuoteQty": reported_quote_qty,
             "fills": [
                 {
-                    "price": self.price,
+                    "price": fill_price,
                     "qty": executed_qty,
                     "commission": executed_qty * self.commission_rate,
                     "commissionAsset": self.commission_asset,
@@ -244,6 +249,58 @@ class DCAFeeAdjustmentTestCase(unittest.TestCase):
             places=4,
             msg="Testaufbau: gemeldeter Betrag muss abweichen, sonst prueft der Test nichts",
         )
+
+    # -- Preis im Ledger: tatsaechlicher Fuellpreis statt Ticker --
+    #
+    # Code-Ueberpruefung vom 25.09.2026, Prioritaet 6 - dasselbe Muster wie
+    # bei Grid (Prioritaet 4) und Trend (Prioritaet 5). Im Bot liest
+    # niemand `price`, Dashboard und Steuer-Export aber schon.
+
+    def test_real_buy_records_the_fill_price_not_the_ticker(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.fill_price = 50_100.0  # 0,2 % Slippage
+
+        with mock.patch("dca_bot.strategy.send_notification") as notify:
+            strategy.execute_once()
+
+        record = strategy._ledger._read()[0]
+        self.assertFalse(record["dry_run"])
+        self.assertAlmostEqual(record["price"], 50_100.0, places=6)
+        (text,), _ = notify.call_args
+        self.assertIn("[KAUF]", text)
+        self.assertIn("@ 50100.00", text)
+
+    def test_price_is_consistent_with_stored_amount_and_quantity(self):
+        """
+        Mit dem Fill als Preis gilt fuer einen echten Kauf ohne Gebuehr
+        wieder `quote_spent = quantity * price` - beide stammen aus
+        derselben Order-Antwort. Mit dem Ticker wich der Preis genau um
+        die Slippage davon ab.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.fill_price = 49_950.0
+
+        with mock.patch("dca_bot.strategy.send_notification"):
+            strategy.execute_once()
+
+        record = strategy._ledger._read()[0]
+        executed = 15.0 / 49_950.0
+        self.assertAlmostEqual(record["price"], 15.0 / executed, places=6)
+
+    def test_dry_run_keeps_the_observed_price(self):
+        """
+        Abgrenzung: Im Dry-Run gibt es keine Order-Antwort, der
+        beobachtete Preis IST der simulierte Fill.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=50_000.0)
+        client.fill_price = 12_345.0
+
+        with mock.patch("dca_bot.strategy.send_notification") as notify:
+            strategy.execute_once()
+
+        self.assertEqual(strategy._ledger._read()[0]["price"], 50_000.0)
+        (text,), _ = notify.call_args
+        self.assertIn("@ 50000.00", text)
 
 
 if __name__ == "__main__":
