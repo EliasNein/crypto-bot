@@ -1254,7 +1254,10 @@ Zeilen angewachsen war. Die README ist seitdem die schlanke Einstiegs- und
 Setup-Dokumentation mit einer Kurzübersicht der Sicherheitsmechanismen;
 die ausführlichen Texte stehen hier. Sie sind **wörtlich übernommen** -
 angepasst wurden nur Verweise auf Abschnittsnummern, die sich durch den
-Umzug geändert haben. Konfiguration, Start und Werkzeuge: README.
+Umzug geändert haben. Seitdem wird der Abschnitt als Referenz für den
+aktuellen Stand gepflegt: Was hier nicht mehr stimmt, wird direkt
+korrigiert, ohne Vermerk wie in den Log-Abschnitten. Konfiguration, Start
+und Werkzeuge: README.
 
 ### 7.1 Botübergreifende Sicherheitsmechanismen
 
@@ -1535,7 +1538,8 @@ die Ergebnisse und einen wichtigen Caveat zur Preisspanne.
   der beobachtete Preis der simulierte Fill. Das Verkaufsziel bleibt
   unabhängig davon die nächsthöhere Grid-Stufe.
 - Maximale Kapitalbindung ist durch das Design von selbst begrenzt: Anzahl
-  Grid-Stufen × `GRID_AMOUNT_PER_LEVEL` - kein zusätzliches Tageslimit nötig.
+  Kaufstufen (Stufen − 1) × `GRID_AMOUNT_PER_LEVEL` - kein zusätzliches
+  Tageslimit nötig.
 - **Dieselbe Entscheidungslogik** (`compute_grid_levels`,
   `find_triggered_buy_levels`, `is_sell_target_hit`,
   `is_trend_break_stop_loss_hit` aus `grid_signals.py`) wird von Backtest
