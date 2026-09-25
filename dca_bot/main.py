@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 
 from .binance_client import TradingClient
 from .heartbeat import Heartbeat
+from .heartbeat_status import HeartbeatStatusWriter
 from .config import Config, load_config
 from .config_guard import (
     ConfigError,
@@ -250,6 +251,9 @@ def main() -> None:
     # (siehe heartbeat.py). None heisst: in diesem Prozesslauf noch kein
     # erfolgreicher Zyklus.
     last_cycle_at: datetime | None = None
+    # Derselbe Status zusaetzlich als Datei fuer die Dashboard-App -
+    # nur geschrieben, von keinem Bot gelesen (siehe heartbeat_status.py).
+    status_file = HeartbeatStatusWriter(config.heartbeat_status_file, logger)
 
     interval_seconds = config.interval_hours * 60 * 60
 
@@ -282,11 +286,13 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Kaufzyklus.")
                 send_notification(f"[FEHLER] Unerwarteter Fehler im Kaufzyklus: {exc}")
+                status_file.record_failure(datetime.now(timezone.utc), last_cycle_at)
             else:
                 # Auch ein Zyklus, der wegen Stop-Loss oder Tageslimit
                 # bewusst nichts kauft, ist erfolgreich: der Bot hat
                 # gearbeitet und entschieden.
                 last_cycle_at = datetime.now(timezone.utc)
+                status_file.record_success(last_cycle_at)
 
             today = utc_today()
             if today != last_summary_date:

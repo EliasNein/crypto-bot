@@ -242,6 +242,7 @@ class GridMainCycleErrorNotificationTestCase(_MainCycleErrorNotificationMixin, u
             stop_loss_state_file=str(tmp / "grid_stop_loss_paused.json"),
             pending_orders_file=str(tmp / "pending_orders_grid.json"),
             lock_file=str(tmp / "grid_bot.lock"),
+            heartbeat_status_file=str(tmp / "heartbeat_grid.json"),
             log_file=str(tmp / "grid_bot.log"),
         )
 
@@ -262,6 +263,7 @@ class AllocatorMainCycleErrorNotificationTestCase(
             api_secret="test",
             state_file=str(tmp / "allocator_state.json"),
             lock_file=str(tmp / "allocator.lock"),
+            heartbeat_status_file=str(tmp / "heartbeat_allocator.json"),
             log_file=str(tmp / "allocator.log"),
         )
 

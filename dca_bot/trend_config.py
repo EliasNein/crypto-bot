@@ -67,6 +67,9 @@ class TrendConfig:
     bot_name: str = "trend"
     pending_orders_file: str = "data/pending_orders_trend.json"
     lock_file: str = "data/trend_bot.lock"
+    # Heartbeat-Status fuer externe Betrachter (Dashboard-App), siehe
+    # heartbeat_status.py. Eigene Datei pro Bot, wird nur geschrieben.
+    heartbeat_status_file: str = "data/heartbeat_trend.json"
 
     # --- Kapital-Allocator (optional, siehe allocator.py) ---
     # Leer = deaktiviert (Default): der Bot verhält sich dann exakt wie
@@ -153,6 +156,9 @@ def load_trend_config() -> TrendConfig:
             "TREND_PENDING_ORDERS_FILE", "data/pending_orders_trend.json"
         ),
         lock_file=env_text("TREND_LOCK_FILE", "data/trend_bot.lock"),
+        heartbeat_status_file=env_text(
+            "TREND_HEARTBEAT_STATUS_FILE", "data/heartbeat_trend.json"
+        ),
         # Leer ist hier die gültige Bedeutung "Allocator-Anbindung aus".
         allocator_state_file=env_text(
             "TREND_ALLOCATOR_STATE_FILE", "", required=False

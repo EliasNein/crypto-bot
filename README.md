@@ -194,6 +194,7 @@ trading-bot/
 │   ├── pending_orders.py # Idempotente Order-Platzierung + Ground-Truth-Abgleich (geteilt)
 │   ├── process_lock.py   # Schutz gegen doppelten Bot-Start (geteilt)
 │   ├── heartbeat.py      # Tägliches Lebenszeichen aller vier Bots (geteilt)
+│   ├── heartbeat_status.py # Heartbeat-Status als Datei für die Dashboard-App (geteilt)
 │   ├── cycle_errors.py   # Mengenlimit für Zyklusfehler-Meldungen (Grid + Allocator)
 │   ├── strategy.py       # DCA-Logik inkl. Tageslimit als Notbremse
 │   ├── risk.py           # Notaus, Trade-Ledger, Portfolio-Stop-Loss (DCA)

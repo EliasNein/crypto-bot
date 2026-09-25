@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from .binance_client import TradingClient
 from .heartbeat import Heartbeat
+from .heartbeat_status import HeartbeatStatusWriter
 from .cycle_errors import CycleErrorNotifier
 from .config_guard import (
     ConfigError,
@@ -178,6 +179,9 @@ def main() -> None:
     heartbeat = Heartbeat("Grid-Bot", config.heartbeat_interval_hours)
     # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
     last_cycle_at: datetime | None = None
+    # Derselbe Status zusaetzlich als Datei fuer die Dashboard-App -
+    # nur geschrieben, von keinem Bot gelesen (siehe heartbeat_status.py).
+    status_file = HeartbeatStatusWriter(config.heartbeat_status_file, logger)
     error_notifier = CycleErrorNotifier(logger, "[GRID-FEHLER]", "Grid-Zyklus")
 
     interval_seconds = config.interval_minutes * 60
@@ -199,9 +203,11 @@ def main() -> None:
                 # CycleErrorNotifier).
                 logger.exception("Unerwarteter Fehler im Grid-Zyklus.")
                 error_notifier.report_failure(exc)
+                status_file.record_failure(datetime.now(timezone.utc), last_cycle_at)
             else:
                 last_cycle_at = datetime.now(timezone.utc)
                 error_notifier.report_success()
+                status_file.record_success(last_cycle_at)
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.

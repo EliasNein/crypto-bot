@@ -84,6 +84,9 @@ class AllocatorConfig:
     # dieselbe Fehlerklasse wie ein doppelt gestarteter Bot auf einem
     # Ledger, auch wenn hier keine Order daran hängt.
     lock_file: str = "data/allocator.lock"
+    # Heartbeat-Status fuer externe Betrachter (Dashboard-App), siehe
+    # heartbeat_status.py. Eigene Datei pro Bot, wird nur geschrieben.
+    heartbeat_status_file: str = "data/heartbeat_allocator.json"
 
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -157,6 +160,9 @@ def load_allocator_config() -> AllocatorConfig:
         kill_switch_file=env_text("ALLOCATOR_KILL_SWITCH_FILE", "STOP_ALLOCATOR"),
         state_file=env_text("ALLOCATOR_STATE_FILE", "data/allocator_state.json"),
         lock_file=env_text("ALLOCATOR_LOCK_FILE", "data/allocator.lock"),
+        heartbeat_status_file=env_text(
+            "ALLOCATOR_HEARTBEAT_STATUS_FILE", "data/heartbeat_allocator.json"
+        ),
         telegram_bot_token=telegram_bot_token,
         telegram_chat_id=telegram_chat_id,
         heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
