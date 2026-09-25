@@ -81,6 +81,12 @@ class FakeGridClient:
         # unterscheidbar, ob der Produktivcode den gemeldeten Wert
         # uebernimmt oder ihn zufaellig gleich ausrechnet.
         self.quote_qty_override: float | None = None
+        # Preis, zu dem die Boerse eine Market-Order tatsaechlich fuellt.
+        # None = zum Tickerpreis (`price`). Ein Test, der pruefen will,
+        # ob der Produktivcode den echten Fuellpreis oder den vorher
+        # abgefragten Ticker ins Ledger schreibt, setzt hier bewusst
+        # einen ANDEREN Wert - sonst waeren beide nicht unterscheidbar.
+        self.fill_price: float | None = None
         self.force_trading_rules_failure = False
         self.trading_rules_calls = 0
         # Seit dem K2-Fix reicht jede place_*-Methode einen `context` an
@@ -127,7 +133,8 @@ class FakeGridClient:
         self.order_contexts.append(context)
         if not self.trading_enabled:
             return None
-        executed_qty = quote_order_qty / self.price
+        fill_price = self.price if self.fill_price is None else self.fill_price
+        executed_qty = quote_order_qty / fill_price
         reported_quote_qty = (
             quote_order_qty if self.quote_qty_override is None else self.quote_qty_override
         )
@@ -137,7 +144,7 @@ class FakeGridClient:
             "cummulativeQuoteQty": reported_quote_qty,
             "fills": [
                 {
-                    "price": self.price,
+                    "price": fill_price,
                     "qty": executed_qty,
                     "commission": executed_qty * self.commission_rate,
                     "commissionAsset": self.commission_asset,
@@ -154,13 +161,17 @@ class FakeGridClient:
             return None
         if self.force_market_sell_failure:
             return None
-        gross = quantity * self.price
+        fill_price = self.price if self.fill_price is None else self.fill_price
+        gross = quantity * fill_price
+        # executedQty gehoert zu jeder echten Market-Order-Antwort - ohne
+        # es liesse sich aus der Antwort kein Fuellpreis ableiten.
         return {
             "clientOrderId": self._new_client_order_id(),
+            "executedQty": quantity,
             "cummulativeQuoteQty": gross,
             "fills": [
                 {
-                    "price": self.price,
+                    "price": fill_price,
                     "qty": quantity,
                     "commission": gross * self.commission_rate,
                     "commissionAsset": "USDT",
@@ -678,6 +689,67 @@ class GridTradingRulesTestCase(GridStrategyTestBase):
             places=4,
             msg="Testaufbau: gemeldeter Betrag muss abweichen, sonst prueft der Test nichts",
         )
+
+    # -- Preise im Ledger: tatsaechlicher Fuellpreis statt Ticker --
+    #
+    # Code-Ueberpruefung vom 25.09.2026, Prioritaet 4: buy_price/sell_price
+    # echter Orders waren der VOR der Order abgefragte Tickerpreis. Die
+    # PnL war nicht betroffen (sie rechnet mit quantity/quote_spent), die
+    # angezeigten Preise in Dashboard und Steuer-Export aber schon. Der
+    # Reconciliation-Pfad nahm schon immer den Fuellpreis. Der Fake fuellt
+    # in diesen Tests bewusst zu einem ANDEREN Preis als dem Ticker - sonst
+    # waere nicht unterscheidbar, welcher der beiden im Ledger landet.
+
+    def test_real_buy_records_the_fill_price_not_the_ticker(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=77_000.0)
+        level_price = strategy._levels[3]
+        client.fill_price = level_price * 1.0015  # Slippage beim Kauf
+
+        with mock.patch("dca_bot.grid_strategy.send_notification") as mock_notify:
+            position, ticker_price = self._buy_one_level(strategy, client, level_index=3)
+
+        self.assertNotAlmostEqual(
+            client.fill_price, ticker_price, places=2,
+            msg="Testaufbau: Fill und Ticker muessen sich unterscheiden",
+        )
+        self.assertAlmostEqual(position["buy_price"], client.fill_price, places=6)
+        # Das Verkaufsziel haengt an der Grid-Stufe, nicht am Fill.
+        self.assertAlmostEqual(position["target_sell_price"], strategy._levels[4], places=6)
+        (text,), _ = mock_notify.call_args
+        self.assertIn(f"@ {client.fill_price:.2f}", text)
+
+    def test_real_sell_records_the_fill_price_not_the_ticker(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=79_000.0)
+        self._add_open_position(strategy, dry_run=False)
+        client.fill_price = 78_950.0  # Slippage beim Verkauf
+
+        with mock.patch("dca_bot.grid_strategy.send_notification") as mock_notify:
+            strategy._process_sells(79_000.0)
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertAlmostEqual(closed["sell_price"], 78_950.0, places=6)
+        # Die PnL folgt wie bisher dem gemeldeten Erloes - und der passt
+        # jetzt auch zum gespeicherten Verkaufspreis.
+        self.assertAlmostEqual(closed["realized_pnl"], 0.0002 * 78_950.0 - 15.0, places=8)
+        (text,), _ = mock_notify.call_args
+        self.assertIn("@ 78950.00 verkauft", text)
+
+    def test_dry_run_keeps_the_observed_price(self):
+        """
+        Abgrenzung: Im Dry-Run gibt es keine Order-Antwort, der beobachtete
+        Preis IST der simulierte Fill. Ein gesetzter Fuellpreis am Fake
+        darf dort nichts aendern.
+        """
+        strategy, client = self._make_strategy(trading_enabled=False, price=77_000.0)
+        client.fill_price = 12_345.0
+
+        position, ticker_price = self._buy_one_level(strategy, client, level_index=3)
+        self.assertEqual(position["buy_price"], ticker_price)
+
+        sell_price = position["target_sell_price"]
+        strategy._process_sells(sell_price)
+        self.assertEqual(strategy._ledger._read()[0]["sell_price"], sell_price)
 
     def test_no_rules_lookup_when_nothing_to_sell(self):
         """
