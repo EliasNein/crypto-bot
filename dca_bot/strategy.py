@@ -289,6 +289,16 @@ class DCAStrategy:
             return
 
         if order is not None:
+            # Tatsaechlicher Fuellpreis aus der Order-Antwort
+            # (cummulativeQuoteQty / executedQty), nicht der vor der Order
+            # abgefragte Ticker - gleiche Quelle wie im Reconciliation-Pfad
+            # (_record_reconciled_buy) und seit dem 25.09.2026 auch bei
+            # Grid und Trend. Im Bot selbst liest niemand diesen Preis
+            # (Stop-Loss und Tageslimit rechnen mit quantity/quote_spent),
+            # wohl aber Dashboard und Steuer-Export. Der Ticker `price`
+            # bleibt oben richtig: der Stop-Loss-Check braucht den
+            # aktuellen Marktwert, nicht einen Fill.
+            buy_price = average_fill_price(order, fallback=price)
             # Echte Order: tatsächlich ausgeführte Menge/Betrag verwenden,
             # falls die Börse abweichend vom angefragten Betrag gefüllt hat.
             # Die Menge wird dabei um die in BTC abgezogene Handelsgebühr
@@ -299,6 +309,8 @@ class DCAStrategy:
             quantity = net_executed_quantity(order, rules, fallback=amount / price)
             quote_spent = float(order.get("cummulativeQuoteQty", amount))
         else:
+            # Dry-Run: der beobachtete Preis IST der simulierte Fill.
+            buy_price = price
             # Im Dry-Run gibt es keinen Fill und damit keine bekannte Gebühr -
             # sie wird bewusst NICHT geschätzt (das wäre erfundene Zahl),
             # die Menge aber trotzdem quantisiert, damit simulierte und
@@ -324,7 +336,7 @@ class DCAStrategy:
                 symbol=symbol,
                 quote_spent=quote_spent,
                 quantity=quantity,
-                price=price,
+                price=buy_price,
                 dry_run=not self._config.trading_enabled,
                 # Ohne diese ID könnte die Reconciliation beim nächsten
                 # Start nicht erkennen, dass dieser Kauf bereits
@@ -335,17 +347,17 @@ class DCAStrategy:
 
         if order is not None:
             logger.info(
-                "DCA-Kauf ausgeführt: %.2f %s zu Preis ~%.2f",
+                "DCA-Kauf ausgeführt: %.2f %s zu Preis %.2f",
                 amount,
                 symbol,
-                price,
+                buy_price,
             )
             send_notification(
                 f"[KAUF] Echter DCA-Kauf ausgeführt: {amount:.2f} {symbol} "
-                f"@ {price:.2f} (Menge: {quantity:.8f})"
+                f"@ {buy_price:.2f} (Menge: {quantity:.8f})"
             )
         else:
             send_notification(
                 f"[DRY-RUN] Simulierter Kauf: {amount:.2f} {symbol} "
-                f"@ {price:.2f} (Menge: {quantity:.8f})"
+                f"@ {buy_price:.2f} (Menge: {quantity:.8f})"
             )
