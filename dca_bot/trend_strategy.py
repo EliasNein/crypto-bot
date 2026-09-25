@@ -376,7 +376,7 @@ class TrendFollowingStrategy:
 
         Ob dabei tatsächlich eine echte Order platziert wird, hängt NICHT
         nur am aktuellen Trading-Modus, sondern zusätzlich am `dry_run`-Flag
-        des Ledger-Eintrags (siehe README.md Abschnitt 9.5): eine im
+        des Ledger-Eintrags (siehe trading-bot-projekt.md 7.3): eine im
         Dry-Run "gekaufte" Position existiert an der Börse gar nicht und
         darf deshalb auch nach einem Umschalten auf echtes Trading niemals
         real verkauft werden. Umgekehrt wird eine ECHTE Position bei

@@ -1,6 +1,6 @@
 """
 Tests für den echten, exchange-seitigen Stop-Loss des Trend-Bots
-(siehe README.md Abschnitt 9.5, trend_strategy.py).
+(siehe trading-bot-projekt.md 7.3, trend_strategy.py).
 
 Erster committeter Test im Projekt (siehe trading-bot-projekt.md,
 Migrations-/Live-Vorbereitung): bewusste Abweichung vom bisherigen
