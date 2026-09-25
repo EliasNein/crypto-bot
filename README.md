@@ -682,7 +682,12 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   Stop-Loss), `limit_price = stop_price * (1 -
   TREND_STOP_LIMIT_OFFSET_PCT/100)` (Default 0,5%) - der Abstand
   verhindert, dass die Order bei einem schnellen Kurssturz ungefüllt im
-  Orderbuch hängen bleibt.
+  Orderbuch hängen bleibt. `entry_price` ist bei einer echten Order der
+  tatsächliche Füllpreis des Kaufs (`cummulativeQuoteQty /
+  executedQty`), nicht der kurz vorher abgefragte Ticker - dieselbe
+  Basis gilt damit für die Order an der Börse, den internen Stop-Loss
+  und jede spätere Ersatz-Order. Ebenso ist der gespeicherte
+  Ausstiegspreis der Füllpreis des Verkaufs.
 - **Exit-Reihenfolge bei Signal-Umkehr oder internem Stop-Loss-Trigger:**
   der Bot storniert IMMER zuerst die noch offene Stop-Loss-Order, bevor
   er selbst per Market-Order verkauft - sonst bliebe eine verwaiste

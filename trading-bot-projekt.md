@@ -922,6 +922,27 @@ Bereits geschriebene Ledger-Einträge bleiben unverändert. Eine rückwirkende K
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 6 Mutationen gefangen (je 1 Fehlschlag): Ticker statt Fill beim Kauf, Ticker statt Fill beim Verkauf, `record_sell` bekommt den Ticker, Kaufmeldung nennt den Ticker, Verkaufsmeldung nennt den Ticker, Verkaufsziel aus dem Fill statt aus der Grid-Stufe abgeleitet.
 
+#### Priorität 5: Füllpreis als `entry_price` beim Trend-Bot (25.09.2026)
+
+**Befund.** Beim Einlesen vor Priorität 2 gefunden und auf Entscheidung zu einem eigenen Punkt gemacht. `trend_strategy._open_position()` speicherte als `entry_price` den Tickerpreis *vor* der Order. Anders als beim Grid-Bot ist das keine reine Anzeigefrage: Aus `entry_price` entsteht die Stop-Loss-Schwelle. Sie gilt für die Order an der Börse, für den internen Check `is_stop_loss_hit()` und für jede später neu platzierte Absicherung (`_handle_failed_real_sell`, `_ensure_stop_loss_protection`). Die Schwelle lag damit um die Slippage des Kaufs daneben. Der Reconciliation-Einstieg (`_record_reconciled_entry`) nahm schon immer den Füllpreis.
+
+**Umgesetzt.** Für eine echte Order kommt `entry_price` aus der Order-Antwort (`average_fill_price(order, fallback=price)`), und die Schwelle der Stop-Order wird aus diesem Wert berechnet. Alle späteren Stellen lesen `entry_price` aus dem Ledger und rechnen damit automatisch auf derselben Basis. Im Dry-Run bleibt der beobachtete Preis, weil es dort keine Order-Antwort gibt.
+
+**Über die wörtliche Vorgabe hinaus, bewusst mit dabei: der Ausstieg.** Priorität 4 umfasste Kauf *und* Verkauf. Beim Trend-Bot hatte `_close_position()` denselben Fehler, `exit_price` war der Ticker, während `_record_reconciled_exit` den Füllpreis nimmt. Jetzt ist auch `exit_price` der Füllpreis. Er landet zusätzlich in der Latch-Datei des Stop-Loss (`exit_price`, `loss_pct`), dem vorgesehenen Anker eines späteren automatischen Resets (siehe Punkt 16 in 6i). Der Ausstieg über eine gefüllte Stop-Order (`_close_from_filled_stop_order`) nahm den Füllpreis schon vorher.
+
+**Tests:** 6 neue in der Klasse `TrendFillPriceTestCase` (`tests/test_trend_stop_loss.py`), Gesamtstand **616, alle grün**. Der Fake-Client hat wie beim Grid-Bot ein Feld `fill_price` bekommen, und seine Verkaufsantwort enthält jetzt `executedQty`. Alle bestehenden Trend-Tests blieben unverändert grün. Geprüft werden:
+
+- `entry_price` im Ledger und die Einstiegsmeldung sind der Füllpreis.
+- Stop- und Limit-Preis der Order an der Börse sind aus dem Füllpreis berechnet. Die Prämisse, dass die tickerbasierte Schwelle eine andere Zahl wäre, ist eigens belegt.
+- **Die Folge im laufenden Betrieb, über `execute_once()`:** Kauf mit Ticker 50.000 und Fill 50.100, danach fällt der Kurs auf 45.050. Das liegt unter der Fill-Schwelle (45.090), aber über der Ticker-Schwelle (45.000). Der interne Stop-Loss löst genau deshalb aus. Dass er es mit dem Ticker als Basis *nicht* täte, ist eigens belegt.
+- `exit_price` und Ausstiegsmeldung sind der Füllpreis des Verkaufs.
+- Die Latch-Datei speichert den Füllpreis und den daraus berechneten Verlust.
+- Dry-Run: beobachteter Preis und tickerbasierte Schwelle, auch wenn am Fake ein anderer Fill gesetzt ist.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 7 Mutationen gefangen: Ticker statt Fill beim Einstieg (4), Stop-Schwelle aus dem Ticker (1), Ledger bekommt den Ticker (3), Einstiegsmeldung mit dem Ticker (1), Ticker statt Fill beim Ausstieg (2), `record_exit` bekommt den Ticker (1), Latch bekommt den Ticker (1).
+
+Bei der Messung trat die aus 6i bekannte Falle zum dritten Mal auf: Zwei Suchmuster standen je **zweimal** in `trend_strategy.py`. Die `TrendTrade.new(entry_price=…)`-Zeile gibt es auch im Reconciliation-Einstieg, den `pause(…, exit_price, …)`-Aufruf auch im Ausstieg über die gefüllte Stop-Order. Diesmal hat das Messskript vor jeder Mutation geprüft, dass der Anker genau einmal vorkommt, und die beiden übersprungen, statt die falsche Stelle zu verändern. Mit eindeutigen Ankern werden beide gefangen.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
