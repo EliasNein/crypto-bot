@@ -68,6 +68,10 @@ class GridTradingStrategy:
         # bereits per Telegram gemeldet wurde (siehe _report_failed_sell) -
         # bewusst nur im Prozessspeicher, wie _last_seen_price.
         self._failed_sell_notified: set[str] = set()
+        # IDs echter Positionen, deren Verkauf wegen deaktiviertem Trading
+        # bereits per Telegram gemeldet wurde (siehe
+        # _report_sell_blocked_by_dry_run) - gleiche Kurzlebigkeit.
+        self._dry_run_block_notified: set[str] = set()
         # Ob die Buchhaltungs-Diskrepanz (W11, siehe balance_guard.py)
         # in diesem Prozesslauf bereits per Telegram gemeldet wurde. Der
         # Grid-Bot prueft alle GRID_INTERVAL_MINUTES - bei einer
@@ -96,7 +100,10 @@ class GridTradingStrategy:
         der jeweiligen Position im Ledger (siehe README.md Abschnitt 8.4):
         eine im Dry-Run "gekaufte" Position existiert an der Börse gar
         nicht und darf deshalb auch nach einem Umschalten auf echtes
-        Trading niemals real verkauft werden.
+        Trading niemals real verkauft werden. Umgekehrt wird eine ECHTE
+        Position bei deaktiviertem Trading weder verkauft noch
+        simuliert geschlossen - sie bleibt offen und wird gemeldet
+        (siehe _report_sell_blocked_by_dry_run).
         """
         open_positions = self._ledger.open_positions()
         if not any(
@@ -143,6 +150,20 @@ class GridTradingStrategy:
                     record["id"],
                     record.get("level_index", "?"),
                 )
+                continue
+
+            if not position_dry_run and not self._config.trading_enabled:
+                # Spiegelbild zu K4 direkt darunter: eine ECHTE Position,
+                # waehrend der Bot im Dry-Run laeuft. place_market_sell()
+                # wuerde hier nur simulieren und None liefern - bis zu
+                # diesem Fix wurde daraufhin ein Erloes aus
+                # quantity * price erfunden und die Position geschlossen,
+                # obwohl das BTC weiter an der Boerse liegt. Die Stufe galt
+                # danach als frei und wurde erneut gekauft, und der
+                # Bestandsabgleich sah nichts (er meldet nur ein Ledger,
+                # das MEHR beansprucht, als da ist). Deshalb: gar nicht erst
+                # aufrufen, Position offen lassen, deutlich melden.
+                self._report_sell_blocked_by_dry_run(record, price)
                 continue
 
             if position_dry_run and self._config.trading_enabled:
@@ -348,6 +369,47 @@ class GridTradingStrategy:
                 "geteiltes Konto, bitte prüfen."
             )
         return False
+
+    def _report_sell_blocked_by_dry_run(self, record: dict, price: float) -> None:
+        """
+        Meldet, dass eine ECHTE Position ihr Verkaufsziel erreicht hat,
+        aber nicht verkauft werden kann, weil GRID_BOT_ENABLE_TRADING=false
+        ist (siehe _process_sells).
+
+        Die Position bleibt offen und damit auch ihre Stufe belegt - das
+        BTC liegt ja weiterhin an der Boerse. Sobald Trading wieder an
+        ist, verkauft der naechste Zyklus regulaer, solange das Ziel dann
+        noch erreicht ist.
+
+        Telegram einmal pro Prozesslauf und Position, ins Log jeder Zyklus
+        - gleiches Muster wie _report_failed_sell, aber mit eigener Menge:
+        teilten sich beide eine, wuerde eine fruehere Sperr-Meldung nach
+        dem Wiedereinschalten eine echte Fehlschlag-Meldung derselben
+        Position verschlucken. (Praktisch setzt ein Neustart beides
+        zurueck, da trading_enabled nur beim Start gelesen wird - die
+        Trennung haengt aber nicht an diesem Detail.)
+        """
+        logger.warning(
+            "[GRID-VERKAUF-GESPERRT] Stufe %s: echte Position %s hat ihr "
+            "Verkaufsziel erreicht (Preis ~%.2f), aber GRID_BOT_ENABLE_TRADING "
+            "ist false - es wird NICHT verkauft und nichts gebucht. Position "
+            "bleibt offen, die Assets liegen weiter an der Boerse. Zum "
+            "Verkaufen Trading wieder aktivieren.",
+            record.get("level_index", "?"),
+            record["id"],
+            price,
+        )
+
+        if record["id"] in self._dry_run_block_notified:
+            return
+        self._dry_run_block_notified.add(record["id"])
+        send_notification(
+            f"[GRID-VERKAUF-GESPERRT] Stufe {record.get('level_index', '?')}: "
+            f"echte Position ({record['quantity']:.8f} {self._config.symbol}) "
+            f"hat ihr Verkaufsziel @ {price:.2f} erreicht, Trading ist aber "
+            "deaktiviert. Kein Verkauf, Position bleibt offen - zum Verkaufen "
+            "GRID_BOT_ENABLE_TRADING=true setzen."
+        )
 
     def _report_failed_sell(self, record: dict, price: float) -> None:
         """

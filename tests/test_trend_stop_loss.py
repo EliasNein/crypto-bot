@@ -44,6 +44,7 @@ from dca_bot.trend_strategy import (
     UNPROTECTED_CYCLES_WARNING_THRESHOLD,
     TrendFollowingStrategy,
 )
+from dca_bot.trend_signals import is_stop_loss_hit
 
 
 # Handelsregeln nahe an dem, was Binance fuer BTCUSDT meldet - damit die
@@ -279,6 +280,12 @@ class FakeTradingClient:
     def cancel_order(self, symbol: str, order_id: str) -> dict | None:
         self.cancel_calls.append((symbol, order_id))
         self.call_log.append("cancel_order")
+        if not self.trading_enabled:
+            # Wie der echte Client: Stornieren bei deaktiviertem Trading ist
+            # ein Programmierfehler der Strategie (siehe
+            # binance_client.cancel_order). Der Aufruf wird oben trotzdem
+            # protokolliert, damit ein Test "cancel_calls == []" pruefen kann.
+            raise RuntimeError("cancel_order bei deaktiviertem Trading (Testfall)")
         if self.force_transient_cancel_failure:
             # Order bleibt unverändert (z.B. weiterhin "NEW") - simuliert
             # einen Fehlschlag, der NICHTS über den wahren Order-Status
@@ -1230,8 +1237,16 @@ class TrendStopLossProtectionTestCase(TrendStrategyTestBase):
         self.assertEqual(live_client.stop_order_calls, [], "Keine echte Order fuer Dry-Run")
         self.assertEqual(live_strategy._ledger.open_position()["unprotected_cycles"], 0)
 
-    def test_dry_run_mode_places_no_stop_order(self):
-        """Im Dry-Run-Modus wird ohnehin nie eine echte Order platziert."""
+    def test_dry_run_mode_places_no_stop_order_but_counts(self):
+        """
+        Im Dry-Run-Modus wird nie eine echte Order platziert - der
+        ungeschützte Zustand der ECHTEN Position wird aber gezählt.
+
+        Bis zum 25.09.2026 prüfte dieser Test `unprotected_cycles == 0`,
+        also genau das stille Verhalten: die Methode stieg im Dry-Run
+        sofort aus, und eine echte Position ohne Stop-Order blieb
+        ungezählt und ungemeldet.
+        """
         strategy, client = self._open_position_without_stop_order()
 
         dry_client = FakeTradingClient(trading_enabled=False, price=51_000.0)
@@ -1241,7 +1256,7 @@ class TrendStopLossProtectionTestCase(TrendStrategyTestBase):
         dry_strategy.execute_once()
 
         self.assertEqual(dry_client.stop_order_calls, [])
-        self.assertEqual(dry_strategy._ledger.open_position()["unprotected_cycles"], 0)
+        self.assertEqual(dry_strategy._ledger.open_position()["unprotected_cycles"], 1)
 
 
 class TrendTradingRulesTestCase(TrendStrategyTestBase):
@@ -1864,6 +1879,300 @@ class DeadStopOrderTestCase(TrendStrategyTestBase):
                 self.assertEqual(
                     classify_order_status(order, KIND_STOP_LOSS_LIMIT), expected_pending
                 )
+
+
+class RealPositionTradingDisabledTestCase(TrendStrategyTestBase):
+    """
+    Spiegelbild zu K4 (25.09.2026): eine ECHTE Position, waehrend der Bot
+    mit TREND_BOT_ENABLE_TRADING=false laeuft.
+
+    Vorher lief der Ausstieg einfach weiter: _resolve_stop_order_before_close()
+    stornierte die ECHTE Stop-Order an der Boerse, place_market_sell()
+    simulierte nur, und die Position wurde mit erfundenem Erloes
+    geschlossen - echtes BTC, weder im Ledger noch abgesichert. Jetzt wird
+    die Position gar nicht angefasst.
+    """
+
+    def _real_position_then_disable_trading(self, price: float = 50_000.0):
+        """
+        Echte Position samt Stop-Order (mit Trading an eroeffnet), danach
+        Neustart mit Trading aus - dasselbe Ledger, und der Dry-Run-Client
+        sieht dieselben Boersen-Orders wie der Live-Client davor.
+        """
+        live_strategy, live_client = self._make_strategy(trading_enabled=True, price=price)
+        live_strategy._open_position(price)
+        open_trade = live_strategy._ledger.open_position()
+        self.assertFalse(open_trade["dry_run"], "Vorbedingung: echte Position")
+        self.assertIsNotNone(open_trade["stop_loss_order_id"], "Vorbedingung: Stop-Order da")
+
+        dry_client = FakeTradingClient(trading_enabled=False, price=price)
+        dry_client.orders = live_client.orders
+        dry_strategy = TrendFollowingStrategy(self._make_config(False), dry_client)
+        dry_strategy._seeded = True
+        return dry_strategy, dry_client, open_trade["stop_loss_order_id"]
+
+    def _assert_untouched(self, strategy, client, stop_order_id) -> None:
+        self.assertEqual(client.cancel_calls, [], "Stop-Order darf NICHT storniert werden")
+        self.assertEqual(client.market_sell_calls, [], "Kein (simulierter) Verkaufsaufruf")
+        self.assertEqual(client.orders[stop_order_id]["status"], "NEW")
+
+        still_open = strategy._ledger.open_position()
+        self.assertIsNotNone(still_open, "Position muss OFFEN bleiben")
+        self.assertEqual(still_open["stop_loss_order_id"], stop_order_id)
+        self.assertIsNone(still_open["realized_pnl"])
+        self.assertIsNone(still_open["exit_price"])
+        self.assertIsNone(still_open["exit_time"])
+        self.assertFalse(strategy._stop_loss.is_paused(), "Kein Ausstieg -> kein Latch")
+
+    def test_signal_exit_leaves_real_position_and_stop_order_alone(self):
+        strategy, client, stop_order_id = self._real_position_then_disable_trading()
+        open_trade = strategy._ledger.open_position()
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self._assert_untouched(strategy, client, stop_order_id)
+
+        warnings = [line for line in captured.output if "[TREND-AUSSTIEG-GESPERRT]" in line]
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(warnings[0].startswith("WARNING"))
+        self.assertIn(stop_order_id, warnings[0])
+
+        mock_notify.assert_called_once()
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-AUSSTIEG-GESPERRT]", text)
+        self.assertIn("TREND_BOT_ENABLE_TRADING=true", text)
+
+    def test_internal_stop_loss_in_execute_once_is_blocked_as_well(self):
+        """
+        Derselbe Fall ueber den kompletten Zyklus und den ANDEREN
+        Ausstiegsweg: Kurs unter der Stop-Schwelle (45.000).
+        """
+        strategy, client, stop_order_id = self._real_position_then_disable_trading()
+        client.price = 44_000.0
+        # Praemisse: der interne Stop-Loss ist an diesem Kurs tatsaechlich
+        # faellig - sonst waere "nichts passiert" auch ohne Sperre wahr.
+        self.assertTrue(is_stop_loss_hit(50_000.0, 44_000.0, 10.0))
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                strategy.execute_once()
+
+        self._assert_untouched(strategy, client, stop_order_id)
+        self.assertTrue(
+            any("[TREND-AUSSTIEG-GESPERRT]" in line and "Stop-Loss" in line for line in captured.output)
+        )
+
+    def test_same_position_is_closed_normally_once_trading_is_enabled(self):
+        """
+        Gegenprobe: dasselbe Ledger mit Trading an - dann wird wie bisher
+        zuerst storniert und dann verkauft. Belegt, dass die Sperre oben
+        am Trading-Schalter haengt und nicht an etwas anderem.
+        """
+        _, dry_client, stop_order_id = self._real_position_then_disable_trading()
+
+        live_client = FakeTradingClient(trading_enabled=True, price=52_000.0)
+        live_client.orders = dry_client.orders
+        live_strategy = TrendFollowingStrategy(self._make_config(True), live_client)
+        live_strategy._seeded = True
+        open_trade = live_strategy._ledger.open_position()
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            live_strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(live_client.cancel_calls, [("BTCUSDT", stop_order_id)])
+        self.assertEqual(len(live_client.market_sell_calls), 1)
+        self.assertIsNone(live_strategy._ledger.open_position())
+
+    # -- _ensure_stop_loss_protection() im Dry-Run-Modus --
+    #
+    # Bis zum 25.09.2026 stieg die Methode bei deaktiviertem Trading
+    # sofort aus: eine ECHTE Position ohne Stop-Order blieb ungezaehlt und
+    # ungemeldet. Jetzt wird gezaehlt und ab der Schwelle gemeldet - nur
+    # platziert wird nichts.
+
+    def _real_position_without_stop_order_then_disable_trading(self, price=50_000.0):
+        live_strategy, live_client = self._make_strategy(trading_enabled=True, price=price)
+        live_client.force_stop_order_failure = True
+        live_strategy._open_position(price)
+        open_trade = live_strategy._ledger.open_position()
+        self.assertFalse(open_trade["dry_run"], "Vorbedingung: echte Position")
+        self.assertIsNone(open_trade["stop_loss_order_id"], "Vorbedingung: ungeschuetzt")
+        self.assertEqual(open_trade["unprotected_cycles"], 0)
+
+        dry_client = FakeTradingClient(trading_enabled=False, price=51_000.0)
+        dry_strategy = TrendFollowingStrategy(self._make_config(False), dry_client)
+        dry_strategy._seeded = True
+        return dry_strategy, dry_client
+
+    def test_unprotected_real_position_is_counted_and_reported_in_dry_run(self):
+        strategy, client = self._real_position_without_stop_order_then_disable_trading()
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            counts = []
+            for _ in range(UNPROTECTED_CYCLES_WARNING_THRESHOLD):
+                strategy.execute_once()
+                counts.append(strategy._ledger.open_position()["unprotected_cycles"])
+                if len(counts) < UNPROTECTED_CYCLES_WARNING_THRESHOLD:
+                    mock_notify.assert_not_called()
+
+        self.assertEqual(client.stop_order_calls, [], "Im Dry-Run nie eine echte Order")
+        self.assertEqual(counts, list(range(1, UNPROTECTED_CYCLES_WARNING_THRESHOLD + 1)))
+        mock_notify.assert_called_once()
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-WARNUNG]", text)
+        self.assertIn("Trading ist deaktiviert", text)
+
+    def test_blocked_exit_counts_the_missing_stop_order_too(self):
+        """
+        Auch ein Zyklus, in dem ein Ausstieg faellig, aber gesperrt ist,
+        laesst die Position offen - und zaehlt deshalb mit.
+        """
+        strategy, client = self._real_position_without_stop_order_then_disable_trading()
+        client.price = 44_000.0  # unter der Stop-Schwelle von 45.000
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                strategy.execute_once()
+
+        self.assertTrue(any("[TREND-AUSSTIEG-GESPERRT]" in line for line in captured.output))
+        self.assertEqual(strategy._ledger.open_position()["unprotected_cycles"], 1)
+        self.assertEqual(client.stop_order_calls, [])
+        self.assertEqual(client.cancel_calls, [])
+
+    def test_vanished_stop_order_in_dry_run_says_no_replacement_possible(self):
+        """
+        Der realistischste Weg in den Zustand: die Stop-Order verschwindet
+        (z.B. manuell storniert), waehrend der Bot auf Dry-Run steht. Die
+        Meldung darf dann nicht "Der Bot platziert automatisch Ersatz"
+        behaupten.
+        """
+        strategy, client, stop_order_id = self._real_position_then_disable_trading()
+        client.price = 51_000.0
+        client.end_order_without_fill(stop_order_id)
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            strategy.execute_once()
+
+        open_trade = strategy._ledger.open_position()
+        self.assertIsNone(open_trade["stop_loss_order_id"], "Tote Order-ID wurde geloest")
+        self.assertEqual(open_trade["unprotected_cycles"], 1)
+        self.assertEqual(client.stop_order_calls, [])
+
+        texts = [call.args[0] for call in mock_notify.call_args_list]
+        dead_order_texts = [t for t in texts if stop_order_id in t]
+        self.assertEqual(len(dead_order_texts), 1)
+        self.assertIn("NICHT möglich", dead_order_texts[0])
+        self.assertNotIn("platziert automatisch Ersatz", dead_order_texts[0])
+
+    def test_enabling_trading_restores_protection_and_sends_all_clear(self):
+        """
+        Die bestehende Entwarnung greift auch fuer den im Dry-Run
+        aufgelaufenen Zaehler: Trading an -> Order platziert, Zaehler 0,
+        und weil vorher gewarnt wurde, geht die Entwarnung raus.
+        """
+        strategy, _ = self._real_position_without_stop_order_then_disable_trading()
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            for _ in range(UNPROTECTED_CYCLES_WARNING_THRESHOLD):
+                strategy.execute_once()
+
+        live_client = FakeTradingClient(trading_enabled=True, price=51_000.0)
+        live_strategy = TrendFollowingStrategy(self._make_config(True), live_client)
+        live_strategy._seeded = True
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            live_strategy.execute_once()
+
+        open_trade = live_strategy._ledger.open_position()
+        self.assertEqual(len(live_client.stop_order_calls), 1)
+        self.assertIsNotNone(open_trade["stop_loss_order_id"])
+        self.assertEqual(open_trade["unprotected_cycles"], 0)
+        texts = [call.args[0] for call in mock_notify.call_args_list]
+        self.assertTrue(any("[TREND-ABSICHERUNG-WIEDERHERGESTELLT]" in t for t in texts))
+
+    def test_dry_run_position_is_not_counted_in_dry_run_mode(self):
+        """Abgrenzung: eine Dry-Run-Position existiert an der Boerse nicht."""
+        strategy, client = self._make_strategy(trading_enabled=False, price=50_000.0)
+        strategy._open_position(50_000.0)
+        client.price = 51_000.0
+
+        strategy.execute_once()
+
+        self.assertEqual(strategy._ledger.open_position()["unprotected_cycles"], 0)
+
+    def test_position_without_dry_run_field_gets_no_stop_order_and_is_not_counted(self):
+        """
+        Fehlt das dry_run-Feld, wird nicht geraten - auch nicht mit
+        Trading an. Bis zum 25.09.2026 galt so eine Position hier als
+        echt und haette eine echte Stop-Order bekommen.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.force_stop_order_failure = True
+        strategy._open_position(50_000.0)
+        client.force_stop_order_failure = False
+        client.stop_order_calls.clear()
+
+        records = json.loads(Path(self.state_file).read_text(encoding="utf-8"))
+        del records[0]["dry_run"]
+        Path(self.state_file).write_text(json.dumps(records), encoding="utf-8")
+        open_trade = strategy._ledger.open_position()
+
+        with self.assertLogs("trend_bot", level="INFO") as captured:
+            strategy._ensure_stop_loss_protection(open_trade)
+
+        self.assertEqual(client.stop_order_calls, [], "Keine Order fuer unklare Position")
+        self.assertEqual(strategy._ledger.open_position()["unprotected_cycles"], 0)
+        self.assertTrue(any("[TREND-POSITION-UNKLAR]" in line for line in captured.output))
+
+    def test_dry_run_position_is_still_simulated_when_trading_disabled(self):
+        """Abgrenzung: die Sperre gilt nur fuer ECHTE Positionen."""
+        strategy, client = self._make_strategy(trading_enabled=False, price=50_000.0)
+        strategy._open_position(50_000.0)
+        open_trade = strategy._ledger.open_position()
+        self.assertTrue(open_trade["dry_run"])
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertIsNone(strategy._ledger.open_position(), "Simuliert geschlossen wie bisher")
+
+
+class CancelOrderTradingDisabledTestCase(unittest.TestCase):
+    """
+    Zweite Sicherung im echten TradingClient: cancel_order() storniert bei
+    deaktiviertem Trading nichts, sondern wirft - ein Aufruf dort ist
+    immer ein Programmierfehler der Strategie.
+    """
+
+    def _make_client(self, trading_enabled: bool, tmp: str):
+        from dca_bot.binance_client import TradingClient
+
+        config = TrendConfig(
+            api_key="test",
+            api_secret="test",
+            trading_enabled=trading_enabled,
+            pending_orders_file=str(Path(tmp) / "pending_orders_trend.json"),
+        )
+        with mock.patch("dca_bot.binance_client.Client"):
+            client = TradingClient(config)
+        raw = mock.MagicMock()
+        client._client = raw
+        return client, raw
+
+    def test_cancel_order_raises_and_never_reaches_binance_when_trading_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, raw = self._make_client(trading_enabled=False, tmp=tmp)
+            with self.assertRaises(RuntimeError):
+                client.cancel_order("BTCUSDT", "1001")
+        raw.cancel_order.assert_not_called()
+
+    def test_cancel_order_still_works_when_trading_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client, raw = self._make_client(trading_enabled=True, tmp=tmp)
+            raw.cancel_order.return_value = {"orderId": 1001, "status": "CANCELED"}
+            result = client.cancel_order("BTCUSDT", "1001")
+        raw.cancel_order.assert_called_once_with(symbol="BTCUSDT", orderId="1001")
+        self.assertEqual(result["status"], "CANCELED")
 
 
 if __name__ == "__main__":

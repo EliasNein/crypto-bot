@@ -508,6 +508,15 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
   nach einem Umschalten auf `GRID_BOT_ENABLE_TRADING=true` simuliert und
   wird dabei explizit als `[DRY-RUN-POSITION]` geloggt. Ohne diese
   Prüfung würde der Bot versuchen, nie gekaufte Assets zu verkaufen.
+- **Echte Positionen werden im Dry-Run nie simuliert geschlossen:** Das
+  Spiegelbild dazu. Läuft der Bot mit `GRID_BOT_ENABLE_TRADING=false`,
+  während im Ledger echte Positionen (`dry_run: false`) offen sind, wird
+  eine solche Position bei erreichtem Ziel weder verkauft noch als
+  verkauft gebucht. Sie bleibt offen, ihre Stufe bleibt belegt, und der
+  Bot meldet `[GRID-VERKAUF-GESPERRT]` (Telegram einmal pro Position und
+  Prozesslauf). Bis zum 25.09.2026 wurde hier ein Erlös aus
+  `quantity * price` erfunden und die Position geschlossen, obwohl das
+  BTC weiter an der Börse lag.
 - **Fehlgeschlagener echter Verkauf schließt die Position nicht:**
   `place_market_sell()` gibt in zwei völlig verschiedenen Fällen `None`
   zurück - im Dry-Run UND bei einem echten API-Fehler. Beide werden
@@ -524,6 +533,7 @@ Läuft komplett unabhängig vom DCA-Bot (auch parallel), eigenes Log unter
 - **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
   `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (mit realisiertem
   Gewinn/Verlust dieser Position), `[GRID-VERKAUF-FEHLGESCHLAGEN]`,
+  `[GRID-VERKAUF-GESPERRT]`,
   `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`.
 
 ### 8.5 Backtest
@@ -635,7 +645,7 @@ bei Null anfangen müssen.
 - **Telegram-Benachrichtigungen** (falls konfiguriert, siehe Abschnitt 7):
   `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`, `[TREND-AUSSTIEG]` (mit
   realisiertem Gewinn/Verlust und Ausstiegsgrund),
-  `[TREND-VERKAUF-FEHLGESCHLAGEN]`, `[TREND-STOP-LOSS]`,
+  `[TREND-VERKAUF-FEHLGESCHLAGEN]`, `[TREND-AUSSTIEG-GESPERRT]`, `[TREND-STOP-LOSS]`,
   `[TREND-WARNUNG]`, `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`,
   `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
 
@@ -730,6 +740,18 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   an der Börse gar nicht - sie bleibt deshalb auch nach einem Umschalten
   auf `TREND_BOT_ENABLE_TRADING=true` simuliert und wird dabei explizit
   als `[DRY-RUN-POSITION]` geloggt.
+- **Echte Positionen werden im Dry-Run nicht angefasst:** Das
+  Spiegelbild dazu. Läuft der Bot mit `TREND_BOT_ENABLE_TRADING=false`,
+  während eine echte Position offen ist, führt er einen fälligen
+  Ausstieg (Signal oder interner Stop-Loss) nicht aus. Er storniert
+  keine Stop-Order, verkauft nicht, bucht nichts und setzt keinen Latch.
+  Die Position bleibt offen, die Stop-Order an der Börse schützt sie
+  weiter, und der Bot meldet `[TREND-AUSSTIEG-GESPERRT]`. Bis zum
+  25.09.2026 stornierte er in diesem Fall die echte Stop-Order und
+  schloss die Position mit erfundenem Erlös. Zusätzlich wirft
+  `cancel_order()` im `TradingClient` bei deaktiviertem Trading eine
+  Exception, statt zu stornieren – eine zweite Sicherung, falls ein
+  künftiger Aufrufer die Prüfung vergisst.
 - **Fehlgeschlagener echter Verkauf schließt die Position nicht:**
   `place_market_sell()` gibt in zwei völlig verschiedenen Fällen `None`
   zurück - im Dry-Run UND bei einem echten API-Fehler. Beide werden
@@ -764,6 +786,11 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   Position ohnehin gerade geschlossen, wäre eine neue Order sofort wieder
   zu stornieren, und bei ausgelöstem Stop-Loss läge der Preis bereits
   unter der Stop-Schwelle (die Börse würde die Order zurückweisen).
+  **Bei deaktiviertem Trading** wird für eine echte Position keine Order
+  platziert, der fehlende Schutz aber trotzdem gezählt und ab 3 Zyklen
+  gemeldet. Die Meldung zu einer verschwundenen Stop-Order sagt dann
+  ausdrücklich, dass kein Ersatz möglich ist. Eine Position ohne
+  `dry_run`-Feld bekommt keine Order, sondern `[TREND-POSITION-UNKLAR]`.
 - **Dry-Run** (`TREND_BOT_ENABLE_TRADING=false`): es wird KEINE echte
   Stop-Order platziert, nur geloggt ("[DRY-RUN] Würde
   Stop-Loss-Order platzieren..."). Die Position bleibt dann wie bisher

@@ -766,6 +766,63 @@ Nebeneffekt in die richtige Richtung: Bei Order-Requests führt ein Timeout übe
 
 **Tests:** 4 neue in `tests/test_request_timeout.py`, Gesamtstand **561, alle grün**. Geprüft wird der Wert dort, wo er wirkt: Unter dem `TradingClient` läuft ein **echter** `binance.client.Client`, ersetzt ist nur `requests.Session.get`. Ping, ein öffentlicher und ein signierter Request tragen nachweislich `timeout=20`. Ohne den Parameter tragen alle drei `timeout=10`, und diese Zahl steht bewusst als Literal im Test, weil sie die Prämisse der Änderung ist. Ein Test, der nur prüft, ob `requests_params` übergeben wurde, bliebe grün, falls ein python-binance-Update den Parameter still ignoriert. Dazu kommen die Verdrahtung (`main_grid.main()` legt den Client tatsächlich mit 20 an) und die Abgrenzung (DCA, Trend und Allocator übergeben nichts). Wirksamkeit gemessen, Kontrolllauf 0 Fehlschläge, alle 4 Mutationen gefangen: `requests_params` nie gesetzt → 1 Testmethode (3 Subtests), Default ebenfalls 20 → 1 (3 Subtests), `main_grid` übergibt nichts → 1, Wert 10 statt 20 → 1.
 
+### Echte Position bei deaktiviertem Trading: das Spiegelbild zu K4 (25.09.2026)
+
+Gefunden bei der Überprüfung des Grid-Codes im Zuge der Timeout-Änderung. K4 hatte den einen Fall abgesichert: Eine **Dry-Run-Position** wird nach dem Umschalten auf Live nie echt verkauft. Den umgekehrten Fall, eine **echte Position** bei `*_BOT_ENABLE_TRADING=false`, hatte niemand betrachtet. Beim Grid-Bot war er sogar per Test festgeschrieben, mit der Begründung „unkritisch, da keine Order platziert wird“. Für die Börse stimmte das, für das Ledger nicht.
+
+**Grid.** `place_market_sell()` gibt im Dry-Run `None` zurück. Die K1-Prüfung (`order is None and trading_enabled`) greift dort nicht, der Code rechnete also einen Erlös aus `quantity * price` aus und schloss die Position. Danach lag das BTC weiter an der Börse, während das Ledger „verkauft“ behauptete. Die Stufe galt als frei und wurde beim nächsten Durchqueren erneut gekauft. Der Bestandsabgleich sah nichts, denn er meldet nur ein Ledger, das **mehr** beansprucht, als da ist, nicht eines, das weniger beansprucht. Und die erfundene `realized_pnl` stand in einem Eintrag mit `dry_run: false`, also genau in den Daten, die Dashboard-App und Steuer-Export als echten Verkauf lesen.
+
+**Trend, schwerer.** Dieselbe Logik in `_close_position()`, aber vorher lief `_resolve_stop_order_before_close()`, und `cancel_order()` prüfte `trading_enabled` nicht. Ein fälliger Ausstieg im Dry-Run stornierte deshalb die **echte** Stop-Order an der Börse und buchte die Position anschließend als geschlossen. Ergebnis: echtes BTC, weder im Ledger noch durch eine Stop-Order abgesichert.
+
+**Realistischer Auslöser:** Auf dem Homeserver liegen echte Positionen. Wer dort zum Pausieren `*_BOT_ENABLE_TRADING=false` setzt, statt den Notaus zu nutzen, löst genau das aus.
+
+**Umgesetzt:**
+
+- **Grid** (`_process_sells`): Neuer Zweig direkt nach der Prüfung auf ein fehlendes `dry_run`-Feld. Eine echte Position bei deaktiviertem Trading wird weder verkauft noch gebucht, `place_market_sell()` wird gar nicht aufgerufen. Die Position bleibt offen, ihre Stufe belegt. Meldung `[GRID-VERKAUF-GESPERRT]`: ins Log in jedem Zyklus, per Telegram einmal pro Position und Prozesslauf. Dafür gibt es eine eigene Menge statt `_failed_sell_notified`, weil eine frühere Sperr-Meldung sonst später eine echte Fehlschlag-Meldung derselben Position verschlucken würde.
+- **Trend** (`_close_position`): Derselbe Zweig, aber **vor** dem Regel-Abruf und vor `_resolve_stop_order_before_close()`. Also kein Stornieren, kein Verkauf, kein `record_exit` und kein Stop-Loss-Latch, weil kein Ausstieg stattgefunden hat (gleiche Logik wie bei K1). Die Stop-Order an der Börse bleibt liegen und schützt die Position weiter. Meldung `[TREND-AUSSTIEG-GESPERRT]` bei jedem Versuch, beim 24-Stunden-Takt also höchstens einmal am Tag. Die Meldung sagt, ob eine Stop-Order besteht.
+- **Zweite Sicherung in `binance_client.cancel_order()`:** Bei deaktiviertem Trading wirft die Methode eine Exception, bevor irgendetwas an Binance geht. Das trifft keinen legitimen Fall, denn Stop-Orders haben nur echte Positionen, und die fasst die Strategie im Dry-Run jetzt nicht mehr an. Die Sicherung ist für einen künftigen Aufrufer da, der die Prüfung vergisst. `None` wäre die falsche Antwort gewesen: Die aufrufende Seite liest das als fehlgeschlagene Stornierung und fiele in den `uncertain`-Pfad. Die Exception bricht den Zyklus dagegen laut mit `[TREND-FEHLER]` ab, bevor etwas storniert oder gebucht ist.
+
+**Mitbehoben: `_ensure_stop_loss_protection()` im Dry-Run.** Die Methode stieg bei `not trading_enabled` sofort aus. Verschwand die Stop-Order einer echten Position, während der Bot auf Dry-Run stand, wurde das weder gezählt noch gemeldet, und die Telegram-Meldung zur verschwundenen Order behauptete sogar „Der Bot platziert automatisch Ersatz“. Jetzt:
+
+- Für eine echte Position ohne `stop_loss_order_id` zählt `unprotected_cycles` auch im Dry-Run hoch. Ab derselben Schwelle wie sonst (3 Zyklen) kommt `[TREND-WARNUNG]`, mit dem Grund „Trading ist deaktiviert“. Es wird nur nichts platziert.
+- Die Schwelle bleibt bewusst bei 3: Der realistischste Weg in diesen Zustand, eine verschwundene Stop-Order, meldet sich in `_forget_dead_stop_order()` ohnehin sofort. Deren Text sagt im Dry-Run jetzt, dass **kein** Ersatz möglich ist, solange Trading aus ist.
+- Der gesperrte Ausstieg ruft die Methode ebenfalls auf, denn auch dort überlebt die Position den Zyklus. Der Grund, warum sie sonst erst nach den Ausstiegs-Entscheidungen läuft (eine neue Order unter der Stop-Schwelle würde abgelehnt), gilt hier nicht: im Dry-Run wird nichts platziert.
+- Zählung und Meldung stehen jetzt in einer gemeinsamen Methode `_count_unprotected_cycle()` mit dem Grund als Parameter. Beide Ursachen („Neuplatzierung gescheitert“ und „Trading aus“) teilen damit Zähler, Schwelle und die bestehende Entwarnung. Wird Trading später eingeschaltet, platziert der erste Zyklus die Order, setzt den Zähler zurück und entwarnt.
+- **Fehlendes `dry_run`-Feld:** Die Methode prüfte `open_trade.get("dry_run")`, ein fehlendes Feld galt also als „echt“. Mit Trading an hätte eine Position unbekannter Art damit eine echte Stop-Order bekommen, gegen die „nicht raten“-Regel des übrigen Projekts. Jetzt kommt `[TREND-POSITION-UNKLAR]`, ohne Platzieren und ohne Zählen, wie im Ausstiegspfad.
+
+**Tests:** 17 neue. Einer davon ersetzt einen bestehenden Test, und ein weiterer bestehender Test ist angepasst – beide hatten das alte Verhalten festgeschrieben. Gesamtstand **577 (561 − 1 + 17), alle grün**.
+
+- **Ersetzt bzw. angepasst:** Der Grid-Test „echte Position im Dry-Run wird geschlossen“ ist durch sein Gegenteil ersetzt. Beim Trend-Test „Dry-Run-Modus platziert keine Stop-Order“ bleibt die Prüfung „keine Order“, der Zähler ist jetzt 1 statt 0.
+- **Grid:**
+  - Position bleibt offen, `realized_pnl`, `sell_price` und `sold_at` bleiben `None`.
+  - Die Stufe bleibt belegt und wird nicht erneut gekauft. Die Prämisse ist eigens belegt: ohne die Position würde genau diese Stufe gekauft.
+  - Log in jedem Zyklus, Telegram einmal.
+  - Gegenprobe: dasselbe Ledger mit Trading an wird regulär verkauft.
+  - Abgrenzung: eine Dry-Run-Position wird weiterhin simuliert geschlossen.
+- **Trend:**
+  - Signal-Ausstieg und interner Stop-Loss über `execute_once()` lassen Position und Stop-Order unberührt (`cancel_calls == []`, Order weiter `NEW`, kein Latch).
+  - Gegenprobe mit Trading an: stornieren und verkaufen wie bisher.
+  - Zusatzpunkt: Zähler 1/2/3 mit Telegram genau beim dritten Zyklus; der gesperrte Ausstieg zählt mit; verschwundene Order im Dry-Run mit korrigiertem Text; Entwarnung nach dem Einschalten; Dry-Run-Position zählt nicht; fehlendes `dry_run`-Feld bekommt keine Order.
+- **Client:** zwei Tests am echten `TradingClient` für die zweite Sicherung, dazu die Gegenprobe mit Trading an.
+- **Fake-Client:** `FakeTradingClient.cancel_order` bildet die neue Sicherung nach, wie der Fake auch sonst den echten Client nachbildet.
+
+**Wirksamkeit gemessen,** Kontrolllauf 0 Fehlschläge, alle 10 Mutationen gefangen:
+
+| Mutation | Ergebnis |
+|---|---|
+| Grid-Sperre entfernt | 4 Tests schlagen fehl |
+| Grid-Telegram ohne Mengenlimit | 1 |
+| Trend-Sperre entfernt | 2 Tests brechen mit Fehler ab |
+| Trend-Sperre erst nach dem Stornieren | 2 Tests brechen mit Fehler ab |
+| Sicherung in `cancel_order` entfernt | 1 |
+| Dry-Run steigt in `_ensure_stop_loss_protection` wieder still aus | 5 |
+| Dry-Run versucht zu platzieren | 4 |
+| gesperrter Ausstieg zählt nicht | 1 |
+| alter Ersatz-Text im Dry-Run | 1 |
+| fehlendes `dry_run` gilt wieder als echt | 1 |
+
+Die beiden Trend-Sperren-Mutationen erscheinen als Fehlerabbruch statt als Fehlschlag, weil dann die zweite Sicherung im Fake-Client auslöst. Auch das ist eine Messung: Beide Ebenen greifen unabhängig voneinander.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

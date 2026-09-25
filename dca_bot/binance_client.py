@@ -816,7 +816,25 @@ class TradingClient:
         robuster per erneuter get_order_status()-Abfrage der tatsächlichen
         Order-Ground-Truth statt Code-Interpretation hier. Der Code wird
         hier nur mitgeloggt, für die Fehlersuche im Log.
+
+        Bei deaktiviertem Trading wird bewusst eine Exception geworfen
+        statt storniert: Stop-Orders haben nur echte Positionen, und die
+        fasst die Strategie im Dry-Run gar nicht erst an (siehe
+        trend_strategy._close_position). Ein Aufruf hier ist also immer
+        ein Programmierfehler - er würde eine ECHTE Absicherung an der
+        Börse entfernen, während der Bot nichts verkaufen darf. `None`
+        zurückzugeben wäre die falsche Antwort: die aufrufende Seite
+        liest das als fehlgeschlagene Stornierung und fiele in den
+        "uncertain"-Pfad. Die Exception bricht den Zyklus dagegen laut
+        ab, bevor irgendetwas storniert oder gebucht ist.
         """
+        if not getattr(self._config, "trading_enabled", False):
+            raise RuntimeError(
+                f"cancel_order({order_id}) bei deaktiviertem Trading "
+                "aufgerufen - es wird NICHT storniert. Eine Stop-Order gehört "
+                "zu einer echten Position, und die darf der Bot im Dry-Run "
+                "nicht anfassen (Programmierfehler in der aufrufenden Strategie)."
+            )
         try:
             result = self._client.cancel_order(symbol=symbol, orderId=order_id)
             logger.info("Order %s storniert: %s", order_id, result)
