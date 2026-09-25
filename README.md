@@ -211,7 +211,11 @@ trading-bot/
   (`data/pending_orders_<bot>.json`) geschrieben wird. Bricht die
   Verbindung danach ab (`requests`-Timeout, `BinanceRequestException`),
   gibt der Bot **nicht** einfach "kein Trade" zurück, sondern fragt die
-  Börse per `get_order()` nach dieser ID, was tatsächlich passiert ist:
+  Börse per `get_order()` nach dieser ID, was tatsächlich passiert ist.
+  Dasselbe gilt für eine Antwort von Binance, deren Ausgang laut
+  Binance-Doku unbekannt ist (HTTP 5xx, Fehlercodes −1006/−1007) - sie
+  ist keine Ablehnung, auch wenn python-binance sie als
+  `BinanceAPIException` meldet:
   ausgeführt → die echten Order-Daten werden zurückgegeben und regulär
   verbucht; nie angenommen (Fehlercode −2013) → für diesen Zyklus als
   "kein Trade" gewertet, der Eintrag bleibt aber bis zum nächsten Start

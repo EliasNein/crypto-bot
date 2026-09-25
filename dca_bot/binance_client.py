@@ -53,6 +53,55 @@ ORDER_DOES_NOT_EXIST_CODE = -2013
 # unverbucht.
 INCONCLUSIVE_REQUEST_ERRORS = (BinanceRequestException, requests.exceptions.RequestException)
 
+# Binance-Fehlercodes, bei denen laut offizieller Doku der
+# Ausfuehrungsstatus UNBEKANNT ist (binance-spot-api-docs, errors.md, Stand
+# 18.09.2026): -1006 "An unexpected response was received from the message
+# bus. Execution status unknown." und -1007 "Timeout waiting for response
+# from backend server. Send status unknown; execution status unknown."
+EXECUTION_STATUS_UNKNOWN_CODES = frozenset({-1006, -1007})
+
+
+def _execution_status_unknown(exc: Exception) -> bool:
+    """
+    Ob eine Antwort von Binance KEINE Ablehnung ist, sondern "Ausgang
+    unbekannt" - obwohl sie als `BinanceAPIException` ankommt.
+
+    python-binance (1.0.19, `_handle_response`) wirft diese Exception fuer
+    JEDEN HTTP-Status ausserhalb 2xx, also auch fuer Serverfehler. Die
+    Binance-Doku (rest-api.md, "HTTP Return Codes") sagt dazu woertlich:
+    "HTTP 5XX return codes are used for internal errors [...]. It is
+    important to NOT treat this as a failure operation; the execution
+    status is UNKNOWN and could have been a success." Dasselbe gilt fuer
+    die Codes in EXECUTION_STATUS_UNKNOWN_CODES. Bis zum 25.09.2026 wurden
+    alle drei wie eine Ablehnung behandelt: Pending-Eintrag geloescht,
+    "kein Trade" an die Strategie - wurde die Order doch ausgefuehrt, fehlte
+    sie im Ledger (der K2-Schaden ueber einen anderen Fehlerweg).
+
+    Der Code wird unabhaengig vom HTTP-Status geprueft: die Doku nennt fuer
+    -1006/-1007 keinen. Eine 5xx-Antwort ohne lesbaren Fehlertext hat
+    `code == 0` und wird ueber den Status erkannt.
+    """
+    if not isinstance(exc, BinanceAPIException):
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and status_code >= 500:
+        return True
+    return getattr(exc, "code", None) in EXECUTION_STATUS_UNKNOWN_CODES
+
+
+def _describe_inconclusive_error(exc: Exception) -> str:
+    """
+    Kurzbeschreibung fuer das Log - Typ, bei API-Fehlern dazu HTTP-Status
+    und Code. Bewusst NICHT str(exc): bei requests-Fehlern steht darin die
+    vollstaendige Request-URL samt Signatur (siehe get_order_by_client_id).
+    """
+    if isinstance(exc, BinanceAPIException):
+        return (
+            f"{type(exc).__name__}, HTTP {getattr(exc, 'status_code', '?')}, "
+            f"Code {getattr(exc, 'code', '?')}"
+        )
+    return type(exc).__name__
+
 
 def _parse_trading_rules(symbol: str, info: dict) -> SymbolTradingRules:
     """
@@ -488,7 +537,10 @@ class TradingClient:
 
         - BinanceAPIException/BinanceOrderException: Binance HAT
           geantwortet und die Order abgelehnt. Definitives Nein, der
-          Pending-Eintrag kann weg.
+          Pending-Eintrag kann weg. Ausnahme: HTTP 5xx sowie die Codes
+          -1006/-1007 - dort ist der Ausgang laut Binance unbekannt (siehe
+          _execution_status_unknown), sie werden wie ein
+          Verbindungsfehler behandelt.
         - Netzwerk-/Verbindungsfehler: keine Antwort, keine Aussage -
           es wird nachgefragt (siehe _resolve_after_network_error).
         - Alles andere fliegt weiter: ein Programmierfehler soll nicht
@@ -515,6 +567,8 @@ class TradingClient:
         try:
             order = request(client_order_id)
         except (BinanceAPIException, BinanceOrderException) as exc:
+            if _execution_status_unknown(exc):
+                return self._resolve_after_network_error(pending, label, exc)
             self._pending_store.remove(client_order_id)
             logger.error("Fehler beim Platzieren der %s: %s", label, exc)
             return None
@@ -530,7 +584,10 @@ class TradingClient:
     ) -> dict | None:
         """
         Klärt nach einem Netzwerkfehler, ob die Order die Börse doch
-        erreicht hat - der Kern des K2-Fixes.
+        erreicht hat - der Kern des K2-Fixes. Seit dem 25.09.2026 auch
+        nach einer Binance-Antwort mit unbekanntem Ausgang (HTTP 5xx,
+        -1006, -1007, siehe _execution_status_unknown) - die Frage ist
+        dieselbe, nur der Anlass ein anderer.
 
         Vor diesem Fix gab es diesen Pfad gar nicht: die Exception flog
         bis in die execute_once()-Schleife, wurde dort als "unerwarteter
@@ -555,16 +612,16 @@ class TradingClient:
           stehen, damit die Reconciliation beim nächsten Bot-Start
           erneut fragt.
         """
-        # Nur der Exception-TYP (siehe Begründung in
-        # get_order_by_client_id): requests-Fehlermeldungen tragen die
-        # vollständige Request-URL.
+        # Nur Typ, HTTP-Status und Code (siehe
+        # _describe_inconclusive_error): requests-Fehlermeldungen tragen
+        # die vollständige Request-URL.
         logger.error(
-            "Verbindungsfehler beim Platzieren der %s für %s (%s) - die Order "
-            "kann die Börse trotzdem erreicht haben. Frage den tatsächlichen "
-            "Status zur clientOrderId %s ab.",
+            "Verbindungs- oder Serverfehler beim Platzieren der %s für %s (%s) "
+            "- die Order kann die Börse trotzdem erreicht haben. Frage den "
+            "tatsächlichen Status zur clientOrderId %s ab.",
             label,
             pending.symbol,
-            type(exc).__name__,
+            _describe_inconclusive_error(exc),
             pending.client_order_id,
         )
 
@@ -573,9 +630,10 @@ class TradingClient:
         if state == ORDER_CONFIRMED and order is not None:
             self._pending_store.remove(pending.client_order_id)
             logger.warning(
-                "%s %s (clientOrderId %s) ist trotz des Verbindungsfehlers an "
-                "der Börse angekommen - sie wird jetzt regulär verbucht, als "
-                "wäre der ursprüngliche Aufruf erfolgreich gewesen.",
+                "%s %s (clientOrderId %s) ist trotz des Verbindungs- oder "
+                "Serverfehlers an der Börse angekommen - sie wird jetzt "
+                "regulär verbucht, als wäre der ursprüngliche Aufruf "
+                "erfolgreich gewesen.",
                 label,
                 pending.symbol,
                 pending.client_order_id,
@@ -613,8 +671,8 @@ class TradingClient:
             # keine Aufforderung zum Eingreifen.
             logger.warning(
                 "%s für %s (clientOrderId %s): Binance kennt die Order nach "
-                "dem Verbindungsfehler nicht (%s) - sie wird als 'kein Trade' "
-                "behandelt. Der Eintrag bleibt in '%s' stehen und wird beim "
+                "dem Verbindungs- oder Serverfehler nicht (%s) - sie wird als "
+                "'kein Trade' behandelt. Der Eintrag bleibt in '%s' stehen und wird beim "
                 "nächsten Bot-Start erneut geprüft, falls Binance sie doch "
                 "noch ausgeführt hat.",
                 label,
@@ -625,11 +683,13 @@ class TradingClient:
             )
             return None
 
-        # ORDER_UNCLEAR - der einzige Fall, in dem der Eintrag bleibt.
+        # ORDER_UNCLEAR - neben ORDER_UNKNOWN der zweite Fall, in dem der
+        # Eintrag bleibt, und der einzige, der eskaliert.
         logger.error(
             "UNKLARER ORDER-ZUSTAND: %s für %s konnte nach einem "
-            "Verbindungsfehler nicht geklärt werden. Die clientOrderId %s "
-            "steht in '%s' und wird beim nächsten Bot-Start erneut geprüft. "
+            "Verbindungs- oder Serverfehler nicht geklärt werden. Die "
+            "clientOrderId %s steht in '%s' und wird beim nächsten Bot-Start "
+            "erneut geprüft. "
             "Bis dahin ist offen, ob diese Order an der Börse existiert - "
             "bitte manuell nachsehen (python -m dca_bot.check_orders).",
             label,

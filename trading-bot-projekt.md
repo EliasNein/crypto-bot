@@ -984,7 +984,7 @@ Die verworfene Alternative wäre eine Wiederholung wie beim Verkauf gewesen. Sic
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 4 Mutationen gefangen: altes Verhalten, bei dem −2013 den Eintrag löscht (3); Order ohne Wirkung löscht nicht mehr (1); −2013 meldet per Telegram (1); Start-Reconciliation verwirft −2013 nicht mehr (2).
 
-#### Nebenbefund zu Punkt B: 5xx, −1006 und −1007 gelten fälschlich als „abgelehnt“, verifiziert, Fix geplant (25.09.2026)
+#### Nebenbefund zu Punkt B: 5xx, −1006 und −1007 gelten nicht mehr als „abgelehnt“ (25.09.2026)
 
 **Befund.** `_place_order()` wertet jede `BinanceAPIException` als „Binance hat geantwortet und die Order abgelehnt“ und löscht den Pending-Eintrag, ohne nachzufragen. python-binance (installiert: 1.0.19) wirft diese Exception aber für **jeden** HTTP-Status außerhalb 2xx (`_handle_response`, nachgelesen), also auch für Serverfehler.
 
@@ -995,7 +995,28 @@ Die verworfene Alternative wäre eine Wiederholung wie beim Verkauf gewesen. Sic
 - `rest-api.md`, „General API Information“: *„APIs have a timeout of 10 seconds when processing a request. If a response from the Matching Engine takes longer than this, the API responds with […] (-1007 TIMEOUT). This does not always mean that the request failed in the Matching Engine. If the status of the request has not appeared in User Data Stream, please perform an API query for its status.“*
 - Zum Einordnen von Punkt B: `recvWindow` ist ohne Angabe 5000 ms und wird laut „Timing security“ zweimal geprüft, beim Eingang und noch einmal unmittelbar vor der Weitergabe an die Matching Engine. Die Datenquelle von „Query order“ (`GET /api/v3/order`) ist „Memory => Database“.
 
-Die Aussage ist damit bestätigt. Bei 5xx, −1006 und −1007 hat eine Order möglicherweise gewirkt, der Code löscht aber heute den Eintrag und meldet der Strategie „kein Trade“. Ist die Order doch ausgeführt, fehlt sie im Ledger, also derselbe Schaden wie in K2 über einen anderen Fehlerweg. **Stand: verifiziert, Fix als eigener Punkt geplant, noch nicht umgesetzt.**
+Die Aussage ist damit bestätigt. Bei 5xx, −1006 und −1007 hat eine Order möglicherweise gewirkt, der Code löschte aber den Eintrag und meldete der Strategie „kein Trade“. Ist die Order doch ausgeführt, fehlt sie im Ledger, also derselbe Schaden wie in K2 über einen anderen Fehlerweg. Der Plan wurde nach der Verifikation vorgelegt und freigegeben.
+
+**Umgesetzt.** Neue Funktion `_execution_status_unknown()` in `binance_client.py`. Sie gibt `True` zurück bei HTTP-Status ≥ 500 **oder** Code −1006/−1007 (Konstante `EXECUTION_STATUS_UNKNOWN_CODES`, mit Verweis auf die Doku-Stelle). Der Code wird unabhängig vom HTTP-Status geprüft, weil die Doku für −1006/−1007 keinen Status nennt. Eine 5xx-Antwort ohne lesbaren Fehlertext (etwa eine HTML-Fehlerseite) hat bei python-binance `code == 0` und wird über den Status erkannt. `_place_order()` schickt diese Fälle in denselben Weg wie einen Verbindungsfehler: Rückfrage bei Binance, dann nachbuchen, verwerfen oder als unklar melden. Das ist bestehender, getesteter Code. Alle anderen API-Fehler bleiben eine endgültige Ablehnung, laut Doku heißt 4xx „the issue is on the sender's side“, etwa −2010 (Guthaben), −1013 (Filter) oder 429/−1003 (Rate-Limit).
+
+Die Log-Texte in `_resolve_after_network_error()` sprechen jetzt von „Verbindungs- oder Serverfehler“ und nennen bei API-Fehlern HTTP-Status und Code (`_describe_inconclusive_error()`). Weiterhin nie `str(exc)`, weil bei `requests`-Fehlern darin die URL samt Signatur steht. Ein Kommentar aus B1 war dabei veraltet („ORDER_UNCLEAR – der einzige Fall, in dem der Eintrag bleibt“) und ist korrigiert: Seit B1 bleibt er auch bei `ORDER_UNKNOWN`.
+
+**Zusammenspiel mit B1.** Nach −1007 kann die Matching Engine noch arbeiten, eine sofortige Rückfrage liefert dann eher −2013 als nach einem reinen Verbindungsabbruch. Genau dafür lässt B1 den Eintrag bis zum nächsten Start stehen. Das ist auch der Pfad, auf dem B2 (zweite Rückfrage nach einer Wartezeit) am meisten brächte. B2 wurde in Kenntnis dessen erneut zurückgestellt: B1 und dieser Fix zusammen machen aus „verloren“ bereits „verzögert bis zum nächsten Start“.
+
+Nicht angefasst ist `cancel_order()`: Dort gilt ein fehlgeschlagener Aufruf ohnehin nicht als Wahrheit, der Trend-Bot fragt danach den tatsächlichen Order-Status ab (`_resolve_stop_order_before_close`).
+
+**Tests:** 8 neue in der Klasse `ServerErrorWithUnknownOutcomeTestCase` (`tests/test_pending_orders.py`), eine bestehende Log-Zusicherung auf den neuen Wortlaut angepasst. Gesamtstand **630, alle grün**. Geprüft am echten `TradingClient` mit gefälschtem Binance-Client darunter:
+
+- HTTP 503 bei gefüllter Order → Order wird zurückgegeben und verbucht, das Log nennt „HTTP 503“.
+- HTTP 500 ohne lesbaren Fehlertext (`code == 0`) → wird über den Status erkannt.
+- −1007 bei HTTP 408 → wird über den Code erkannt. Der Status liegt bewusst unter 500, damit der Test nicht über die 5xx-Regel grün wird.
+- −1006 → wird über den Code erkannt.
+- −1007 mit anschließender Antwort −2013 → `None`, der Eintrag bleibt für den nächsten Start (B1).
+- Serverfehler und gescheiterte Rückfrage → `[ORDER-UNKLAR]`, der Eintrag bleibt.
+- Gegenprobe: 429/−1003 bleibt eine endgültige Ablehnung ohne Rückfrage (die bestehende Gegenprobe für −2010 läuft unverändert). Ohne sie wäre „es wird nachgefragt“ auch grün, wenn *jede* API-Exception nachfragen würde.
+- Eine Tabelle über die Einstufung selbst: acht Fälle einschließlich eines Verbindungsfehlers, der den anderen Weg nimmt.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 7 Mutationen gefangen: altes Verhalten, bei dem jede API-Exception eine Ablehnung ist (6); 5xx-Regel entfernt (5); Grenze `>= 500` zu `> 500` (2); −1006 fehlt (2); −1007 fehlt (3); jede API-Exception gilt als unbekannt (5); Log ohne HTTP-Status und Code (1).
 
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
