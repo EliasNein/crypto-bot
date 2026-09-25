@@ -213,8 +213,11 @@ trading-bot/
   gibt der Bot **nicht** einfach "kein Trade" zurück, sondern fragt die
   Börse per `get_order()` nach dieser ID, was tatsächlich passiert ist:
   ausgeführt → die echten Order-Daten werden zurückgegeben und regulär
-  verbucht; nie angenommen (Fehlercode −2013) → sauber als "kein Trade"
-  gewertet; unklar → **nicht geraten**, sondern `ERROR` + Telegram, und
+  verbucht; nie angenommen (Fehlercode −2013) → für diesen Zyklus als
+  "kein Trade" gewertet, der Eintrag bleibt aber bis zum nächsten Start
+  stehen (die Nachfrage kommt unmittelbar nach dem Timeout, eine noch
+  laufende Order würde erst danach sichtbar); unklar → **nicht
+  geraten**, sondern `ERROR` + Telegram, und
   der Eintrag bleibt für den nächsten Start stehen. Beim Bot-Start
   arbeitet jeder Bot verbliebene Einträge ab und trägt fehlende
   Ledger-Einträge als `[REKONZILIATION]` nach. Das schließt auch das

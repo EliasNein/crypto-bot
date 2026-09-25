@@ -955,6 +955,48 @@ Damit schreiben alle drei handelnden Bots bei echten Orders denselben Preis wie 
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 4 Mutationen gefangen: Ticker statt Fill (2), Ledger bekommt den Ticker (2), `[KAUF]`-Meldung nennt den Ticker (1), Dry-Run mit erfundenem Fill (1). `price=price` steht in `strategy.py` zweimal (Reconciliation und Kaufpfad), dieselbe Stelle, an der schon in 6g eine Gegenmutation die falsche Zeile traf. Das Messskript hat die Eindeutigkeit diesmal vor jeder Mutation geprüft.
 
+#### Punkt A: Gescheiterter Grid-Kauf wird nicht wiederholt, bewusst so belassen (25.09.2026)
+
+**Frage aus der Code-Überprüfung.** An einer durchquerten Stufe wird ein gescheiterter Kauf nicht wiederholt, weil `_last_seen_price` weiterläuft und die Stufe damit als erledigt gilt. Ein fehlgeschlagener Verkauf bleibt dagegen offen und wird im nächsten Zyklus erneut versucht. Ist das Absicht oder eine Inkonsistenz, und wie sieht das mit der nächtlichen Zwangstrennung aus?
+
+**Befund, am Code nachvollzogen und mit dem Fake-Client nachgestellt.** „Gescheitert“ heißt zweierlei:
+
+- **Der ganze Zyklus bricht ab** (Ticker, Regelabruf, …): `_last_seen_price` wird erst am Ende von `execute_once()` gesetzt und bleibt deshalb stehen. Die Durchquerung geht nicht verloren, der nächste erfolgreiche Zyklus kauft die Stufe.
+- **Nur die Kauf-Order scheitert** (`place_market_buy()` liefert `None`): `_last_seen_price` rückt vor, und die Stufe wird erst beim nächsten Durchqueren wieder gekauft.
+
+**Die Zwangstrennung trifft praktisch nur den ersten Fall.** Jeder Zyklus beginnt mit der Ticker-Abfrage, und die scheitert zuerst, wenn die Leitung weg ist. In den zweiten Fall käme man nur, wenn die Trennung genau zwischen Ticker-Antwort und Order beginnt, also in einem Fenster von Millisekunden. Selbst dann ist der Ausgang meist „unklar“, und dort wäre eine Wiederholung gerade falsch: Die erste Order kann durchgegangen sein, eine Wiederholung würde dieselbe Stufe doppelt kaufen. Realistische Auslöser für den zweiten Fall sind fehlendes Guthaben auf dem geteilten Konto, Rate-Limit, Mindestvolumen oder ein Serverfehler bei Binance.
+
+**Entscheidung: so belassen, kein Code-Änderungsbedarf.** Die Asymmetrie zum Verkauf ist ein etabliertes Projektprinzip und kein Zufall. Ein wiederholter Verkauf senkt das Risiko, und Ledger-Position plus Guthabenprüfung (W11) schützen vor einem Doppelverkauf. Ein wiederholter Kauf erhöht das Risiko, und einen unverbuchten ersten Kauf erkennt nichts. Mit derselben Begründung lässt der Trendbruch-Stop-Loss Verkäufe durch und sperrt Käufe. Ein entgangener Trade ist ein vertretbarer Preis dafür, einen möglichen Doppelkauf bei unklarem Order-Ausgang zu vermeiden.
+
+Die verworfene Alternative wäre eine Wiederholung wie beim Verkauf gewesen. Sicher wäre sie nur mit einer Unterscheidung „eindeutig abgelehnt“ gegen „Ausgang unklar“, und die liefert `place_market_buy()` heute nicht, weil alle drei Fälle `None` ergeben. Dafür hätte die Client-Schnittstelle für alle drei Bots umgebaut werden müssen, dazu kämen Wiederholungszustand, Obergrenzen und ein Mengenlimit für Meldungen. Bei dauerhaft fehlendem Guthaben entstünde alle 5 Minuten eine abgelehnte Order.
+
+#### Punkt B: −2013 nach einem Timeout, Pending-Eintrag bleibt stehen (25.09.2026)
+
+**Frage aus der Code-Überprüfung.** Nach einem Verbindungsfehler fragt `_resolve_after_network_error()` sofort bei Binance nach. Antwortet Binance mit −2013 („Order existiert nicht“), wurde der Pending-Eintrag gelöscht. Ist die Order in diesem Moment noch in Bearbeitung und wird danach ausgeführt, fehlt sie für immer im Ledger, also der K2-Schaden.
+
+**Was schon abgedeckt war.** Eine *gescheiterte* Nachfrage galt nie als „existiert nicht“: Das Ergebnis ist `LOOKUP_FAILED`, damit „unklar“, der Eintrag bleibt und es kommt `[ORDER-UNKLAR]`. Offen war nur die *erfolgreiche* Antwort −2013 zu einem Zeitpunkt, an dem die Order noch unterwegs ist. Die Zwangstrennung löst diesen Fall nicht aus. Entweder scheitert die Nachfrage, oder die Order hat Binance nie erreicht, und dann ist −2013 richtig. Übrig bleibt eine Verzögerung im Binance-Backend. Dass es die gibt, bestätigt die Binance-Dokumentation (siehe Nebenbefund unten): Die API wartet bis zu 10 Sekunden auf die Matching Engine und meldet danach „execution status unknown“.
+
+**Umgesetzt: B1.** In `_resolve_after_network_error()` sind `ORDER_UNKNOWN` (−2013) und `ORDER_WITHOUT_EFFECT` (Order existiert, ist ohne ausgeführte Menge beendet) jetzt getrennt. Nur der zweite Fall ist eine endgültige Antwort und löscht den Eintrag wie bisher. Bei −2013 bekommt die Strategie weiterhin `None` und bucht nichts, der Pending-Eintrag **bleibt aber stehen**. Die Reconciliation beim nächsten Start fragt erneut: Ist die Order weiterhin unbekannt, wird der Eintrag verworfen; ist sie doch ausgeführt, wird sie nachgetragen. Aus „für immer verloren“ wird damit „verzögert bis zum nächsten Start“. Bei den bisher üblichen regelmäßigen Deploys ist der nicht fern. Es gibt keine Telegram-Meldung, weil −2013 im Normalfall eine Order ist, die Binance nie erreicht hat, und keine Aufforderung zum Eingreifen. Ins Log geht eine Warnung mit dem Hinweis auf die Prüfung beim nächsten Start.
+
+**Bewusst nicht umgesetzt: B2**, also nach einer Wartezeit ein zweites Mal nachfragen. Das brächte zusätzliche Komplexität in die Hauptschleife für einen Fall, der ohnehin selten ist, und B1 hat das Risiko bereits von „verloren“ auf „verzögert“ reduziert.
+
+**Tests:** 3 neue in `tests/test_pending_orders.py`, ein bestehender umgestellt, Gesamtstand **622, alle grün**. Der umgestellte Test (`…_order_unknown_is_no_trade_but_entry_stays`) hatte das Löschen bei −2013 festgeschrieben, wie der Grid-Test in Priorität 1. Neu sind die Gegenprobe (eine ohne Wirkung beendete Order löscht den Eintrag weiterhin, sonst wäre „Eintrag bleibt“ auch grün, wenn nie mehr gelöscht würde) und zwei Tests, die zwei Schritte durchspielen: zur Laufzeit −2013, danach die Reconciliation beim nächsten Start. Ist die Order inzwischen gefüllt, wird sie mit der echten Order-Antwort zum Nachtragen weitergereicht. Ist sie weiter unbekannt, wird der Eintrag verworfen, die Pending-Datei wächst also nicht dauerhaft.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 4 Mutationen gefangen: altes Verhalten, bei dem −2013 den Eintrag löscht (3); Order ohne Wirkung löscht nicht mehr (1); −2013 meldet per Telegram (1); Start-Reconciliation verwirft −2013 nicht mehr (2).
+
+#### Nebenbefund zu Punkt B: 5xx, −1006 und −1007 gelten fälschlich als „abgelehnt“, verifiziert, Fix geplant (25.09.2026)
+
+**Befund.** `_place_order()` wertet jede `BinanceAPIException` als „Binance hat geantwortet und die Order abgelehnt“ und löscht den Pending-Eintrag, ohne nachzufragen. python-binance (installiert: 1.0.19) wirft diese Exception aber für **jeden** HTTP-Status außerhalb 2xx (`_handle_response`, nachgelesen), also auch für Serverfehler.
+
+**Gegen die aktuelle Binance-Dokumentation geprüft**, nicht aus dem Gedächtnis. Quelle ist das offizielle Repository `binance/binance-spot-api-docs`, Stand letzter Commit 18.09.2026, im Rohtext gelesen am 25.09.2026:
+
+- `rest-api.md`, Abschnitt „HTTP Return Codes“: *„HTTP `5XX` return codes are used for internal errors; the issue is on Binance's side. It is important to **NOT** treat this as a failure operation; the execution status is **UNKNOWN** and could have been a success.“*
+- `errors.md`: *„-1006 UNEXPECTED_RESP – An unexpected response was received from the message bus. Execution status unknown.“* und *„-1007 TIMEOUT – Timeout waiting for response from backend server. Send status unknown; execution status unknown.“*
+- `rest-api.md`, „General API Information“: *„APIs have a timeout of 10 seconds when processing a request. If a response from the Matching Engine takes longer than this, the API responds with […] (-1007 TIMEOUT). This does not always mean that the request failed in the Matching Engine. If the status of the request has not appeared in User Data Stream, please perform an API query for its status.“*
+- Zum Einordnen von Punkt B: `recvWindow` ist ohne Angabe 5000 ms und wird laut „Timing security“ zweimal geprüft, beim Eingang und noch einmal unmittelbar vor der Weitergabe an die Matching Engine. Die Datenquelle von „Query order“ (`GET /api/v3/order`) ist „Memory => Database“.
+
+Die Aussage ist damit bestätigt. Bei 5xx, −1006 und −1007 hat eine Order möglicherweise gewirkt, der Code löscht aber heute den Eintrag und meldet der Strategie „kein Trade“. Ist die Order doch ausgeführt, fehlt sie im Ledger, also derselbe Schaden wie in K2 über einen anderen Fehlerweg. **Stand: verifiziert, Fix als eigener Punkt geplant, noch nicht umgesetzt.**
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

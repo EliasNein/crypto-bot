@@ -92,7 +92,11 @@ ORDER_CONFIRMED = "confirmed"
 ORDER_WITHOUT_EFFECT = "without_effect"
 
 # Binance kennt diese clientOrderId nicht (Fehlercode -2013) - die Order
-# wurde nie angenommen. Ebenfalls sicher als "nie passiert" zu werten.
+# wurde nie angenommen. Beim Bot-Start sicher als "nie passiert" zu
+# werten. Zur Laufzeit, unmittelbar nach einem Verbindungsfehler, gilt
+# das nur fuer den laufenden Zyklus: eine Order, die bei Binance noch in
+# Bearbeitung ist, kann erst danach sichtbar werden. Der Pending-Eintrag
+# bleibt deshalb dort stehen (binance_client._resolve_after_network_error).
 ORDER_UNKNOWN = "unknown"
 
 # Unklarer Zustand: die Order ist noch live (NEW/PARTIALLY_FILLED, bei

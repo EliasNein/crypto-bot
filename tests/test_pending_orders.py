@@ -52,6 +52,7 @@ from dca_bot.pending_orders import (
     PendingOrderStore,
     classify_order_status,
     new_client_order_id,
+    reconcile_pending_orders,
     resolve_pending_order,
     safe_startup_reconciliation,
 )
@@ -658,15 +659,45 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
 
     # -- Szenario 2: Netzwerkfehler, Order nie angekommen --
 
-    def test_network_error_and_order_unknown_is_treated_as_no_trade(self):
+    def test_network_error_and_order_unknown_is_no_trade_but_entry_stays(self):
         """
-        Binance kennt die clientOrderId nicht (-2013) - die Order wurde
-        nie angenommen. Sauber als "kein Kauf" behandeln: None zurueck,
-        kein Ledger-Eintrag, keine Eskalation, Pending-Eintrag weg.
+        Binance kennt die clientOrderId nicht (-2013). Fuer den laufenden
+        Zyklus heisst das "kein Kauf": None zurueck, kein Ledger-Eintrag,
+        keine Eskalation.
+
+        Bis zum 25.09.2026 wurde hier zusaetzlich der Pending-Eintrag
+        geloescht, und dieser Test schrieb das fest. Die Nachfrage laeuft
+        aber unmittelbar nach dem Timeout - eine Order, die bei Binance
+        noch in Bearbeitung ist, wird erst danach sichtbar und fehlte dann
+        fuer immer im Ledger (Code-Ueberpruefung, Punkt B). Jetzt bleibt
+        der Eintrag fuer die Reconciliation beim naechsten Start stehen.
         """
         client, raw = self._make_client()
         raw.order_behaviour = requests.exceptions.ConnectionError("weg")
         raw.status_behaviour = "not_found"
+
+        with mock.patch("dca_bot.binance_client.send_notification") as notify:
+            with self.assertLogs("dca_bot", level="WARNING") as captured:
+                order = client.place_market_buy("BTCUSDT", 15.0)
+
+        self.assertIsNone(order)
+        self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
+        notify.assert_not_called()
+        self.assertTrue(
+            any("beim nächsten Bot-Start erneut geprüft" in line for line in captured.output)
+        )
+
+    def test_network_error_and_order_without_effect_still_clears_the_entry(self):
+        """
+        Gegenprobe zum Test oben: Existiert die Order und ist sie beendet,
+        ohne etwas bewegt zu haben, ist das eine eindeutige Antwort, die
+        sich nicht mehr aendert. Hier darf der Eintrag weiterhin weg -
+        sonst waere "Eintrag bleibt" auch dann gruen, wenn einfach nie
+        mehr geloescht wuerde.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = requests.exceptions.ConnectionError("weg")
+        raw.status_payload = {"status": "EXPIRED", "executedQty": "0"}
 
         with mock.patch("dca_bot.binance_client.send_notification") as notify:
             with self.assertLogs("dca_bot", level="WARNING") as captured:
@@ -678,6 +709,66 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
         self.assertTrue(
             any("nicht wirksam erreicht" in line for line in captured.output)
         )
+
+    def _reconcile_at_next_start(self, client) -> mock.Mock:
+        apply_confirmed = mock.Mock()
+        with mock.patch("dca_bot.pending_orders.send_notification"):
+            with self.assertLogs("dca_bot", level="INFO"):
+                reconcile_pending_orders(
+                    client=client,
+                    store=client.pending_orders,
+                    bot_logger=logging.getLogger("dca_bot"),
+                    apply_confirmed=apply_confirmed,
+                )
+        return apply_confirmed
+
+    def test_late_executed_order_is_recovered_at_the_next_start(self):
+        """
+        Der Zweck der Aenderung, ueber beide Schritte: zur Laufzeit meldet
+        Binance -2013, spaeter ist die Order doch gefuellt. Die
+        Reconciliation beim naechsten Start findet den stehengebliebenen
+        Eintrag und reicht die echte Order zum Nachtragen weiter. Vorher
+        war der Eintrag an dieser Stelle schon geloescht - die Order waere
+        fuer immer unverbucht geblieben.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = requests.exceptions.ReadTimeout("weg")
+        raw.status_behaviour = "not_found"
+        with mock.patch("dca_bot.binance_client.send_notification"):
+            with self.assertLogs("dca_bot", level="WARNING"):
+                self.assertIsNone(client.place_market_buy("BTCUSDT", 15.0))
+        sent_id = raw.placed_client_order_ids[0]
+
+        # Zwischen Laufzeit und Neustart fuehrt Binance die Order aus.
+        raw.status_behaviour = "found"
+        raw.status_payload = {"status": "FILLED", "executedQty": "0.00019480"}
+
+        apply_confirmed = self._reconcile_at_next_start(client)
+
+        apply_confirmed.assert_called_once()
+        pending, order = apply_confirmed.call_args.args
+        self.assertEqual(pending.client_order_id, sent_id)
+        self.assertEqual(order["status"], "FILLED")
+        self.assertEqual(self._pending_ids(), [], "Nach dem Nachtragen erledigt")
+
+    def test_order_still_unknown_at_the_next_start_is_discarded(self):
+        """
+        Die andere Richtung: kennt Binance die Order auch beim naechsten
+        Start nicht, ist sie nie angenommen worden. Der Eintrag wird dann
+        verworfen - die Pending-Datei waechst also nicht dauerhaft an.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = requests.exceptions.ReadTimeout("weg")
+        raw.status_behaviour = "not_found"
+        with mock.patch("dca_bot.binance_client.send_notification"):
+            with self.assertLogs("dca_bot", level="WARNING"):
+                client.place_market_buy("BTCUSDT", 15.0)
+        self.assertEqual(len(self._pending_ids()), 1, "Vorbedingung: Eintrag steht")
+
+        apply_confirmed = self._reconcile_at_next_start(client)
+
+        apply_confirmed.assert_not_called()
+        self.assertEqual(self._pending_ids(), [])
 
     # -- Szenario 3: Netzwerkfehler UND Status-Abfrage scheitert --
 
