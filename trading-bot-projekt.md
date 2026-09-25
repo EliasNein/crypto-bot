@@ -831,6 +831,29 @@ Bewusst nur auf dem Homeserver, nicht auf dem VPS (dort bleibt der Allocator ina
 
 Damit beginnt jetzt faktisch die geplante, mindestens einmonatige Live-Testphase des vollständigen Systems vor dem Echtgeld-Einstieg (siehe 5b, 6c).
 
+### Testphase auf dem Homeserver verlängert auf ca. 2–3 Monate (25.09.2026)
+
+Die oben geplante, mindestens einmonatige Testphase wird auf **ca. 2–3 Monate** verlängert. Gerechnet ab dem Start des vollständigen Systems am 16.09.2026 endet sie damit etwa zwischen Mitte November und Mitte Dezember 2026.
+
+**Grund: zwei offene Fragen brauchen echte Stop-Loss-Ereignisse, keinen zusätzlichen Code.**
+
+- **Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT`** (siehe 6f): Der Default von 0,5 % stützt sich bisher auf **n = 2** Stop-Loss-Exits. Die stammen aus dem Backtest (Tageskerzen-Näherung), nicht aus realen Fills. Die realen Daten liefert erst der Testbetrieb über die `[STOP-FILL-ANALYSE]`-Zeilen, und jede davon setzt einen tatsächlich ausgelösten Trend-Stop-Loss voraus.
+- **Automatischer Stop-Loss-Reset** (Punkt 16, siehe 6i): Er ist bewusst zurückgestellt, weil es über alle Backtest-Zeiträume genau **n = 1** auswertbares Ereignis gab.
+
+Beide Ereignisarten sind selten, beim Trend-Bot mit Tageskerzen liegen Wochen dazwischen. Mehr Laufzeit ist der einzige Weg zu einer belastbaren Datenbasis.
+
+**Betrifft ausschließlich den Homeserver.** Dort läuft das System bereits vollständig live im Testnet: `DCA_BOT_ENABLE_TRADING`, `GRID_BOT_ENABLE_TRADING` und `TREND_BOT_ENABLE_TRADING` stehen alle auf `true`, verifiziert am 25.09.2026. Es ist also keine Umstellung nötig, nur Zeit.
+
+**Der VPS bleibt unverändert** beim feststehenden Enddatum **12.10.2026** (Vertragskündigung, siehe 6b/6e). Dort gibt es keine Verlängerung und keine Umstellung der VPS-Bots auf Live. Die Punkte zum Vertragsende (finaler `data/`-Snapshot, Entfernen des Deploy-Keys) gelten weiter wie geplant.
+
+**Die Vorbedingungen für echtes Kapital ändern sich nicht.** Der Einsatz von echtem Geld bleibt an die bereits dokumentierten Voraussetzungen geknüpft:
+
+- finale Positionsgrößen-Kalibrierung (siehe 5b),
+- eine ausreichende Datenbasis für den Stop-Limit-Offset (siehe 6f),
+- ein abschließender Sicherheitsreview mit Claude Opus 5 kurz vor dem tatsächlichen Live-Gang (siehe 6d).
+
+Die längere Laufzeit im Testnet ist ausdrücklich dafür da, diese Vorbedingungen mit besserer Datenbasis zu erfüllen, nicht um sie zu umgehen oder abzukürzen.
+
 ## 6i. Verbesserungsvorschläge aus Review-Abschnitt 7 (17.09.2026)
 
 Der Sicherheitsreview enthielt neben den K- und W-Punkten eine dritte, kürzere Liste: 17 Qualitäts- und Komfortvorschläge, von denen keiner als sicherheitskritisch eingestuft war. Am 17.09. wurde dafür ein Ist-Stand-Check gemacht.
