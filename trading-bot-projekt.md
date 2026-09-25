@@ -775,11 +775,28 @@ Nebeneffekt in die richtige Richtung: Bei Order-Requests führt ein Timeout übe
 >
 > **Präzisierung von „Nur der Grid-Bot war betroffen, und das liegt an der Abfragehäufigkeit“:** Die Abfragehäufigkeit erklärt, warum es auf dem Homeserver den Grid-Bot trifft und nicht DCA oder Trend. Sie erklärt aber **nicht**, warum der VPS verschont bleibt: Dessen Grid-Bot fragt ebenfalls alle 5 Minuten ab, und zwar denselben öffentlichen Ticker-Endpunkt. In einem 6-Minuten-Fenster liegt bei 5-Minuten-Takt zwangsläufig mindestens eine Abfrage.
 >
-> **Präzisierung von „keine offizielle Wartungszeit, gelegentliche Verlangsamung“:** Eine zufällige Verlangsamung ist es nicht. Ein Fenster, das an sechs Tagen auf wenige Minuten genau wiederkehrt, ist ein regelmäßiger Vorgang. Offiziell dokumentiert ist er weiterhin nicht.
+> **Präzisierung von „keine offizielle Wartungszeit, gelegentliche Verlangsamung“:** Eine zufällige Verlangsamung ist es nicht. Ein Fenster, das an sechs Tagen auf wenige Minuten genau wiederkehrt, ist ein regelmäßiger Vorgang. Er liegt allerdings nicht beim Testnet, sondern am Internetanschluss des Homeservers (siehe Ursache unten).
 >
-> **Deutung, bewusst noch offen:** Als wahrscheinlichste Erklärung gilt bisher ein nicht dokumentierter, regelmäßiger Wartungs- oder Reset-Vorgang bei `testnet.binance.vision` selbst. Dagegen spricht der VPS-Befund: Ein Vorgang auf Seiten des Testnets sollte beide Server treffen, denn beide fragen denselben Endpunkt im selben Takt ab. Mit den Daten verträglich bliebe diese Deutung nur, wenn der Vorgang lediglich einen Teil der Infrastruktur betrifft, etwa einen Netzwerkpfad oder Edge-Knoten, über den nur der Homeserver läuft. Ebenso gut passt eine Ursache auf dem Netzwerkweg des Homeservers. Ein regelmäßiger nächtlicher Vorgang um 02:3x Uhr Ortszeit ist bei Heimanschlüssen nicht ungewöhnlich (Router, Provider). Die nächste Prüfung wäre das Ereignisprotokoll der FritzBox für die betroffenen Nächte (System → Ereignisse) sowie geplante Aufgaben auf TrueNAS in Ortszeit. Diese Prüfung steht aus; bis dahin ist keine der beiden Erklärungen belegt.
+> **Ursache geklärt: nächtliche Zwangstrennung des Internetanschlusses.** Das Ereignisprotokoll der FritzBox zeigt jede Nacht eine vom Router ausgelöste Trennung („Die Internetverbindung wird kurz unterbrochen, um der Zwangstrennung durch den Anbieter zuvorzukommen“). Der Anschluss ist 1&1 über DTAG-Infrastruktur mit DS-Lite (LineID `1UND1.DEU.DTAG`). Die Zeitpunkte der letzten sechs Nächte in Ortszeit (MESZ):
 >
-> **Was das für den 20-Sekunden-Timeout heißt:** Die Änderung beruhte auf der Annahme „antwortet, nur knapp zu langsam“. Ob sie trägt, ist nach diesem Befund offen. Dauert der nächtliche Vorgang länger als 20 Sekunden, bleiben die Fehlalarme. Nachprüfbar ist das nach dem Deployment direkt im Log: `grep "read timeout=20" logs/grid_bot.log`. Treffer im Fenster 00:34–00:40 UTC bedeuten, dass der Timeout allein nicht reicht. Die Änderung schadet in keinem Fall.
+> | 20.09. | 21.09. | 22.09. | 23.09. | 24.09. | 25.09. |
+> |---|---|---|---|---|---|
+> | 02:41:08 | 02:39:53 | 02:38:51 | 02:37:47 | 02:36:41 | 02:35:27 |
+>
+> In UTC ist das 00:35–00:41, also dasselbe Fenster wie die Fehlerzeitpunkte (00:34–00:40 UTC, bis auf etwa eine Minute deckungsgleich). Die Trennung wandert um gut eine Minute pro Tag nach vorn. Das ist typisch dafür, dass der Router sich kurz vor Ablauf der 24 Stunden seit der letzten Einwahl neu verbindet. Bei jeder Trennung wechseln die IPv4-Anbindung (DS-Lite/AFTR) und das IPv6-Präfix vollständig, die Verbindung ist für mehrere Sekunden komplett weg.
+>
+> Damit ist auch der VPS-Befund erklärt: Der VPS hat keinen Heimanschluss mit Zwangstrennung dazwischen. Die Hypothese eines Wartungsvorgangs bei `testnet.binance.vision` ist damit **hinfällig**, die Frage nicht mehr offen. Der Ausreißer um 09:13 UTC passt nicht in dieses Muster. Er bleibt ein Einzelfall ohne zugeordnete Ursache.
+>
+> **Was das für den 20-Sekunden-Timeout heißt:** Die Annahme hinter der Änderung („das Testnet antwortet, nur knapp zu langsam“, siehe „Beobachtung“ oben) trifft nicht zu. Die Verbindung ist in diesen Momenten vollständig weg. Für den typischen Ablauf hilft ein längerer Timeout **voraussichtlich gar nicht**, nicht nur teilweise. Im Einzelnen:
+>
+> - **Die Verbindung ist dauerhaft tot.** Eine Anfrage, deren TCP-Verbindung noch über die alte Adresse lief, bekommt nach dem Adresswechsel nie wieder eine Antwort. Das gilt auch für eine Verbindung, die python-binance über seine `requests`-Session wiederverwendet. Sie endet deshalb in jedem Fall als `Read timed out`, nur eben nach 20 statt nach 10 Sekunden.
+> - **Warum die Meldung trotzdem „Read timed out“ heißt, obwohl die Leitung nicht langsam, sondern weg ist:** Die Verbindung selbst stand ja, gewartet wird auf eine Antwort, die nicht mehr kommen kann.
+>
+> Helfen würde ein längerer Timeout nur in dem schmalen Fall, dass eine Anfrage genau in den wenigen Sekunden der Unterbrechung auf eine noch intakte Verbindung trifft. Die Erhöhung schadet trotzdem nicht und bleibt bestehen.
+>
+> Entscheidend ist ohnehin der bestehende Zyklus-Mechanismus: Ein fehlgeschlagener Zyklus wird geloggt und gemeldet, der nächste läuft normal. Laut Logs der letzten Tage gab es keinen Fall, in dem zwei aufeinanderfolgende Zyklen fehlschlugen. Ein Codeänderungsbedarf besteht deshalb nicht.
+>
+> Nachprüfbar bleibt die Einordnung nach dem Deployment: Treffer für `grep "read timeout=20" logs/grid_bot.log` im Fenster der Zwangstrennung bestätigen, dass der längere Timeout diesen Fall nicht abfängt.
 
 ### Echte Position bei deaktiviertem Trading: das Spiegelbild zu K4 (25.09.2026)
 
