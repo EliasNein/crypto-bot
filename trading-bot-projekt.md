@@ -202,11 +202,11 @@ Eine Telegram-Nachricht scheiterte initial an einem transienten Verbindungsfehle
 
 - Kein Dauerbeobachten nötig – gelegentliche Check-ins (SSH `journalctl -u <service> -f`, oder Telegram) reichen.
 - **Zu erwartende Meilensteine, bevor der Test als "ausreichend" gilt:**
-  - DCA: mehrere weitere Zyklen ohne Fehler (Basis: schon 2 Tage sauber auf dem Laptop verifiziert)
-  - Grid: mindestens ein kompletter Kauf-Verkauf-Zyklus einer Position (bisher nur Käufe live beobachtet)
-  - Trend-Following: mindestens ein echtes, bestätigtes Signal (kann laut Tageskerzen-Logik mehrere Tage dauern)
+  - DCA: mehrere weitere Zyklen ohne Fehler (Basis: schon 2 Tage sauber auf dem Laptop verifiziert) *(Aktualisiert 25.09.2026: **nicht belegt, bleibt offen.** Dass Zyklen laufen, ist belegt: Auf dem Homeserver gibt es echte Käufe am 15.09. und 16.09. sowie zwei simulierte (Rekonstruktion in 6h). „Ohne Fehler“ lässt sich aus dem Ledger aber nicht ablesen. Es enthält nur Zyklen mit Kauf, und an den vielen Tagen ohne Kauf (Allocator bei 100 % Trend, siehe „Beobachtung zur Allocator-Wirkung“ in 6g) bleibt kein Eintrag. Belegen ließe es sich über das Log, etwa mit `grep -c "Unerwarteter Fehler im Kaufzyklus" logs/dca_bot.log` auf beiden Servern.)*
+  - Grid: mindestens ein kompletter Kauf-Verkauf-Zyklus einer Position (bisher nur Käufe live beobachtet) *(Aktualisiert 25.09.2026: ✔ **erreicht, auf beiden Servern.** VPS: sieben geschlossene Dry-Run-Positionen mit realisierter PnL, die am 22.09. korrigiert wurden (Folgefund aus K3 in 6g). Homeserver: laut Audit vom 25.09. 10 Einträge, davon 3 offen, also 7 abgeschlossene, echte Kauf-Verkauf-Zyklen (Rekonstruktion in 6h).)*
+  - Trend-Following: mindestens ein echtes, bestätigtes Signal (kann laut Tageskerzen-Logik mehrere Tage dauern) *(Aktualisiert 25.09.2026: ✔ **erreicht**, allerdings nur im Dry-Run. Die Position auf dem Homeserver vom 15.09.2026, 12:19:01 UTC, setzt ein bestätigtes Aufwärtssignal auf echten Marktdaten voraus: `decide_action()` gibt einen Einstieg nur bei bestätigter Richtung „up“ frei, auch im Dry-Run. Ein echter Trade mit echter Stop-Order steht dagegen noch aus, siehe „Trend-Bot: Die Kalibrierungsdaten fließen noch nicht“ in 6h.)*
 - **Snapshot-Strategie statt Live-Sync:** Keine automatische Synchronisierung einrichten. Stattdessen alle paar Tage bzw. an Meilensteinen `scp`-Snapshots von Logs und `data/`-Ordner auf den PC ziehen, zusätzlich zwingend **vor dem 12.10.** ein finaler Snapshot.
-- **Vor dem 12.10. zu entscheiden:** Server verlängern (neue Bestellung) oder Umzug auf den Homeserver abschließen (siehe 6d).
+- **Vor dem 12.10. zu entscheiden:** Server verlängern (neue Bestellung) oder Umzug auf den Homeserver abschließen (siehe 6d). *(Aktualisiert 25.09.2026: **entschieden.** Keine Verlängerung des VPS, der Homeserver läuft faktisch seit dem 16.09. als vollständiges System, siehe 6h. Der formale Cutover mit finalem Snapshot und Abschalten der VPS-Services bleibt für den 05.10.2026 geplant, siehe den Vermerk zum Zeitplan in 6e und den Kopfbereich.)*
 
 ## 6d. Plan für den Live-Gang nach dem Testmonat
 
@@ -242,6 +242,14 @@ Nutzer plant: nach Abschluss des VPS-Testmonats Umzug auf den eigenen Homeserver
 | 12.10. | Vertragsende (bereits gekündigt) | — |
 
 **Puffer:** Ziel-Cutover 05.10., also ca. eine Woche Puffer vor dem harten 12.10.-Stichtag für unerwartete Probleme.
+
+*(Aktualisiert 25.09.2026: Auf der Homeserver-Seite lief es deutlich schneller als geplant. Die Planung oben bleibt als ursprünglicher Stand stehen, tatsächlich war der Ablauf so:*
+
+- *VM, SSH, Software und eigener Testnet-Key wurden am **15.09.** fertig („Woche 1 abgeschlossen“ unten).*
+- *Die Bots liefen ab dem **15.09.** als systemd-Services, nicht erst ab dem 21.–27.09. DCA und Grid handeln seit dem 15.09. mit echten Testnet-Orders, der Trend-Bot lief bis zu einem Zeitpunkt zwischen dem 15.09. und dem 25.09. im Dry-Run (Rekonstruktion in 6h).*
+- *Das Heimnetz wurde am **15.09.** geprüft, `ufw` kam am 16.09. dazu (6g, „Infrastruktur-Härtung auf beiden Servern“).*
+- *Der Allocator wurde entgegen der „Ausgangslage“ nicht zurückgestellt: Er läuft seit dem 15.09., das Opt-in für DCA und Trend seit dem **16.09.** (6h). Seitdem läuft auf dem Homeserver faktisch das vollständige System.*
+- ***Der formale Cutover bleibt beim 05.10.2026** (Entscheidung vom 25.09.2026, siehe Kopfbereich): Finaler Snapshot der VPS-Daten und Abschalten der VPS-Services wie in der Zeile „05.–11.10.“, Vertragsende am 12.10. Das Fenster 28.09.–04.10. für den Vergleich VPS gegen Homeserver bleibt damit bestehen, mit den Einschränkungen zur Vergleichbarkeit aus 6g („Beobachtung zur Allocator-Wirkung“). Die Kopplung von Punkt 13 in 6i an „nach dem Cutover am 05.10.“ bleibt gültig.)*
 
 ### Woche 1 abgeschlossen (15.09.2026)
 
