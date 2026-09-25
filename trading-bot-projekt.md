@@ -178,7 +178,7 @@ Nach Abschluss des Laptop-DCA-Tests: DCA-Bot mit Telegram-Integration neu gestar
 
 **Grund:** Laptop/PC können nicht wochenlang durchlaufen (Stromverbrauch, Praktikabilität). Für einen geplanten ca. einmonatigen Beobachtungszeitraum aller drei Strategien wurde ein Cloud-VPS gemietet.
 
-**Anbieter:** Contabo Cloud VPS 4 (4 vCPU, 8 GB RAM, 100 GB SSD), Ubuntu 24.04, 1 Monat Laufzeit für 6,55€. Bestellt 12.09.2026, **Kündigung bereits zum 12.10.2026 gesetzt** (verhindert automatische Vertragsverlängerung; Server läuft bis dahin regulär weiter). Server-IP: 161.97.113.170, Projektpfad `/root/crypto-bot`.
+**Anbieter:** Contabo Cloud VPS 4 (4 vCPU, 8 GB RAM, 100 GB SSD), Ubuntu 24.04, 1 Monat Laufzeit für 6,55€. Bestellt 12.09.2026, **Kündigung bereits zum 12.10.2026 gesetzt** (verhindert automatische Vertragsverlängerung; Server läuft bis dahin regulär weiter). Projektpfad `/root/crypto-bot`. *(Aktualisiert 25.09.2026: Hier stand bis dahin die öffentliche IP-Adresse des VPS im Klartext. Sie ist entfernt, weil das Repository öffentlich ist und die Adresse für dieses Dokument nicht gebraucht wird. In der Git-Historie bleibt sie erhalten; mit dem Vertragsende am 12.10. ist sie ohnehin gegenstandslos.)*
 
 **Wichtiger Reminder:** Vor dem 12.10. müssen Logs und `data/`-Ordner final gesichert werden (siehe 6c), sonst gehen die Testergebnisse beim Vertragsende verloren.
 
@@ -215,11 +215,13 @@ Nutzer plant: nach Abschluss des VPS-Testmonats Umzug auf den eigenen Homeserver
 **Empfehlung: separate, eigene VM auf dem TrueNAS-Server** für die Bots (nicht die bestehende Webseiten-VM mitnutzen), um Isolation zu wahren – konsistent mit dem Trennungsprinzip zwischen den Bot-Strategien selbst. Einrichtung technisch nahezu identisch zum VPS-Setup (Ubuntu, Python, Git-Clone, systemd-Services), aber ohne laufende Kosten.
 
 **Vor dem eigentlichen Live-Gang mit echtem Geld noch zu klären/umzusetzen:**
-1. **Sicherheitsreview (Code + Infrastruktur) mit Claude Opus 5** – bewusst zurückgestellt bis kurz vor Live-Gang, jetzt zeitlich relevant
-2. **Echter, exchange-seitiger Stop-Loss** – im Code umgesetzt (siehe 6f), noch nicht deployed/live getestet
-3. Entscheidung zur Kapitalverteilung auf die Strategien (nach Auswertung der Testmonat-Ergebnisse, inkl. Allocator-System)
-4. Home-Netzwerk-Absicherung prüfen (Router-Firewall, ggf. VPN-Zugriff statt offener Ports)
-5. Allocator-System (siehe 5a) fertig getestet und verifiziert – Backtest abgeschlossen, Live-Dry-Run steht noch aus, falls bis dahin nicht nachgeholt
+1. **Sicherheitsreview (Code + Infrastruktur) mit Claude Opus 5** – bewusst zurückgestellt bis kurz vor Live-Gang, jetzt zeitlich relevant *(Aktualisiert 25.09.2026: **erledigt.** Der Review fand am 15.09. statt, alle Punkte sind seit dem 16.09. abgearbeitet, siehe „Sicherheitsreview vollständig abgearbeitet“ in 6g. Unabhängig davon bleibt ein **abschließender** Review kurz vor dem tatsächlichen Live-Gang vorgesehen, siehe 6h.)*
+2. **Echter, exchange-seitiger Stop-Loss** – im Code umgesetzt (siehe 6f), noch nicht deployed/live getestet *(Aktualisiert 25.09.2026: **deployed**, siehe „Was das für den Live-Gang heißt“ in 6g. Noch offen ist der Teil „live getestet“: Ein tatsächlich an der Börse gefüllter Stop-Loss ist bisher nicht dokumentiert, und genau diese Fälle braucht die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT`, siehe 6f und 6h.)*
+3. Entscheidung zur Kapitalverteilung auf die Strategien (nach Auswertung der Testmonat-Ergebnisse, inkl. Allocator-System) *(Aktualisiert 25.09.2026: **teilweise entschieden, im Kern offen.** Festgelegt sind der Gesamtbetrag von 300 € und die Aufteilung 150 € Grid / 150 € Allocator-Topf (5b), beim Grid-Bot außerdem der Betrag pro Stufe (9,38 €, „W16 umgesetzt“ in 6g). Offen sind `DCA_QUOTE_AMOUNT`, `TREND_AMOUNT_PER_TRADE` sowie Preisspanne und Stufenabstand des Grids. Sie werden nach der Auswertung der auf 2–3 Monate verlängerten Testphase festgelegt, siehe 5b und 6h.)*
+4. Home-Netzwerk-Absicherung prüfen (Router-Firewall, ggf. VPN-Zugriff statt offener Ports) *(Aktualisiert 25.09.2026: **erledigt.** Am 15.09. wurden die FritzBox-Portfreigaben geprüft, es gibt keine, siehe „Woche 1 abgeschlossen“ in 6e. Am 16.09. kam `ufw` auf dem Homeserver dazu, nur Port 22 aus dem lokalen Subnetz, siehe „Infrastruktur-Härtung auf beiden Servern“ in 6g.)*
+5. Allocator-System (siehe 5a) fertig getestet und verifiziert – Backtest abgeschlossen, Live-Dry-Run steht noch aus, falls bis dahin nicht nachgeholt *(Aktualisiert 25.09.2026: Der Live-Dry-Run **läuft seit dem 15.09.** auf dem Homeserver (6e), seit dem 16.09. mit aktivem Opt-in für DCA und Trend (6h). „Fertig getestet und verifiziert“ ist damit Teil der laufenden Testphase und noch nicht abgeschlossen.)*
+
+*(Aktualisiert 25.09.2026: Von dieser Liste sind die Punkte 1 und 4 erledigt. Offen sind Punkt 3 sowie die Teile von 2 und 5, die an Daten aus der laufenden Testphase hängen. Welche Vorbedingungen vor echtem Geld gelten, steht zusammengefasst in 6h, „Die Vorbedingungen für echtes Kapital ändern sich nicht“.)*
 
 ## 6e. Migrations-Timeline VPS → Homeserver (erstellt 14.09.2026)
 
