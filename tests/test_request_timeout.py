@@ -1,12 +1,15 @@
 """
 Tests für den Request-Timeout des Grid-Bots gegen die Binance-API.
 
-Hintergrund: nächtliche Fehlalarme "HTTPSConnectionPool(host=
-'testnet.binance.vision', ...): Read timed out" beim Grid-Bot, bei denen
-das Testnet zwar noch antwortete, aber knapp langsamer als der
-python-binance-Standard von 10 s (siehe trading-bot-projekt.md 6g). Der
-Grid-Bot setzt deshalb 20 s, DCA, Trend und Allocator bleiben beim
-Bibliotheks-Default.
+Hintergrund: nächtliche Fehler "HTTPSConnectionPool(host=
+'testnet.binance.vision', ...): Read timed out" beim Grid-Bot auf dem
+Homeserver. Der Grid-Bot setzt deshalb 20 s statt des python-binance-
+Standards von 10 s, DCA, Trend und Allocator bleiben beim
+Bibliotheks-Default. Die ursprüngliche Annahme, das Testnet antworte dabei
+nur knapp zu langsam, ist widerlegt: Ursache ist die nächtliche
+Zwangstrennung des Heimanschlusses (siehe trading-bot-projekt.md 6g,
+Nachtrag 25.09.). Diese Tests prüfen, dass der Wert bei jedem Request
+ankommt - nicht, ob er gegen die Ursache hilft.
 
 Geprüft wird der Wert dort, wo er wirkt: am `requests`-Aufruf selbst.
 Dafür läuft ein ECHTER `binance.client.Client` unter dem TradingClient,

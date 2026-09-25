@@ -38,12 +38,15 @@ from .version import get_code_version
 KILL_SWITCH_POLL_SECONDS = 5
 
 # Request-Timeout gegen die Binance-API in Sekunden, statt des
-# python-binance-Standards von 10 s. Hintergrund: nächtliche
+# python-binance-Standards von 10 s. Anlass waren nächtliche
 # "HTTPSConnectionPool(host='testnet.binance.vision', ...): Read timed out"-
-# Fehlalarme, bei denen das Testnet zwar noch antwortete, aber knapp zu
-# langsam. Betroffen war nur der Grid-Bot, weil er alle 5 Minuten abfragt
-# statt einmal am Tag (siehe trading-bot-projekt.md 6g). Bewusst nur hier
-# gesetzt - DCA, Trend und Allocator bleiben beim Bibliotheks-Default.
+# Fehler auf dem Homeserver. Ursache ist nicht ein zu langsames Testnet,
+# sondern die nächtliche Zwangstrennung des Heimanschlusses: Die Verbindung
+# reißt ganz ab, der Request scheitert dann voraussichtlich auch nach 20 s.
+# Der Wert schadet nicht und bleibt. Betroffen ist nur der Grid-Bot, weil
+# er alle 5 Minuten abfragt statt einmal am Tag (siehe
+# trading-bot-projekt.md 6g, Nachtrag 25.09.). Bewusst nur hier gesetzt -
+# DCA, Trend und Allocator bleiben beim Bibliotheks-Default.
 REQUEST_TIMEOUT_SECONDS = 20
 
 
