@@ -855,6 +855,24 @@ Gefunden bei der Überprüfung des Grid-Codes im Zuge der Timeout-Änderung. K4 
 
 Die beiden Trend-Sperren-Mutationen erscheinen als Fehlerabbruch statt als Fehlschlag, weil dann die zweite Sicherung im Fake-Client auslöst. Auch das ist eine Messung: Beide Ebenen greifen unabhängig voneinander.
 
+### Restpunkte der Code-Überprüfung vom 25.09.2026
+
+Die Punkte, die nach Priorität 1 („Echte Position bei deaktiviertem Trading“, direkt oben) offen waren. Jeder wurde einzeln vorgelegt und freigegeben.
+
+#### Priorität 2: Heartbeat meldet nur noch erfolgreiche Zyklen (25.09.2026)
+
+**Befund.** Alle vier `main*.py` setzten `last_cycle_at` nach jedem Schleifendurchlauf auf „jetzt“, auch wenn `execute_once()` mit einer Exception abgebrochen war. Der Zeitstempel ist laut `heartbeat.py` genau dafür da, „Prozess läuft“ von „Prozess arbeitet“ zu unterscheiden. Ein Bot, dessen Zyklen alle scheitern, sah im Heartbeat trotzdem aus wie ein gesunder. Nebenbei stand die Variable innerhalb der Schleife, ein Zeitpunkt aus früheren Zyklen wurde also nie behalten.
+
+**Umgesetzt.** `last_cycle_at` beginnt vor der Schleife mit `None` und wird nur im `else`-Zweig des `try` gesetzt, also nur nach einem Zyklus ohne Exception. `None` heißt „in diesem Prozesslauf noch kein erfolgreicher Zyklus“. Ein Zyklus, der bewusst nichts tut (DCA mit ausgelöstem Stop-Loss oder erreichtem Tageslimit, Grid ohne durchquerte Stufe), zählt als erfolgreich: Der Bot hat gearbeitet und entschieden. Der Notaus-Pfad (`BotHalted`) beendet die Schleife wie bisher, ohne Heartbeat.
+
+Die Nachricht sagt jetzt, was sie weiß: `letzter erfolgreicher Zyklus <Zeitpunkt>` statt `letzter Zyklus`, und `noch kein erfolgreicher Zyklus` statt `noch kein abgeschlossener Zyklus`. Ein Fehlzyklus ist durchaus „abgeschlossen“, der alte Text hätte nach dem Fix also missverständlich gewirkt.
+
+**Einordnung zur nächtlichen Zwangstrennung.** Der Fix macht den Zeitstempel korrekt. Für den einzelnen nächtlichen Fehlzyklus des Grid-Bots ist die sichtbare Wirkung aber klein: Der Heartbeat geht nur einmal pro 24 Stunden raus, nach dem ersten Zyklus, in dem das Intervall abgelaufen ist. Nur wenn das ausgerechnet der gescheiterte Zyklus ist, zeigt die Nachricht jetzt den Zyklus fünf Minuten davor statt „jetzt“. Seinen eigentlichen Wert hat der Fix bei einer **länger** anhaltenden Störung: Scheitert jeder Zyklus über Stunden, steht in der nächsten Heartbeat-Nachricht ein entsprechend alter Zeitpunkt statt eines frischen.
+
+**Tests:** 16 neue in `tests/test_heartbeat_last_cycle.py`, zwei bestehende in `test_stage_b_safety.py` auf den neuen Nachrichtentext angepasst. Gesamtstand **593, alle grün**. Geprüft wird die echte `main()` jedes der vier Bots über mehrere Zyklen, ersetzt sind nur Außenwelt und Uhr. Die Stelle existiert viermal fast identisch, und der realistische Fehler ist, dass eine davon abweicht. Je Bot vier Aussagen: erster Zyklus scheitert → `None`; Erfolg, dann zwei Fehlschläge → Zeitstempel bleibt stehen; Erfolg, Fehlschlag, Erfolg → der zweite Erfolg setzt neu; und als Gegenprobe zwei Erfolge → zwei verschiedene Zeitstempel. Ohne diese Gegenprobe wäre „bleibt stehen“ auch grün, wenn die Test-Uhr gar nicht weiterliefe. Die Uhr ist dafür ersetzt, damit „gleich“ wirklich „nicht neu gesetzt“ bedeutet und nicht „in derselben Mikrosekunde“.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge. Das alte Verhalten (Zeitstempel unbedingt vor `maybe_send`) je Einstiegspunkt einzeln wiederhergestellt: DCA, Grid, Trend und Allocator jeweils 3 Fehlschläge. Das sind genau die drei Tests mit Fehlzyklus; die Gegenprobe bleibt erwartungsgemäß grün.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

@@ -172,6 +172,8 @@ def main() -> None:
     )
 
     heartbeat = Heartbeat("Grid-Bot", config.heartbeat_interval_hours)
+    # Nur nach einem ERFOLGREICHEN Zyklus gesetzt - siehe main.py.
+    last_cycle_at: datetime | None = None
 
     interval_seconds = config.interval_minutes * 60
 
@@ -190,10 +192,11 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Grid-Zyklus.")
                 send_notification(f"[GRID-FEHLER] Unerwarteter Fehler im Grid-Zyklus: {exc}")
+            else:
+                last_cycle_at = datetime.now(timezone.utc)
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
-            last_cycle_at = datetime.now(timezone.utc)
             heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %d Minuten bis zum nächsten Zyklus ...", config.interval_minutes)

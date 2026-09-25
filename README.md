@@ -238,12 +238,15 @@ trading-bot/
   Start) wird wie bisher sofort gekauft.
 - **Lebenszeichen** (`dca_bot/heartbeat.py`, `HEARTBEAT_INTERVAL_HOURS`,
   Default 24 h): Jeder der vier Bots meldet sich einmal pro Intervall per
-  Telegram (`[HEARTBEAT] <Bot> läuft, Version <hash>, letzter Zyklus
-  <Zeitpunkt>`), auch wenn nichts passiert ist. Ohne das fällt ein
-  abgestürzter Bot nur durch *ausbleibende* Nachrichten auf - und ein
-  stiller Grid-Bot kann "keine Stufe durchquert" oder "seit Dienstag tot"
-  bedeuten. Der mitgesendete Zyklus-Zeitstempel unterscheidet zusätzlich
-  "Prozess läuft" von "Prozess arbeitet". Bewusst **kein** Heartbeat beim
+  Telegram (`[HEARTBEAT] <Bot> läuft, Version <hash>, letzter
+  erfolgreicher Zyklus <Zeitpunkt>`), auch wenn nichts passiert ist. Ohne
+  das fällt ein abgestürzter Bot nur durch *ausbleibende* Nachrichten auf
+  - und ein stiller Grid-Bot kann "keine Stufe durchquert" oder "seit
+  Dienstag tot" bedeuten. Der mitgesendete Zyklus-Zeitstempel
+  unterscheidet zusätzlich "Prozess läuft" von "Prozess arbeitet": er
+  wird nur nach einem **erfolgreichen** Zyklus gesetzt, ein Zyklus, der
+  mit einem Fehler abbricht, lässt ihn stehen (seit 25.09.2026, vorher
+  galt jeder Durchlauf). Bewusst **kein** Heartbeat beim
   Start: ein Bot in einer Neustartschleife würde sonst im Minutentakt
   "ich lebe" melden.
 - **Kein doppelter Bot-Start** (`dca_bot/process_lock.py`): Jeder der vier
@@ -1052,7 +1055,8 @@ nächster Zyklus die Korrektur sonst überschriebe.
 
 ```bash
 python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions tests.test_trend_auto_reset \
-    tests.test_fix_dry_run_quote_spent tests.test_request_timeout -v
+    tests.test_fix_dry_run_quote_spent tests.test_request_timeout \
+    tests.test_heartbeat_last_cycle -v
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten

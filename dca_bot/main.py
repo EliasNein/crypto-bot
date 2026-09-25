@@ -242,6 +242,14 @@ def main() -> None:
     last_summary_date = utc_today()
 
     heartbeat = Heartbeat("DCA-Bot", config.heartbeat_interval_hours)
+    # Zeitpunkt des letzten ERFOLGREICHEN Zyklus - gesetzt nur im
+    # else-Zweig unten, nie nach einer Exception. Bis zum 25.09.2026 stand
+    # hier bei jedem Durchlauf "jetzt", auch nach einem abgebrochenen
+    # Zyklus; der Heartbeat konnte "Prozess laeuft" dann nicht mehr von
+    # "Prozess arbeitet" unterscheiden, obwohl genau das sein Zweck ist
+    # (siehe heartbeat.py). None heisst: in diesem Prozesslauf noch kein
+    # erfolgreicher Zyklus.
+    last_cycle_at: datetime | None = None
 
     interval_seconds = config.interval_hours * 60 * 60
 
@@ -274,6 +282,11 @@ def main() -> None:
                 # erneut versuchen.
                 logger.exception("Unerwarteter Fehler im Kaufzyklus.")
                 send_notification(f"[FEHLER] Unerwarteter Fehler im Kaufzyklus: {exc}")
+            else:
+                # Auch ein Zyklus, der wegen Stop-Loss oder Tageslimit
+                # bewusst nichts kauft, ist erfolgreich: der Bot hat
+                # gearbeitet und entschieden.
+                last_cycle_at = datetime.now(timezone.utc)
 
             today = utc_today()
             if today != last_summary_date:
@@ -282,7 +295,6 @@ def main() -> None:
 
             # Lebenszeichen (W13): laeuft nach jedem Zyklus, sendet aber
             # hoechstens einmal pro HEARTBEAT_INTERVAL_HOURS.
-            last_cycle_at = datetime.now(timezone.utc)
             heartbeat.maybe_send(last_cycle_at)
 
             logger.info("Warte %.2f Stunden bis zum nächsten Zyklus ...",
