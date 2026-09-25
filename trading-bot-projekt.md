@@ -744,6 +744,28 @@ Direkt per SSH durchgeführt, kein Code-Change im Repo.
 
 Damit sind alle Infrastruktur-Punkte aus dem Sicherheitsreview abgeschlossen. Offen bleiben nur die zwei terminlich an den 12.10. gebundenen Punkte: finaler VPS-Snapshot und Entfernen des Deploy-Keys beim Decommissioning.
 
+### Grid-Bot: Request-Timeout 10 → 20 Sekunden (25.09.2026)
+
+**Beobachtung.** Nachts kamen vereinzelt `[GRID-FEHLER]`-Meldungen der Form `HTTPSConnectionPool(host='testnet.binance.vision', port=443): Read timed out. (read timeout=10)`. Das Testnet antwortete in diesen Fällen durchaus, nur knapp langsamer als das Zeitfenster, das python-binance standardmäßig lässt (`Client.REQUEST_TIMEOUT` = 10 s). Der Bot selbst hat richtig reagiert: Zyklus abgebrochen, geloggt, gemeldet, nächster Zyklus lief normal. Es waren also Fehlalarme und kein Fehlverhalten.
+
+**Nur der Grid-Bot war betroffen, und das liegt an der Abfragehäufigkeit, nicht am Code.** Alle vier Prozesse nutzen denselben `TradingClient` und damit denselben Timeout. Der Grid-Bot fragt aber alle 5 Minuten ab, also 288-mal am Tag; DCA und Trend fragen einmal am Tag ab. Eine nächtliche Verlangsamung von ein paar Minuten trifft deshalb fast zwangsläufig einen Grid-Zyklus und nur mit geringer Wahrscheinlichkeit einen DCA- oder Trend-Zyklus. Erwischt sie einen davon, wären sie genauso betroffen.
+
+**Keine offizielle Testnet-Wartungszeit gefunden.** Für `testnet.binance.vision` ist kein festes, wiederkehrendes Wartungsfenster dokumentiert. Wartungen und Daten-Resets werden nur im Einzelfall angekündigt, auf der Testnet-Startseite und im Testnet-CHANGELOG des Repos `binance/binance-spot-api-docs`. Die nächtlichen Timeouts lassen sich damit keiner planmäßigen Wartung zuordnen. Sie werden als gelegentliche Verlangsamung des Testnets behandelt, nicht als Termin, um den herum man planen könnte.
+
+**Umgesetzt.** `TradingClient` nimmt einen optionalen Parameter `request_timeout_seconds` an und reicht ihn als `requests_params={"timeout": …}` an python-binance weiter. Ohne den Parameter bleibt alles wie bisher, und das ist der Fall für DCA, Trend und Allocator. Gesetzt wird er nur in `main_grid.py` (`REQUEST_TIMEOUT_SECONDS = 20`). Kein Retry und keine sonstige Logik, nur der eine Wert. Die Start-Logzeile nennt den Timeout jetzt mit (`Binance-Client initialisiert (testnet=True, Request-Timeout 20 s)`), damit sich auf dem Server per `journalctl` prüfen lässt, dass der neue Stand läuft.
+
+Drei Eigenschaften, die man kennen sollte:
+
+- Der Wert gilt für **jeden** Request dieses Clients, auch für den `ping()`, den der Konstruktor von python-binance selbst absetzt, sowie für Order- und Status-Abfragen.
+- Eine einzelne Zahl setzt bei `requests` **Verbindungs- und Lese-Timeout gemeinsam** auf 20 s.
+- Ein Zyklus kann im ungünstigsten Fall entsprechend länger hängen. Bei 5-Minuten-Takt ist das unkritisch. Der Notaus wird unverändert vor dem Zyklus, vor jedem Kauf und im Wartetakt geprüft.
+
+Nebeneffekt in die richtige Richtung: Bei Order-Requests führt ein Timeout über den K2-Pfad zu einer Ground-Truth-Nachfrage und im ungünstigsten Fall zu `[ORDER-UNKLAR]`. Weniger Timeouts heißt dort weniger ungeklärte Orders.
+
+**Bewusst nur beim Grid-Bot.** Projektweit zu vereinheitlichen wäre ebenso vertretbar gewesen (DCA und Trend hängen am selben Wert). Es fehlte aber der Anlass: Dort gab es keine Fehlalarme, und ein ausgefallener Zyklus kostet bei DCA/Trend höchstens eine Verschiebung um einen Tag. Ein Test hält die Beschränkung fest, damit eine spätere Vereinheitlichung bewusst geschieht und nicht nebenbei.
+
+**Tests:** 4 neue in `tests/test_request_timeout.py`, Gesamtstand **561, alle grün**. Geprüft wird der Wert dort, wo er wirkt: Unter dem `TradingClient` läuft ein **echter** `binance.client.Client`, ersetzt ist nur `requests.Session.get`. Ping, ein öffentlicher und ein signierter Request tragen nachweislich `timeout=20`. Ohne den Parameter tragen alle drei `timeout=10`, und diese Zahl steht bewusst als Literal im Test, weil sie die Prämisse der Änderung ist. Ein Test, der nur prüft, ob `requests_params` übergeben wurde, bliebe grün, falls ein python-binance-Update den Parameter still ignoriert. Dazu kommen die Verdrahtung (`main_grid.main()` legt den Client tatsächlich mit 20 an) und die Abgrenzung (DCA, Trend und Allocator übergeben nichts). Wirksamkeit gemessen, Kontrolllauf 0 Fehlschläge, alle 4 Mutationen gefangen: `requests_params` nie gesetzt → 1 Testmethode (3 Subtests), Default ebenfalls 20 → 1 (3 Subtests), `main_grid` übergibt nichts → 1, Wert 10 statt 20 → 1.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

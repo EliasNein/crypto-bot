@@ -100,12 +100,25 @@ def _parse_trading_rules(symbol: str, info: dict) -> SymbolTradingRules:
 
 
 class TradingClient:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, request_timeout_seconds: float | None = None):
+        """
+        `request_timeout_seconds` ersetzt den Standard-Timeout von
+        python-binance (`Client.REQUEST_TIMEOUT`, 10 s) fuer JEDEN Request
+        dieses Clients - inklusive des `ping()`, den der Konstruktor von
+        `Client` selbst absetzt. `None` laesst den Bibliotheks-Default
+        unveraendert; das ist der Fall fuer DCA, Trend und Allocator.
+        Gesetzt wird der Wert bisher nur vom Grid-Bot (siehe main_grid.py).
+        """
         self._config = config
         self._client = Client(
             config.api_key,
             config.api_secret,
             testnet=config.use_testnet,
+            requests_params=(
+                {"timeout": request_timeout_seconds}
+                if request_timeout_seconds is not None
+                else None
+            ),
         )
         # Handelsregeln je Symbol (exchangeInfo), einmalig beim ersten
         # Bedarf geholt und danach fuer die Lebensdauer dieses Clients
@@ -127,7 +140,11 @@ class TradingClient:
             else None
         )
         logger.info(
-            "Binance-Client initialisiert (testnet=%s)", config.use_testnet
+            "Binance-Client initialisiert (testnet=%s, Request-Timeout %s s)",
+            config.use_testnet,
+            request_timeout_seconds
+            if request_timeout_seconds is not None
+            else f"{Client.REQUEST_TIMEOUT} (Standard)",
         )
 
     @property
