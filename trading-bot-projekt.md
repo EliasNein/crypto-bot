@@ -255,6 +255,8 @@ Homeserver-VM aufgesetzt und alle drei Bots laufen sauber – Parallelbetrieb zu
 - **systemd-Services:** `dca-bot`, `grid-bot`, `trend-bot` angelegt, aktiviert (`enable`) und gestartet – alle drei laufen fehlerfrei im Dry-Run (`*_BOT_ENABLE_TRADING=false`), verifiziert per `journalctl`: DCA-Kauf simuliert, Grid mit 17 Stufen initialisiert, Trend-Historie geladen
 - **Netzwerk-Absicherung:** FritzBox-Portfreigaben geprüft – keine Einträge vorhanden, kein VPN nötig (nur lokaler Zugriff gewünscht), Isolation nach außen bereits gegeben
 
+*(Korrektur 25.09.2026: Der Dry-Run-Zustand aus dem Punkt „systemd-Services“ hielt bei DCA und Grid nicht lange. Laut Ledger gab es auf dem Homeserver schon am selben Tag echte Trades, DCA um 12:53:03 UTC und Grid um 13:38:07 UTC. Beide wurden also noch am 15.09. auf `*_BOT_ENABLE_TRADING=true` umgestellt, dokumentiert war das nicht. Der Trend-Bot lief zu dieser Zeit noch im Dry-Run. Details siehe „Umstellung auf echte Orders auf dem Homeserver“ in 6h.)*
+
 ### Allocator-Live-Dry-Run gestartet (15.09.2026)
 
 Kapital-Allocator läuft jetzt live auf der Homeserver-VM als vierter, komplett isolierter systemd-Service (`allocator.service`, gleiches Muster wie die drei Bot-Services).
@@ -299,6 +301,8 @@ Gemeinsam behoben, da beide denselben Ursprung haben: `place_market_sell()` gibt
 **Über die Vorgabe hinaus ergänzt:** Fehlt einem Ledger-Eintrag das `dry_run`-Feld komplett (praktisch nur durch manuelles Editieren möglich), wird der Modus **nicht geraten** - beide Bots verweigern dann jeden Verkaufsversuch und loggen `[GRID-POSITION-UNKLAR]`/`[TREND-POSITION-UNKLAR]`. Auf "echt" zu raten hieße, nie gekaufte Assets verkaufen zu wollen; auf "Dry-Run" zu raten hieße, eine echte Position mit erfundenem Erlös zu schließen. Außerdem meldet Grid einen dauerhaft fehlschlagenden Verkauf pro Position nur einmal je Prozesslauf per Telegram (sonst im 5-Minuten-Takt) - ins Log geht weiterhin jeder Fehlschlag.
 
 **Auflösung des konkreten Homeserver-Zustands:** Die dort offenen Positionen (6 Grid, 1 Trend) sind laut Ledger **alle** `dry_run: true`. Nach dem Fix kann für sie kein Codepfad mehr eine echte Verkaufsorder auslösen, unabhängig von `*_BOT_ENABLE_TRADING` - ein Bereinigen der Ledger-Dateien ist deshalb nicht nötig, das Wiederfreischalten per Notaus-Entfernung ist ungefährlich. Neu dafür: `python -m dca_bot.audit_positions` listet alle offenen Positionen beider Bots mit Dry-Run-Status auf, rein lesend, ohne API-Keys (siehe README Abschnitt 11; seit 25.09.2026 README 8.1 und Abschnitt 7.5 dieses Dokuments). Gegen die echten Ledger-Dateien verifiziert.
+
+*(Korrektur 25.09.2026: Die Zahlen „6 Grid, 1 Trend“ beziehen sich nicht auf den Homeserver, sondern auf den **VPS**. Dorthin ging der Bestand aus der Übertragung vom Desktop über den Laptop (6a, 6b). Der Homeserver ist laut 6e mit leerem `data/`-Ordner gestartet, und die Prüfung seiner Ledger am 25.09.2026 ergab zu keinem geprüften Zeitpunkt Dry-Run-Grid-Positionen: Das Grid-Ledger dort ist durchgehend echt. Eine Dry-Run-Trend-Position gab es allerdings auch auf dem Homeserver, eröffnet am 15.09.2026 um 12:19:01 UTC. Die Aussage über die Wirkung des Fixes gilt für die VPS-Positionen unverändert. Details siehe „Umstellung auf echte Orders auf dem Homeserver“ in 6h.)*
 
 **Tests:** 16 neue Tests - `tests/test_grid_sell_safety.py` (7, eigener Fake-Client; Dateiname bewusst nicht `test_grid_stop_loss.py`, da der Grid-Stop-Loss der Trendbruch-KAUF-Blocker und ein völlig anderer Mechanismus ist) und eine neue Klasse `TrendSellSafetyTestCase` in `tests/test_trend_stop_loss.py` (9, inkl. Neuplatzierung der Stop-Order nach fehlgeschlagenem Verkauf und dem doppelten Fehlerfall). Die geteilte Testumgebung wurde dafür in eine Basisklasse ohne eigene Testmethoden extrahiert. Gesamtstand: 36 Tests, alle grün.
 
@@ -1050,6 +1054,34 @@ Beide Ereignisarten sind selten, beim Trend-Bot mit Tageskerzen liegen Wochen da
 - ein abschließender Sicherheitsreview mit Claude Opus 5 kurz vor dem tatsächlichen Live-Gang (siehe 6d).
 
 Die längere Laufzeit im Testnet ist ausdrücklich dafür da, diese Vorbedingungen mit besserer Datenbasis zu erfüllen, nicht um sie zu umgehen oder abzukürzen.
+
+### Umstellung auf echte Orders auf dem Homeserver: aus den Ledgern rekonstruiert (25.09.2026)
+
+Wann `*_BOT_ENABLE_TRADING` auf dem Homeserver auf `true` gestellt wurde, stand nirgends. Laut 6e („Woche 1 abgeschlossen“) liefen am 15.09. alle drei Bots im Dry-Run, am 25.09. ist `true` für alle drei verifiziert (siehe oben). Die Ledger grenzen den Zeitpunkt je Bot ein. Ausgewertet wurde mit `python -m dca_bot.audit_positions` am 25.09.2026:
+
+- **DCA:** Echte Käufe am 15.09.2026 um 12:53:03 UTC und am 16.09.2026 um 08:34:37 UTC, dazu zwei simulierte Käufe. Deren Zeitstempel wurden nicht ausgewertet; vermutlich stammen sie aus der Dry-Run-Phase laut 6e. Umgestellt wurde damit **spätestens am 15.09.2026 um 12:53 UTC**.
+- **Grid:** 10 Einträge, davon 3 offen, alle echt (`dry_run: false`). Am 22.09. waren es 7 Einträge, ebenfalls ohne Dry-Run. Im Grid-Ledger gibt es keinen Dry-Run-Eintrag; bereits der erste Trade am 15.09.2026, 13:38:07 UTC (Stufe 6), war echt. Eine mögliche kurze Dry-Run-Phase davor ohne Trade (laut 6e) hinterlässt im Ledger keine Spur. Umgestellt wurde damit **spätestens am 15.09.2026 um 13:38 UTC**.
+- **Trend:** Die einzige offene Position ist vom 15.09.2026, 12:19:01 UTC, und ist Dry-Run. `TREND_BOT_ENABLE_TRADING` war zu diesem Zeitpunkt also `false`. Die Umstellung erfolgte **zwischen dem 15.09. und dem 25.09.2026** (Bestätigung `TREND_BOT_ENABLE_TRADING=true`). Der exakte Zeitpunkt ist aus dem Ledger nicht rekonstruierbar, weil seither noch kein realer Trade stattgefunden hat.
+
+Für die Auswertung der Testphase heißt das: In den Homeserver-Ledgern von DCA und Trend stehen Dry-Run- und echte Einträge nebeneinander, die Auswertung muss nach `dry_run` trennen. Das Grid-Ledger ist durchgehend echt.
+
+### ⚠ Trend-Bot: Die Kalibrierungsdaten fließen noch nicht (25.09.2026)
+
+**Die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` ist der Hauptgrund für die Verlängerung der Testphase (siehe oben). Beim Trend-Bot kann sie erst beginnen, wenn zwei Dinge nacheinander passiert sind:**
+
+1. Die offene **Dry-Run-Position vom 15.09.2026** (12:19:01 UTC, siehe Rekonstruktion oben) wird simuliert geschlossen, per Signal-Umkehr oder über den internen Stop-Loss.
+2. Danach findet ein **neuer, echter Einstieg** mit echter Stop-Loss-Order an der Börse statt.
+
+**Bis dahin trägt der Trend-Bot nichts zur Kalibrierungsdatenbasis bei.** Der Grund liegt im Design, ein Fehler ist es nicht: Der Trend-Bot hält genau eine Position, die Dry-Run-Position belegt diesen Platz. Eine Dry-Run-Position hat nie eine Stop-Order an der Börse und bleibt auch nach dem Umschalten auf `TREND_BOT_ENABLE_TRADING=true` simuliert (K4). Sie liefert also keine `[STOP-FILL-ANALYSE]`-Zeile.
+
+**Der VPS hilft dabei nicht.** Laut diesem Dokument läuft sein Trend-Bot seit Beginn im Dry-Run (6b), und eine Umstellung der VPS-Bots auf echte Orders ist ausdrücklich nicht vorgesehen (siehe oben). Nicht auf dem Server selbst geprüft, sondern aus der Dokumentation abgeleitet. Mit dem Vertragsende am 12.10. entfällt er ohnehin. **Derzeit fließen damit von keinem Server Kalibrierungsdaten.**
+
+Zwei Einzelheiten dazu, beide im Code nachgeprüft (`trend_strategy.py`):
+
+- **Schließt sich die Dry-Run-Position über den internen Stop-Loss, wird der Stop-Loss-Latch gesetzt**, auch für eine Dry-Run-Position. Danach blockiert der Bot jeden neuen Einstieg, bis manuell zurückgesetzt wird (`python -m dca_bot.reset_trend_stop_loss`). Nur bei einem Ausstieg per Signal-Umkehr ist der Weg zum neuen Einstieg ohne Eingriff frei.
+- **Auch ein echter Trade liefert nur unter einer Bedingung eine `[STOP-FILL-ANALYSE]`-Zeile**: wenn die Stop-Order an der Börse gefüllt wird. Ein Ausstieg per Signal-Umkehr oder über den internen Stop-Loss (der Bot storniert dann die Order und verkauft selbst) trägt nichts zur Kalibrierung bei.
+
+**Bewusste Entscheidung: kein Eingriff.** Die Position wird weder per Notaus angehalten noch manuell geschlossen. Das wäre ein unnötiges Risiko für einen reinen Zeitgewinn, und die Position schließt sich ohnehin von selbst, sobald ein Signal kommt. Die Testphase ist damit faktisch erst ab dem ersten echten Trend-Einstieg auf die Kalibrierungsfrage ausgerichtet. Das ist bei der Bewertung, ob 2–3 Monate reichen, zu berücksichtigen.
 
 ## 6i. Verbesserungsvorschläge aus Review-Abschnitt 7 (17.09.2026)
 
