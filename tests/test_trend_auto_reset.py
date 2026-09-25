@@ -1,7 +1,7 @@
 """
 Tests fuer den ANALYSE-Modus "automatischer Stop-Loss-Reset"
 (`--analyze-auto-reset` in dca_bot/trend_backtest.py) - Punkt 16 der
-Verbesserungsvorschlaege aus Review-Abschnitt 7.
+Verbesserungsvorschlaege aus Abschnitt 7 des Sicherheitsreviews.
 
 **Was hier NICHT passiert:** Der Live-Bot bekommt keinen automatischen
 Reset. `TrendStopLoss` (trend_risk.py) bleibt unveraendert, der Latch

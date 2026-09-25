@@ -1,4 +1,4 @@
-# Trading-Bot-Projekt: Planung & Recherche
+# Trading-Bot-Projekt: Planung, Fortschritts-Log und technische Referenz
 
 **Stand:** 25. September 2026
 **Status:** Testnet-Betrieb, kein Live-Geld. Der Sicherheitsreview (K1–K5, W1–W18, Infrastruktur) ist seit dem 16.09. abgeschlossen. Der Homeserver läuft faktisch seit dem 16.09.2026 als vollständiges System, mit allen vier Bausteinen und aktivem Allocator-Opt-in für DCA und Trend. Der aktuelle Trading-Status dort wurde am 25.09.2026 verifiziert (siehe 6h). Der formale Cutover (VPS-Abschaltung, finaler Snapshot) bleibt für den 05.10.2026 geplant. Bis zum Vertragsende am 12.10. läuft der VPS isoliert weiter, ohne Allocator. Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026. Seit dem Review sind mehrere Fund-und-Fix-Serien abgeschlossen: die Verbesserungsvorschläge (6i, 17.09.), die Dry-Run-Beträge (22.09.) und die Code-Überprüfung vom 25.09. (6g). Die technische Referenz zum aktuellen Stand steht in Abschnitt 7.
@@ -98,7 +98,7 @@ Arbitrage, Market Making, Scalping als **erste** Strategien – zu kapital-/late
 - Quellenqualität variiert stark: Akademische Quellen (NBER, Journal of Financial Economics, SSRN, peer-reviewed) sind belastbar; viele Anbieter-Blogs enthalten unbelegte/erfundene Zahlen (z.B. "99%+ Trefferquote", "6.712% Rendite") – diese wurden bewusst nicht übernommen.
 - Krypto-spezifische Risiken (Börsen-Insolvenz, Hacks, Marktmanipulation) bestehen unabhängig von der gewählten Strategie.
 
-**Vollständiger Recherche-Bericht mit allen Quellenangaben und Zitaten:** siehe separates Artefakt "Krypto-Trading-Bot-Strategien: Quellenkritischer Vergleich" aus dem Chat.
+**Vollständiger Recherche-Bericht mit allen Quellenangaben und Zitaten:** siehe separates Artefakt "Krypto-Trading-Bot-Strategien: Quellenkritischer Vergleich" aus dem Chat. *(Aktualisiert 25.09.2026: Dieses Artefakt liegt nicht im Repository, es existiert nur im claude.ai-Chatverlauf. Falls es sich exportieren lässt, gehört es nach `docs/research/`.)*
 
 ---
 
@@ -128,7 +128,7 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 
 **Separat gegengeprüfter, weiterhin gültiger Befund:** Die DCA-Seite *innerhalb* der Kombination erzielt eine bessere Rendite pro eingesetztem Euro als isoliertes, uniformes DCA (2023: 64,55% statt 52,09%) – an Tagen mit hoher Trendstärke wird weniger DCA-Kapital eingesetzt, was den durchschnittlichen Einstandspreis des verbleibenden DCA-Kapitals verbessert.
 
-**Geplanter Vergleichstest:** Sobald live getestet, zusätzlich auf dem Homeserver parallel zum isolierten Drei-Bot-System auf dem VPS laufen lassen (separater, neuer Testnet-Account nötig, damit keine gemeinsame Kontostand-Verfälschung entsteht).
+**Geplanter Vergleichstest:** Sobald live getestet, zusätzlich auf dem Homeserver parallel zum isolierten Drei-Bot-System auf dem VPS laufen lassen (separater, neuer Testnet-Account nötig, damit keine gemeinsame Kontostand-Verfälschung entsteht). *(Aktualisiert 25.09.2026: Der Vergleich läuft faktisch. Auf dem Homeserver läuft der Allocator seit dem 15.09.2026, das Opt-in für DCA und Trend seit dem 16.09.2026 (6e, 6h), parallel zum VPS ohne Allocator. Der Homeserver nutzt einen eigenen Testnet-API-Key, ausdrücklich gegen eine Kontostand-Vermischung (6e, „Woche 1 abgeschlossen“). Der Vergleich endet mit dem formalen Cutover am 05.10.2026 (6e). Für die Auswertung gelten zwei Einschränkungen: Die Kapitalbasis ist ungleich, verglichen werden muss deshalb die Rendite pro eingesetztem Euro (6g, „Beobachtung zur Allocator-Wirkung“). Und auf dem Homeserver handeln die Bots mit echten Testnet-Orders (6h), auf dem VPS ist für Grid und Trend der Dry-Run belegt (6c, 6h).)*
 
 **Modellwahl:** Sonnet 5 (high effort) für die Umsetzung. Opus 5 gezielt für den finalen Sicherheitsreview vor Echtgeld reserviert (siehe 6d).
 
@@ -136,13 +136,13 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 
 ## 5b. Geplantes Live-Kapital
 
-**Grundsatzentscheidung (15.09.2026):** Gesamtbetrag **300€**, Architektur für den Live-Betrieb: **Allocator-Struktur** – DCA und Trend-Following bilden einen gemeinsamen, vom Allocator dynamisch verwalteten Kapitaltopf; Grid-Bot bleibt als eigenständiger, fester Topf davon getrennt (unverändert zur bisherigen Architektur, siehe 5a/10). Aufteilung zwischen den beiden Töpfen: **150€ Grid-Topf / 150€ Allocator-Topf (DCA+Trend gemeinsam)**.
+**Grundsatzentscheidung (15.09.2026):** Gesamtbetrag **300€**, Architektur für den Live-Betrieb: **Allocator-Struktur** – DCA und Trend-Following bilden einen gemeinsamen, vom Allocator dynamisch verwalteten Kapitaltopf; Grid-Bot bleibt als eigenständiger, fester Topf davon getrennt (unverändert zur bisherigen Architektur, siehe 5a/10 *(„10“ war der frühere README-Abschnitt, seit 25.09.2026: Abschnitt 7.4 dieses Dokuments)*). Aufteilung zwischen den beiden Töpfen: **150€ Grid-Topf / 150€ Allocator-Topf (DCA+Trend gemeinsam)**.
 
 **Bewusst noch offen:** Die konkreten `*_AMOUNT_PER_LEVEL`/`*_AMOUNT_PER_TRADE`-Werte sowie bei Grid die Preisspanne/`GRID_SPACING_PCT` werden NICHT jetzt schon festgelegt – hängen vom aktuellen BTC-Kurs zum Zeitpunkt des Live-Starts sowie von den Erkenntnissen aus dem noch bevorstehenden monatelangen Paper-Trade-Test (mit aktiviertem Allocator-Opt-in, geplant nach Abschluss der übrigen Live-Gang-Vorbereitungen aus 6d) ab. Positionsgrößen-Kalibrierung ist als eigener Schritt kurz vor dem tatsächlichen Live-Start eingeplant, nicht heute schon mit möglicherweise überholten Platzhalter-Werten.
 
 *(Aktualisiert 17.09.2026: Für den **Grid-Bot** trifft dieser Satz nicht mehr zu — `GRID_AMOUNT_PER_LEVEL` ist auf dem Homeserver auf 9,38 € gesetzt, siehe „W16 umgesetzt" in 6g. Das ist ausdrücklich keine Kurs-Kalibrierung, sondern das Einhalten der 150-€-Obergrenze aus diesem Abschnitt, die ohnehin feststand: Der Grid-Bot hat bewusst kein Tageslimit, Stufenzahl × Betrag ist dort die einzige Bremse, und sie lag mit 240 € um 60 % daneben. Preisspanne und `GRID_SPACING_PCT` bleiben unverändert offen — sie hängen am Kursniveau und verschieben, anders als der Betrag, auch das Strategieprofil. Für `DCA_QUOTE_AMOUNT` und `TREND_AMOUNT_PER_TRADE` gilt der Satz vollständig weiter.)*
 
-*(Aktualisiert 25.09.2026: Der „noch bevorstehende monatelange Paper-Trade-Test“ ist überholt. Er **läuft seit dem 16.09.2026** auf dem Homeserver, mit aktivem Allocator-Opt-in für DCA und Trend (6h). Er begann damit nicht erst nach Abschluss der übrigen Live-Gang-Vorbereitungen aus 6d, sondern parallel zu ihnen (Stand der Liste: Vermerke in 6d). Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026 (Kopfbereich). Die Abhängigkeit selbst gilt unverändert: `DCA_QUOTE_AMOUNT`, `TREND_AMOUNT_PER_TRADE` sowie Preisspanne und `GRID_SPACING_PCT` werden nach Auswertung dieses Tests festgelegt.)*
+*(Aktualisiert 25.09.2026: Der „noch bevorstehende monatelange Paper-Trade-Test“ ist überholt. Er **läuft seit dem 16.09.2026** auf dem Homeserver, mit aktivem Allocator-Opt-in für DCA und Trend (6h). Er begann damit nicht erst nach Abschluss der übrigen Live-Gang-Vorbereitungen aus 6d, sondern parallel zu ihnen (Stand der Liste: Vermerke in 6d). Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026 (Kopfbereich). Die Abhängigkeit selbst gilt unverändert, siehe den Vermerk vom 17.09. direkt darüber.)*
 
 ---
 
@@ -153,7 +153,7 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 - [x] Projektgrundgerüst aufgesetzt (Python, `dca_bot`-Package)
 - [x] DCA-Strategie + Backtesting-Skript implementiert (`backtest.py`), verifiziert an 2022 (Bärenmarkt) vs. 2023 (Bullenmarkt)
 - [x] Risikomanagement-Logik (`dca_bot/risk.py`): Notaus (`KillSwitch`), persistentes Tageslimit (`TradeLedger`), Portfolio-Stop-Loss (latched, manueller Reset). Whipsaw-Vermeidung bewusster Grund für fehlenden Automatik-Reset (dokumentiert im Code).
-- [ ] Optionaler automatischer Stop-Loss-Reset (Erholungs-Schwelle + Cooldown) – bewusst nicht implementiert, siehe Begründung oben. Könnte bei Bedarf als Config-Flag nachgerüstet werden.
+- [ ] Optionaler automatischer Stop-Loss-Reset (Erholungs-Schwelle + Cooldown) – bewusst nicht implementiert, siehe Begründung oben. Könnte bei Bedarf als Config-Flag nachgerüstet werden. *(Aktualisiert 25.09.2026: Am 17.09. als Backtest-Experiment durchgespielt und vorerst zurückgestellt, weil es nur n = 1 auswertbares Ereignis gab, siehe 6i „Punkt 16 als Backtest-Experiment durchgespielt“. Entschieden wird mit echten Daten aus der Testphase (6h). Der Punkt bleibt offen.)*
 - [x] **Monitoring & Benachrichtigungen (Telegram)** – `dca_bot/notifier.py`, sendet optional (nur wenn Token/Chat-ID gesetzt) bei Kaufzyklus, Stop-Loss, Notaus, Fehlern, tägliche Zusammenfassung. Fehler beim Senden legen den Bot nie lahm. Verifiziert am 10.09.2026 auf dem Desktop-PC (Dry-Run-Livetest, alle vier Nachrichtentypen bestätigt). Dabei echte Prüfreihenfolge-Lücke in `strategy.py` gefunden und behoben: Stop-Loss wurde vor dem Fix erst NACH dem Tageslimit-Check geprüft, wodurch er an Tagen mit ausgeschöpftem Tageslimit übersprungen wurde. Jetzt Preisabfrage/Stop-Loss-Check vor dem Tageslimit-Check.
 - [x] **DCA-Bot 3-Tage-Stabilitätstest auf dem Laptop** – Zeitraum 09.09.2026 17:57 bis 11.09.2026 16:54 Uhr, Laufzeit 1 Tag 22h58min von geplanten 3 Tagen (vorzeitig per Notaus beendet, nicht durch Fehler). Echtes Trading (`DCA_BOT_ENABLE_TRADING=true`), 24h-Intervall: 2 erfolgreiche Käufe (09.09. @ 78.620,79, 10.09. @ 77.209,97, je 15 USDT), keine einzige Fehler-Zeile im gesamten Log. Vollständiges Log archiviert unter `docs/test-reports/2026-09-09_dca-3tage-stabilitaetstest.log` (`.gitignore` um `!docs/**/*.log` ergänzt).
 - [x] **Zweite Strategie: Spot-Grid-Trading-Bot** – `dca_bot/main_grid.py`, `grid_config.py`, `grid_risk.py`, `grid_strategy.py`, `grid_signals.py`, `reset_grid_stop_loss.py`. Komplett eigenständig: eigenes Ledger (`data/grid_positions.json`), eigener Notaus (`GRID_BOT_HALT`), eigener Trendbruch-Stop-Loss (latched), eigene Telegram-Nachrichten. Positions-Zuordnung: jede Kaufposition kennt ihre Grid-Stufe und ihr individuelles Verkaufsziel.
@@ -169,6 +169,19 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
   - Beim Backtesting ein Report-Bug gefunden und behoben: eine am Ende offene Position wurde nicht in Anzahl Trades/PnL gezählt (wirkte fälschlich wie "keine Aktivität"). Jetzt separat als unrealisiert ausgewiesen.
   - Fake-Client-Tests: Einstieg bei bestätigtem Signal, kein Doppel-Einstieg, Ausstieg per Signal-Umkehr (separat getestet), Stop-Loss-Exit mit Latch, Notaus-Isolation bestätigt.
   - Technischer Dry-Run-Check (10.09.2026): EMA-Berechnung unabhängig gegengeprüft (6,66% Abstand, Richtung "up"), ein Dry-Run-Einstieg ausgelöst, sauber gestoppt.
+
+*(Ergänzt 25.09.2026: Die Liste endete beim Trend-Bot. Die folgenden Punkte fassen den Stand aus 5a und 6a–6i zusammen, Details stehen jeweils dort.)*
+
+- [x] Übertragung auf den Laptop (6a) und Umzug auf einen gemieteten VPS (6b)
+- [x] **Kapital-Allocator** zwischen DCA und Trend: Backtest abgeschlossen (5a), Live-Dry-Run auf dem Homeserver seit 15.09.2026 (6e), Opt-in für DCA und Trend seit 16.09.2026 (6h)
+- [x] **Exchange-seitiger Stop-Loss für den Trend-Bot** (`STOP_LOSS_LIMIT`-Order an der Börse, 6f), deployed (6g). Ein an der Börse gefüllter Stop-Loss steht noch aus.
+- [x] **Homeserver eingerichtet:** eigene VM, eigener Testnet-Key, Bots seit 15.09.2026 als systemd-Services (6e), `ufw` seit 16.09. (6g)
+- [x] **Sicherheitsreview** (Claude Opus 5, 15.09.2026): K1–K5, W1–W18 und Infrastruktur bis 16.09. abgearbeitet (6g)
+- [x] **Verbesserungsvorschläge aus dem Review:** Stufen 1 und 2 umgesetzt, Punkt 16 zurückgestellt (6i, 17.09.2026)
+- [x] **Code-Überprüfung vom 25.09.2026** abgearbeitet (6g, „Restpunkte der Code-Überprüfung vom 25.09.2026“)
+- [ ] Formaler Cutover auf den Homeserver am 05.10.2026 (finaler VPS-Snapshot, Abschalten der VPS-Services), VPS-Vertragsende 12.10.2026 mit Entfernen des Deploy-Keys (6c, 6e)
+- [ ] Testphase auf dem Homeserver, verlängert auf ca. 2–3 Monate bis etwa Mitte November bis Mitte Dezember 2026. Trend-Kalibrierungsdaten fließen erst ab dem ersten echten Trend-Einstieg (6h).
+- [ ] Live-Gang mit echtem Kapital (300 €, 5b), Vorbedingungen in 6h
 
 ---
 
@@ -212,7 +225,7 @@ Eine Telegram-Nachricht scheiterte initial an einem transienten Verbindungsfehle
 
 ## 6d. Plan für den Live-Gang nach dem Testmonat
 
-Nutzer plant: nach Abschluss des VPS-Testmonats Umzug auf den eigenen Homeserver (TrueNAS, bereits eine Ubuntu-Server-VM für Cloudflare-Webseiten aktiv) für den Live-Betrieb mit echtem Kapital (100–300€, siehe 5b).
+Nutzer plant: nach Abschluss des VPS-Testmonats Umzug auf den eigenen Homeserver (TrueNAS, bereits eine Ubuntu-Server-VM für Cloudflare-Webseiten aktiv) für den Live-Betrieb mit echtem Kapital (100–300€, siehe 5b). *(Aktualisiert 25.09.2026: Die Spanne ist überholt. Mit der Grundsatzentscheidung vom 15.09.2026 in 5b ist der Gesamtbetrag auf 300 € festgelegt.)*
 
 **Empfehlung: separate, eigene VM auf dem TrueNAS-Server** für die Bots (nicht die bestehende Webseiten-VM mitnutzen), um Isolation zu wahren – konsistent mit dem Trennungsprinzip zwischen den Bot-Strategien selbst. Einrichtung technisch nahezu identisch zum VPS-Setup (Ubuntu, Python, Git-Clone, systemd-Services), aber ohne laufende Kosten.
 
@@ -291,7 +304,7 @@ Umgesetzt (nur lokaler Code, noch nicht deployed/committet zum Zeitpunkt dieses 
 
 ## 6g. Sicherheitsreview-Fixes (ab 15.09.2026)
 
-Laufendes Log der Behebung der im Sicherheitsreview (Claude Opus 5, 15.09.2026) gefundenen Punkte. Vollständiger Befund als Referenz: siehe Review-Ausgabe im Chat-Verlauf.
+Laufendes Log der Behebung der im Sicherheitsreview (Claude Opus 5, 15.09.2026) gefundenen Punkte. Vollständiger Befund als Referenz: siehe Review-Ausgabe im Chat-Verlauf. *(Aktualisiert 25.09.2026: Die Review-Ausgabe liegt nicht im Repository, sie existiert nur im claude.ai-Chatverlauf. Falls sie sich exportieren lässt, gehört sie nach `docs/reviews/`. Vorher prüfen, ob sie etwas enthält, das nicht ins Repo gehört, etwa IP-Adressen oder Pfade: Sie beschreibt Angriffsflächen.)*
 
 ### K5: Telegram-Bot-Token-Leak behoben (15.09.2026)
 
@@ -491,7 +504,7 @@ Dazu zwei Funde, die aus der Bearbeitung selbst entstanden und mit erledigt wurd
 
 **Die K3-Restlücke ist damit ebenfalls geschlossen.** Sie war beim K3-Fix bewusst offen gelassen worden: `get_order()`-Antworten enthalten keine `fills`, weshalb im Exit-Pfad "exchange-seitige Stop-Order war bereits gefüllt" die Verkaufsgebühr mangels Daten unberücksichtigt blieb (PnL dieses einen Pfads ca. 0,1% zu optimistisch); die Notiz dort lautete "sauber lösbar nur über eine zusätzliche `myTrades`-Abfrage". Genau diese Abfrage wurde für den K2-Reconcile-Pfad gebraucht und als `get_order_with_fills()` gebaut — dort zwingend, weil ein nachgetragener Kauf sonst mit der Brutto-Menge ins Ledger käme und damit in dieselbe K3-Falle zurückliefe.
 
-> **Korrektur 17.09.2026: Der Absatz oben stimmte nicht.** Das Werkzeug `get_order_with_fills()` wurde gebaut und in den fünf Reconciliation-Pfaden genutzt — aber an `_close_from_filled_stop_order()`, also genau den Pfad, um den es in der Restlücke ging, nie angeschlossen. Er buchte weiterhin `cummulativeQuoteQty` brutto. Die Restlücke bestand damit vom 16.09. bis zum 17.09. unverändert fort, während dieser Absatz sie als geschlossen auswies. Aufgefallen beim Ist-Stand-Check der Verbesserungsvorschläge aus Review-Abschnitt 7 (Punkt 8), behoben am 17.09. — siehe „Verbesserungsvorschläge, Stufe 1" in 6i.
+> **Korrektur 17.09.2026: Der Absatz oben stimmte nicht.** Das Werkzeug `get_order_with_fills()` wurde gebaut und in den fünf Reconciliation-Pfaden genutzt — aber an `_close_from_filled_stop_order()`, also genau den Pfad, um den es in der Restlücke ging, nie angeschlossen. Er buchte weiterhin `cummulativeQuoteQty` brutto. Die Restlücke bestand damit vom 16.09. bis zum 17.09. unverändert fort, während dieser Absatz sie als geschlossen auswies. Aufgefallen beim Ist-Stand-Check der Verbesserungsvorschläge aus Abschnitt 7 des Sicherheitsreviews (Punkt 8), behoben am 17.09. — siehe „Verbesserungsvorschläge, Stufe 1" in 6i.
 >
 > Das ist eine andere Fehlerklasse als die beiden Doku-Karteileichen desselben Tages (6b, 5a): Dort war ein Text veraltet, hier stand im Dokument eine **Zusicherung über das laufende System, die nie zutraf**. Festgehalten statt stillschweigend überschrieben, weil genau diese Sorte Aussage später als Beleg herangezogen wird.
 
@@ -813,6 +826,8 @@ Nebeneffekt in die richtige Richtung: Bei Order-Requests führt ein Timeout übe
 > Entscheidend ist ohnehin der bestehende Zyklus-Mechanismus: Ein fehlgeschlagener Zyklus wird geloggt und gemeldet, der nächste läuft normal. Laut Logs der letzten Tage gab es keinen Fall, in dem zwei aufeinanderfolgende Zyklen fehlschlugen. Ein Codeänderungsbedarf besteht deshalb nicht.
 >
 > Nachprüfbar bleibt die Einordnung nach dem Deployment: Treffer für `grep "read timeout=20" logs/grid_bot.log` im Fenster der Zwangstrennung bestätigen, dass der längere Timeout diesen Fall nicht abfängt.
+>
+> *(Aktualisiert 25.09.2026: **Noch nicht geprüft, frühestens ab dem 26.09.2026 möglich.** Die Timeout-Änderung wurde am 25.09. um 11:56 MESZ committet, also nach der Zwangstrennung jener Nacht (02:35:27 MESZ). Die erste auswertbare Trennung liegt in der Nacht zum 26.09. gegen 02:34 MESZ (00:34 UTC). Geprüft wird auf dem Homeserver mit `grep "Request-Timeout 20 s" logs/grid_bot.log | tail -1` (läuft der neue Stand, seit wann?) und `grep "read timeout=" logs/grid_bot.log | tail -5`. Ein Treffer „read timeout=20“ im Fenster bestätigt die Vorhersage. Kein Treffer ist erst nach mehreren Nächten aussagekräftig, weil nicht jede Trennung zwingend eine Anfrage auf einer toten Verbindung erwischt. Maßgeblich ist das Log, nicht Telegram: Seit dem Mengenlimit für `[GRID-FEHLER]` meldet Telegram nur den ersten Fehler eines Typs. Mit dem Ergebnis wird das „voraussichtlich“ im Kommentar zu `REQUEST_TIMEOUT_SECONDS` in `main_grid.py` festgelegt.)*
 
 ### Echte Position bei deaktiviertem Trading: das Spiegelbild zu K4 (25.09.2026)
 
@@ -1093,7 +1108,7 @@ Zwei Einzelheiten dazu, beide im Code nachgeprüft (`trend_strategy.py`):
 
 **Bewusste Entscheidung: kein Eingriff.** Die Position wird weder per Notaus angehalten noch manuell geschlossen. Das wäre ein unnötiges Risiko für einen reinen Zeitgewinn, und die Position schließt sich ohnehin von selbst, sobald ein Signal kommt. Die Testphase ist damit faktisch erst ab dem ersten echten Trend-Einstieg auf die Kalibrierungsfrage ausgerichtet. Das ist bei der Bewertung, ob 2–3 Monate reichen, zu berücksichtigen.
 
-## 6i. Verbesserungsvorschläge aus Review-Abschnitt 7 (17.09.2026)
+## 6i. Verbesserungsvorschläge aus Abschnitt 7 des Sicherheitsreviews (17.09.2026)
 
 Der Sicherheitsreview enthielt neben den K- und W-Punkten eine dritte, kürzere Liste: 17 Qualitäts- und Komfortvorschläge, von denen keiner als sicherheitskritisch eingestuft war. Am 17.09. wurde dafür ein Ist-Stand-Check gemacht.
 
@@ -1103,7 +1118,7 @@ Drei Funde aus dem Check waren gewichtiger, als die Liste sie eingestuft hatte:
 
 1. **Die Allocator-State-Datei wurde nicht atomar geschrieben.** Bis zum Opt-in vom 16.09. (siehe 6h) folgenlos, weil sie außer dem Allocator selbst niemand las. Seitdem lesen DCA und Trend sie vor *jeder* neuen Order.
 2. **Die K3-Restlücke war entgegen der Dokumentation nie geschlossen** — siehe die Korrektur-Notiz in 6g.
-3. **Die Entscheidungsfunktionen von Grid und Allocator haben keinen einzigen direkten Test.** Genau dort saßen die beiden Designfehler, die vor Fertigstellung des Grid-Bots gefunden wurden (Kaltstart, Intervallgrenze, siehe Abschnitt 6) — also nicht „könnte theoretisch mal ein Problem werden".
+3. **Die Entscheidungsfunktionen von Grid und Allocator haben keinen einzigen direkten Test.** Genau dort saßen die beiden Designfehler, die vor Fertigstellung des Grid-Bots gefunden wurden (Kaltstart, Intervallgrenze, siehe Abschnitt 6) — also nicht „könnte theoretisch mal ein Problem werden". *(Aktualisiert 25.09.2026: am selben Tag behoben, siehe „Stufe 2 umgesetzt“ unten, Punkt 12: `tests/test_grid_signals.py` und `tests/test_allocator_signals.py`.)*
 
 ### Stufe 1 umgesetzt: Punkte 8, 2 und 10 (17.09.2026)
 
@@ -1194,7 +1209,7 @@ Details, die dabei zählten:
 - **Gruppiert nach Symbol.** Handeln die drei Bots unterschiedliche Paare, wäre eine Gesamtsumme schlicht falsch — sie addierte Mengen verschiedener Assets. Grid- und Trend-Ledger tragen selbst kein Symbol-Feld; es kommt aus der Konfiguration.
 - **Verglichen wird gegen `frei + gebunden`**, nicht nur gegen `free`: Eine Menge in einer offenen Verkaufs-Order existiert noch, sie ist nur nicht verkäuflich. Anders als bei der Deckungsprüfung eines einzelnen Verkaufs, die bewusst nur `free` betrachtet.
 - **Ein Überschuss ist kein Befund** (manueller Bestand, Altlast). Nur die andere Richtung wird gemeldet — mit dem ausdrücklichen Hinweis, die Ledger **nicht** blind anzupassen, bevor geklärt ist, welche Seite recht hat.
-- Die neue `split_locked_by_bot()` steht in `balance_guard.py`, nicht im Skript: Die Regel, welche Order überhaupt Base-Asset bindet, darf es nur einmal geben — sonst zeigt das Audit früher oder später andere Zahlen als der Bot, der sich gerade beschwert. Die vorhandene `split_locked_quantity()` bleibt unangetastet (additiv oder gar nicht, so kurz vor dem Echtgeld-Schalter).
+- Die neue `split_locked_by_bot()` steht in `balance_guard.py`, nicht im Skript: Die Regel, welche Order überhaupt Base-Asset bindet, darf es nur einmal geben — sonst zeigt das Audit früher oder später andere Zahlen als der Bot, der sich gerade beschwert. Die vorhandene `split_locked_quantity()` bleibt unangetastet (additiv oder gar nicht, so kurz vor dem Echtgeld-Schalter). *(Aktualisiert 25.09.2026: „So kurz vor“ trifft seit der Verlängerung der Testphase auf ca. 2–3 Monate (6h) nicht mehr zu. An der Entscheidung ändert das nichts, `split_locked_quantity()` bleibt unangetastet.)*
 
 #### Tests und Wirksamkeit
 
@@ -1266,8 +1281,11 @@ die ausführlichen Texte stehen hier. Sie sind **wörtlich übernommen** -
 angepasst wurden nur Verweise auf Abschnittsnummern, die sich durch den
 Umzug geändert haben. Seitdem wird der Abschnitt als Referenz für den
 aktuellen Stand gepflegt: Was hier nicht mehr stimmt, wird direkt
-korrigiert, ohne Vermerk wie in den Log-Abschnitten. Konfiguration, Start
-und Werkzeuge: README.
+korrigiert, ohne Vermerk wie in den Log-Abschnitten. Wo ein Log-Eintrag
+und dieser Abschnitt dasselbe beschreiben (z.B. W9 in 6g und 7.4), ist die
+Überschneidung gewollt: Der Log-Eintrag hält fest, was damals entschieden
+wurde, dieser Abschnitt den heutigen Stand. Bei Abweichungen gilt
+Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
 
 ### 7.1 Botübergreifende Sicherheitsmechanismen
 
@@ -2028,4 +2046,4 @@ Aufrufstellen, von denen später eine vergessen wird.
 
 ---
 
-*Diese Datei dient als lebendes Projektdokument und sollte bei neuen Entscheidungen und Recherche-Ergebnissen aktualisiert werden. Stand 13.09.2026: zusammengeführt aus zwei parallel gepflegten Versionen (Chat-Artefakt + lokale Claude-Code-Fortschreibung).*
+*Lebendes Projektdokument. Abschnitte 1–6i sind das chronologische Log: Einträge bleiben stehen, spätere Erkenntnisse werden als datierte Vermerke ergänzt. Abschnitt 7 ist die technische Referenz zum aktuellen Stand und wird direkt korrigiert. Entstanden am 13.09.2026 durch Zusammenführen zweier parallel gepflegter Versionen (Chat-Artefakt + lokale Claude-Code-Fortschreibung).*
