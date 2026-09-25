@@ -1063,6 +1063,22 @@ Details in 7.1 („Heartbeat-Statusdateien für externe Betrachter“). `data/` 
 
 **Tests:** 27 neue in `tests/test_heartbeat_status_file.py`: der Writer (Inhalt, Absturz mitten in der Ausgabe und beim Umbenennen, Schreibfehler), die echte `main()` aller vier Bots mit der Zyklusfolge Fehler, Erfolg, Fehler, Fehler, Erfolg sowie Notaus und nicht beschreibbarer Datei, dazu eine Quelltext-Prüfung, dass der Pfad nur in den Configs und an der Konstruktor-Stelle vorkommt. Die beiden bestehenden Test-Dateien, die `main()` voll durchlaufen, schreiben den Status jetzt ins temporäre Verzeichnis statt nach `data/`. Gesamtstand **657, alle grün**. **Wirksamkeit gemessen:** Kontrolllauf 0 Fehlschläge, alle 17 Mutationen gefangen, darunter je ein fehlender `record_success`/`record_failure`-Aufruf in allen vier Einstiegspunkten (je 1), Write beim Notaus (1), ein Lesezugriff im Trend-Bot (1), fehlender Zähler-Reset (5), direkter Write ohne temporäre Datei (2) und eine durchgereichte Exception (9).
 
+### Vorgemerkt: langfristiges Datenwachstum (26.09.2026)
+
+Reine Notiz für eine spätere Session, nichts umgesetzt.
+
+**Bereits abgedeckt:**
+
+- Trading-Bot-Logs: `logrotate`, wöchentlich, 8 Wochen Aufbewahrung (bestehend, siehe „Infrastruktur-Härtung auf beiden Servern“ oben).
+- Server-Backups: TrueNAS-Snapshots, täglich, 4 Wochen Aufbewahrung (bestehend).
+- Steuerberater-CSV-Export der Dashboard-App: wird bei jedem Abruf frisch erzeugt, es wächst also keine Datei dauerhaft an.
+
+**Noch ohne Strategie:** die Ledger-Dateien selbst (`trade_ledger.json`, `grid_positions.json`, `trend_ledger.json`). Sie wachsen unbegrenzt, besonders beim DCA-Bot: Er verkauft nie, jede Position bleibt dauerhaft im Ledger. Aus dem App-Check der Dashboard-App vom 26.09.2026: Antwortzeit und Antwortgröße von `/api/status` wachsen linear mit der Anzahl der Einträge (gemessen bei 10 / 500 / 5.000 Einträgen je Ledger: 5 / 13 / 101 ms und 5 / 144 / 1.420 KB). Aktuell unkritisch, bei etwa einem Kauf pro Tag erst in Jahren relevant, aber es gibt keine Rotations- oder Archivierungsstrategie.
+
+**Für eine spätere Session zu klären:** ob und wann eine Archivierungsstrategie für die Ledger-Dateien selbst sinnvoll wird, z. B. abgeschlossene, weit zurückliegende Positionen in eine separate Archiv-Datei auslagern, sodass die Dashboard-App nur noch die „aktiven“ Daten liest. **Kein akuter Handlungsbedarf**, der Eintrag soll nur verhindern, dass das unbemerkt zum Problem wird.
+
+**Dabei zu beachten:** Die Dashboard-App liest genau diese drei Ledger-Dateien. Wandern abgeschlossene Positionen in eine Archiv-Datei, die die App nicht mitliest, fehlen sie still im Steuer-Export, im realisierten Ergebnis und im PnL-Verlauf. Eine Archivierung ist deshalb zusammen mit der App zu planen, spätestens bevor der Steuer-Export ansteht (siehe Priorität 4 oben).
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
