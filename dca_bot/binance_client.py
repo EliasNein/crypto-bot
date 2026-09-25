@@ -545,8 +545,11 @@ class TradingClient:
           zurückgeben, als wäre der ursprüngliche Call erfolgreich
           gewesen. Die Strategie schreibt daraufhin ganz normal einen
           korrekten Ledger-Eintrag, ohne von dem Zwischenfall zu wissen.
-        - Order nie angenommen oder ohne Wirkung -> `None` wie bisher,
-          der Pending-Eintrag kann weg.
+        - Order ohne Wirkung beendet -> `None` wie bisher, der
+          Pending-Eintrag kann weg.
+        - Order unbekannt (-2013) -> `None`, der Pending-Eintrag BLEIBT
+          aber stehen, damit der naechste Start erneut fragt (siehe
+          Kommentar im Code unten).
         - Unklar -> NICHT raten. Deutliche Fehlermeldung samt
           clientOrderId, Telegram, und der Pending-Eintrag BLEIBT
           stehen, damit die Reconciliation beim nächsten Bot-Start
@@ -579,7 +582,9 @@ class TradingClient:
             )
             return order
 
-        if state in (ORDER_UNKNOWN, ORDER_WITHOUT_EFFECT):
+        if state == ORDER_WITHOUT_EFFECT:
+            # Die Order existiert und ist beendet, ohne etwas bewegt zu
+            # haben - eine eindeutige Antwort, die sich nicht mehr aendert.
             self._pending_store.remove(pending.client_order_id)
             logger.warning(
                 "%s für %s (clientOrderId %s) hat die Börse nicht wirksam "
@@ -588,6 +593,35 @@ class TradingClient:
                 pending.symbol,
                 pending.client_order_id,
                 state,
+            )
+            return None
+
+        if state == ORDER_UNKNOWN:
+            # Binance kennt die clientOrderId (noch) nicht (-2013). Fuer den
+            # laufenden Zyklus heisst das "kein Trade" - die Strategie bucht
+            # nichts. Der Pending-Eintrag bleibt aber bewusst STEHEN
+            # (Code-Ueberpruefung vom 25.09.2026, Punkt B): die Nachfrage
+            # laeuft unmittelbar nach dem Timeout, und eine Order, die bei
+            # Binance noch in Bearbeitung ist, wird erst danach sichtbar.
+            # Bis dahin wurde der Eintrag hier geloescht - fuehrte Binance
+            # die Order doch noch aus, fehlte sie fuer immer im Ledger (der
+            # K2-Schaden). Jetzt prueft die Reconciliation beim naechsten
+            # Start erneut: weiterhin unbekannt -> Eintrag verworfen, doch
+            # ausgefuehrt -> nachgetragen. Aus "verloren" wird "verzoegert
+            # bis zum naechsten Start". Kein Telegram: das ist der
+            # Normalfall einer Order, die Binance nie erreicht hat, und
+            # keine Aufforderung zum Eingreifen.
+            logger.warning(
+                "%s für %s (clientOrderId %s): Binance kennt die Order nach "
+                "dem Verbindungsfehler nicht (%s) - sie wird als 'kein Trade' "
+                "behandelt. Der Eintrag bleibt in '%s' stehen und wird beim "
+                "nächsten Bot-Start erneut geprüft, falls Binance sie doch "
+                "noch ausgeführt hat.",
+                label,
+                pending.symbol,
+                pending.client_order_id,
+                state,
+                self._pending_store.path,
             )
             return None
 
