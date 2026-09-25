@@ -873,6 +873,32 @@ Die Nachricht sagt jetzt, was sie weiß: `letzter erfolgreicher Zyklus <Zeitpunk
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge. Das alte Verhalten (Zeitstempel unbedingt vor `maybe_send`) je Einstiegspunkt einzeln wiederhergestellt: DCA, Grid, Trend und Allocator jeweils 3 Fehlschläge. Das sind genau die drei Tests mit Fehlzyklus; die Gegenprobe bleibt erwartungsgemäß grün.
 
+#### Priorität 3: Mengenlimit für `[GRID-FEHLER]` (25.09.2026)
+
+**Befund.** `main_grid.py` schickte bei jedem fehlgeschlagenen Zyklus `[GRID-FEHLER]` per Telegram. Durch die nächtliche Zwangstrennung ist der praktische Schaden heute klar umrissen: eine Meldung pro Nacht. Bei einer tatsächlich längeren Störung (Internet weg, Testnet down) wären es aber zwölf identische Meldungen pro Stunde gewesen.
+
+**Umgesetzt.** Neue kleine Klasse `CycleErrorNotifier` in `main_grid.py`, nach dem Muster von `_report_failed_sell` („einmal pro Lauf“), nur mit Reset bei Erfolg:
+
+- Die erste Meldung eines Fehlertyps geht per Telegram raus. Sie kündigt dabei an, dass weitere gleichartige Fehler bis zum nächsten erfolgreichen Zyklus nur im Log landen.
+- Weitere Fehlschläge desselben Typs landen nur im Log, mit der Zahl der Fehlzyklen in Folge. Der vollständige Traceback jedes Fehlschlags steht dort unverändert.
+- Nach einem erfolgreichen Zyklus ist alles zurückgesetzt, und die Erholung wird mit der Zahl der Fehlzyklen geloggt. Der nächste Fehler, etwa in der folgenden Nacht, wird also wieder gemeldet.
+- **„Fehlertyp“ ist die Exception-Klasse.** Wird aus dem Timeout mitten in einer Störung ein Verbindungsfehler (`ReadTimeout` → `ConnectionError`), ist das eine neue Information und geht raus. In einer schlechten Nacht können es damit zwei Meldungen statt einer sein.
+
+Bewusst nur beim Grid-Bot: DCA und Trend laufen einmal am Tag, dort ist jeder Fehlschlag ohnehin höchstens eine Meldung pro Tag. Der Allocator (stündlich) hätte bei einer längeren Störung dasselbe Muster mit einer Meldung pro Stunde; er war nicht Teil des Befunds und ist nicht angefasst. Eine Entwarnung per Telegram nach der Erholung gibt es ebenfalls bewusst nicht, weil sie nicht gefordert war. Ob die Störung vorbei ist, zeigen das Log und seit Priorität 2 auch der Heartbeat-Zeitstempel.
+
+**Tests:** 10 neue in `tests/test_grid_cycle_error_notification.py`, Gesamtstand **603, alle grün**. Sechs prüfen die Regel direkt an `CycleErrorNotifier` (erste Meldung, Unterdrückung samt Log-Zeile, Reset nach Erfolg, neuer Typ mitten in der Serie, Erholungs-Log, kein Log im Normalfall). Vier laufen durch die echte `main_grid.main()`, darunter das konkrete Nachtszenario (Erfolg, Erfolg, ein Timeout, Erfolg, Erfolg → genau eine Meldung) und der Nachweis, dass jeder Fehlzyklus weiterhin mit Traceback im Log steht. Als Fehler dienen die `requests`-Exceptions, die bei der Zwangstrennung tatsächlich auftreten.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 6 Mutationen gefangen:
+
+| Mutation | Ergebnis |
+|---|---|
+| altes Verhalten, jeder Fehlzyklus per Telegram | 2 |
+| kein Reset bei Erfolg | 2 |
+| Sperre für alle Typen statt pro Typ | 1 |
+| `main()` ruft `report_success()` nicht auf | 1 |
+| unterdrückter Fehler wird nicht geloggt | 1 |
+| erster Fehler wird nicht gemeldet | 8 |
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
