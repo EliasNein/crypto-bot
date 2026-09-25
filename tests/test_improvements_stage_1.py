@@ -1,6 +1,7 @@
 """
-Tests fuer Stufe 1 der Verbesserungsvorschlaege aus Review-Abschnitt 7 -
-die drei kleinen, vor dem Echtgeld-Schalter faelligen Punkte.
+Tests fuer Stufe 1 der Verbesserungsvorschlaege aus Abschnitt 7 des
+Sicherheitsreviews - die drei kleinen, vor dem Echtgeld-Schalter
+faelligen Punkte.
 
 Anders als die K/W-Punkte war nichts davon als sicherheitskritisch
 eingestuft. Der Ist-Stand-Check am 17.09.2026 hat allerdings gezeigt,
