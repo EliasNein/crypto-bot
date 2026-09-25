@@ -1,7 +1,7 @@
 # Trading-Bot-Projekt: Planung & Recherche
 
-**Stand:** 14. September 2026
-**Status:** Testnet-Betrieb – drei Strategien laufen parallel auf einem gemieteten VPS, vierter Baustein (Allocator) backgetestet, Live-Test steht noch aus. Kein Live-Geld bisher.
+**Stand:** 25. September 2026
+**Status:** Testnet-Betrieb, kein Live-Geld. Der Sicherheitsreview (K1–K5, W1–W18, Infrastruktur) ist seit dem 16.09. abgeschlossen. Der Homeserver läuft faktisch seit dem 16.09.2026 als vollständiges System, mit allen vier Bausteinen und aktivem Allocator-Opt-in für DCA und Trend. Der aktuelle Trading-Status dort wurde am 25.09.2026 verifiziert (siehe 6h). Der formale Cutover (VPS-Abschaltung, finaler Snapshot) bleibt für den 05.10.2026 geplant. Bis zum Vertragsende am 12.10. läuft der VPS isoliert weiter, ohne Allocator. Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026. Seit dem Review sind mehrere Fund-und-Fix-Serien abgeschlossen: die Verbesserungsvorschläge (6i, 17.09.), die Dry-Run-Beträge (22.09.) und die Code-Überprüfung vom 25.09. (6g). Die technische Referenz zum aktuellen Stand steht in Abschnitt 7.
 
 ---
 
