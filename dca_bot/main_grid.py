@@ -43,9 +43,10 @@ KILL_SWITCH_POLL_SECONDS = 5
 # "HTTPSConnectionPool(host='testnet.binance.vision', ...): Read timed out"-
 # Fehler auf dem Homeserver. Ursache ist nicht ein zu langsames Testnet,
 # sondern die nächtliche Zwangstrennung des Heimanschlusses: Die Verbindung
-# reißt ganz ab, der Request scheitert dann voraussichtlich auch nach 20 s.
-# Der Wert schadet nicht und bleibt. Betroffen ist nur der Grid-Bot, weil
-# er alle 5 Minuten abfragt statt einmal am Tag (siehe
+# reißt ganz ab, der Request scheitert dann auch nach 20 s - bestätigt am
+# 26.09.2026 durch einen "read timeout=20" um 00:38:04 UTC, im Fenster der
+# Zwangstrennung. Der Wert schadet nicht und bleibt. Betroffen ist nur der
+# Grid-Bot, weil er alle 5 Minuten abfragt statt einmal am Tag (siehe
 # trading-bot-projekt.md 6g, Nachtrag 25.09.). Bewusst nur hier gesetzt -
 # DCA, Trend und Allocator bleiben beim Bibliotheks-Default.
 REQUEST_TIMEOUT_SECONDS = 20
