@@ -109,6 +109,9 @@ def load_grid_config() -> GridConfig:
     for name, hint in (
         ("GRID_LOWER_LIMIT", "Untere Grid-Grenze."),
         ("GRID_UPPER_LIMIT", "Obere Grid-Grenze."),
+        # Bestimmt zusammen mit der Spanne die Stufenzahl - und damit die
+        # Kapitalbindung genauso direkt wie der Betrag pro Stufe (W-C).
+        ("GRID_SPACING_PCT", "Abstand der Stufen."),
         ("GRID_AMOUNT_PER_LEVEL", "Betrag pro Stufe."),
     ):
         require_explicit_in_live(

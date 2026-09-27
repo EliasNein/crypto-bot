@@ -112,6 +112,15 @@ def load_trend_config() -> TrendConfig:
         use_testnet=use_testnet,
         hint="Das ist die Positionsgröße jedes Einstiegs.",
     )
+    # Der Default 0,5 % stützt sich auf n = 2 simulierte Stop-Loss-Exits
+    # (6f) und ist ausdrücklich erst nach der Kalibrierung mit echten
+    # Fill-Daten live tauglich (Systemcheck vom 27.09.2026, W-C).
+    require_explicit_in_live(
+        "TREND_STOP_LIMIT_OFFSET_PCT",
+        use_testnet=use_testnet,
+        hint="Das ist der Abstand zwischen Stop- und Limit-Preis der echten "
+        "Stop-Loss-Order an der Börse.",
+    )
 
     ema_fast_period = env_int("TREND_EMA_FAST_PERIOD", "20", gt=0)
     ema_slow_period = env_int("TREND_EMA_SLOW_PERIOD", "50", gt=0)
