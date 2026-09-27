@@ -1355,8 +1355,10 @@ class TrendPartialStopFillUnitTestCase(TrendStrategyTestBase):
         from dca_bot.order_utils import quantize_quantity
         from dca_bot.trend_risk import open_quantity
 
-        rest = open_quantity({"quantity": 0.0003, "partial_exit_qty": 0.00015})
-        self.assertEqual(quantize_quantity(rest, 0.00001), 0.00015)
+        # 0.0003 - 0.00017 ist in Fliesskomma 0.00012999999999999996 -
+        # ohne Rundung schluckte die Quantisierung eine ganze stepSize.
+        rest = open_quantity({"quantity": 0.0003, "partial_exit_qty": 0.00017})
+        self.assertEqual(quantize_quantity(rest, 0.00001), 0.00013)
         self.assertEqual(open_quantity({"quantity": 0.0003}), 0.0003)
 
 

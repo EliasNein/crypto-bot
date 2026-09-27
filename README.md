@@ -273,8 +273,11 @@ rm STOP_ALL        # gibt alle wieder frei
 - **Keine Order ohne Ledger-Eintrag:** jede Order steht vor dem
   Netzwerk-Call in einer Pending-Datei. Nach einem Verbindungsfehler oder
   einer Antwort mit unbekanntem Ausgang (HTTP 5xx, −1006/−1007) fragt der
-  Bot bei Binance nach, statt zu raten; der nächste Start trägt Fehlendes
+  Bot bei Binance nach, statt zu raten; der nächste Zyklus trägt Fehlendes
   als `[REKONZILIATION]` nach.
+- **Kein zweiter Verkauf bei unklarem Ausgang:** solange ein Verkauf oder
+  eine Stop-Order ungeklärt ist, verkauft der Bot dieselbe Position nicht
+  erneut - auf dem geteilten Konto ginge das aus fremdem Bestand durch.
 - **Beschädigtes Ledger:** der Bot startet nicht, statt still mit leerer
   Historie weiterzulaufen. Alle Ledger werden atomar geschrieben.
 - **Kein Sofortkauf bei jedem Neustart (DCA)** und **kein doppelter
@@ -294,7 +297,8 @@ rm STOP_ALL        # gibt alle wieder frei
   bei deaktiviertem Trading nie simuliert geschlossen
   (`[GRID-VERKAUF-GESPERRT]`).
 - Ein fehlgeschlagener echter Verkauf lässt die Position offen, der
-  nächste Zyklus versucht es erneut.
+  nächste Zyklus versucht es erneut - bei unklarem Ausgang erst, wenn er
+  geklärt ist.
 - Maximale Kapitalbindung = Anzahl Kaufstufen × `GRID_AMOUNT_PER_LEVEL`
   (kein Tageslimit).
 - `[GRID-FEHLER]` pro Fehlertyp nur einmal per Telegram, bis ein Zyklus
@@ -312,7 +316,11 @@ rm STOP_ALL        # gibt alle wieder frei
   wird eine echte Position nicht angefasst, ihre Stop-Order bleibt
   bestehen (`[TREND-AUSSTIEG-GESPERRT]`).
 - Ein fehlgeschlagener echter Verkauf lässt die Position offen und
-  platziert sofort eine neue Stop-Order.
+  platziert sofort eine neue Stop-Order; bei unklarem Ausgang fragt der
+  Bot bis zu 60 s nach und platziert sie nur, wenn der Verkauf
+  nachweislich nicht stattfand.
+- Hat die Stop-Order teilweise verkauft, wird das verbucht und nur der
+  Rest verkauft.
 
 ### Kapital-Allocator (Details: 7.4)
 
@@ -374,13 +382,14 @@ Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
 - **Grid-Bot:** `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (mit
   realisiertem Gewinn/Verlust dieser Position),
   `[GRID-VERKAUF-FEHLGESCHLAGEN]`, `[GRID-VERKAUF-GESPERRT]`,
-  `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`.
+  `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`,
+  `[GRID-DOPPELVERKAUF]`.
 - **Trend-Following-Bot:** `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`,
   `[TREND-AUSSTIEG]` (mit realisiertem Gewinn/Verlust und
   Ausstiegsgrund), `[TREND-VERKAUF-FEHLGESCHLAGEN]`,
   `[TREND-AUSSTIEG-GESPERRT]`, `[TREND-STOP-LOSS]`, `[TREND-WARNUNG]`,
   `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`, `[TREND-NOTAUS]`,
-  `[TREND-FEHLER]`.
+  `[TREND-FEHLER]`, `[TREND-TEILFUELLUNG]`, `[TREND-DOPPELVERKAUF]`.
 - **Kapital-Allocator:** `[ALLOCATION-UPDATE]` (bei signifikanter
   Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
 - **Alle vier:** `[HEARTBEAT]` (Lebenszeichen, siehe Abschnitt 6).
@@ -436,9 +445,7 @@ K3“).
 ## 9. Tests
 
 ```bash
-python -m unittest tests.test_notifier tests.test_order_utils     tests.test_dca_fee_adjustment tests.test_trend_stop_loss     tests.test_grid_sell_safety tests.test_pending_orders     tests.test_order_reconciliation tests.test_process_lock     tests.test_kill_switch tests.test_stage_b_safety     tests.test_stage_c_safety tests.test_trend_decide_action     tests.test_improvements_stage_1 tests.test_grid_signals     tests.test_allocator_signals tests.test_startup_balance_check     tests.test_audit_positions tests.test_trend_auto_reset \
-    tests.test_fix_dry_run_quote_spent tests.test_request_timeout \
-    tests.test_heartbeat_last_cycle tests.test_cycle_error_notification -v
+python -m unittest discover -s tests -t .
 ```
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
@@ -466,6 +473,7 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_fix_dry_run_quote_spent` | Einmalige Datenkorrektur der Dry-Run-Beträge |
 | `test_request_timeout` | Request-Timeout des Grid-Bots |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat-Zeitstempel, Mengenlimit für Zyklusfehler |
+| `test_shared_account` | Alle Bots auf einem geteilten Konto: Teilfüllung, unklare Verkäufe, Dauerlauf mit Eigentums-Invariante |
 
 Was die einzelnen Tests prüfen und wie ihre Wirksamkeit gemessen wurde,
 steht bei den jeweiligen Fixes in `trading-bot-projekt.md` (6f, 6g, 6i,

@@ -791,6 +791,36 @@ class UnclearSellTestCase(SharedAccountTestBase):
         self.assertTrue(any("[TREND-DOPPELVERKAUF]" in m for m in self.messages), self.messages)
         self.assertEqual([p.client_order_id for p in store.all()], ["trend-zweiter-verkauf"])
 
+    def test_grid_does_not_buy_a_level_again_while_its_buy_is_unclear(self):
+        """
+        Gegenstueck auf der Kaufseite: Der Kauf geht durch, die Antwort geht
+        verloren, die Rueckfrage scheitert. Durchquert der Kurs dieselbe
+        Stufe erneut, bevor der Kauf geklaert ist, darf sie nicht ein zweites
+        Mal gekauft werden - sie gilt ueber den Pending-Eintrag als belegt.
+        """
+        grid = self.start_grid()
+        level_price = grid._levels[3]
+        self.exchange.inject("order_market_buy", "lost")
+        self.exchange.lookup_down = True
+        self.exchange.price = round(level_price - 1.0, 2)
+        grid._last_seen_price = level_price + 1.0
+        grid.execute_once()  # Kauf ausgefuehrt, Ausgang unklar
+
+        self.exchange.price = round(level_price + 1.0, 2)
+        grid.execute_once()  # Kurs wieder ueber der Stufe
+        self.exchange.price = round(level_price - 1.0, 2)
+        grid.execute_once()  # ... und erneut durchquert
+
+        self.assertEqual(len(self.exchange.fills_of("grid", "BUY")), 1)
+        self.assert_ownership()
+
+        self.exchange.lookup_down = False
+        grid.execute_once()  # Rueckfrage klappt, Kauf wird nachgetragen
+
+        self.assertEqual(len(grid._ledger.open_positions()), 1)
+        self.assertEqual(grid._client.pending_orders.all(), [])
+        self.assert_ownership()
+
 
 # ---------------------------------------------------------------------------
 # W-A und W-B
@@ -838,6 +868,52 @@ class LedgerWindowTestCase(SharedAccountTestBase):
         self.assertEqual(
             str(trend._ledger.open_position()["stop_loss_order_id"]), str(stops[0]["orderId"])
         )
+
+    def test_grid_sell_booked_but_not_confirmed_is_cleaned_up_quietly(self):
+        """
+        W-A auf der Verkaufsseite: Der Verkauf steht im Ledger, der Prozess
+        stirbt vor `confirm_booked()`. Die naechste Reconciliation findet den
+        Eintrag und muss ueber die gespeicherte Verkaufs-ID erkennen, dass
+        genau dieser Verkauf schon verbucht ist - ohne sie saehe er wie ein
+        zweiter Verkauf aus und wuerde als Doppelverkauf gemeldet.
+        """
+        self.seed_dca_holdings()
+        grid = self.start_grid()
+        level_price = grid._levels[3]
+        self.exchange.price = round(level_price - 1.0, 2)
+        grid._last_seen_price = level_price + 1.0
+        grid.execute_once()
+        (position,) = grid._ledger.open_positions()
+        self.exchange.price = position["target_sell_price"] * 1.0001
+
+        with mock.patch.object(grid._client, "confirm_booked"):
+            grid.execute_once()  # verkauft und verbucht, Eintrag bleibt
+        self.assertEqual(len(grid._client.pending_orders.all()), 1)
+
+        grid.execute_once()
+
+        self.assertFalse(any("DOPPELVERKAUF" in m for m in self.messages), self.messages)
+        self.assertEqual(grid._client.pending_orders.all(), [])
+        self.assertEqual(len(self.exchange.fills_of("grid", "SELL")), 1)
+        self.assert_ownership()
+
+    def test_trend_exit_booked_but_not_confirmed_is_cleaned_up_quietly(self):
+        """Dasselbe fuer den Trend-Ausstieg (exit_client_order_id)."""
+        self.seed_dca_holdings()
+        trend = self.start_trend()
+        trend._open_position(self.PRICE)
+        self.exchange.price = 44_000.0  # interner Stop-Loss faellig
+
+        with mock.patch.object(trend._client, "confirm_booked"):
+            trend.execute_once()  # verkauft und verbucht, Eintrag bleibt
+        self.assertEqual(len(trend._client.pending_orders.entries_for(side="SELL")), 1)
+
+        trend.execute_once()
+
+        self.assertFalse(any("DOPPELVERKAUF" in m for m in self.messages), self.messages)
+        self.assertEqual(trend._client.pending_orders.entries_for(side="SELL"), [])
+        self.assertEqual(len(self.exchange.fills_of("trend", "SELL")), 1)
+        self.assert_ownership()
 
 
 # ---------------------------------------------------------------------------
