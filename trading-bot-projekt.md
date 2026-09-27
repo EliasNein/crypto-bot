@@ -488,6 +488,8 @@ Auswirkung pro Bot: DCA — gekaufte Menge fehlt, Tageslimit und Stop-Loss-Koste
 
 **Ehrliche Einordnung der Verifikation:** Auf dem Testnet ist dieser Pfad kaum zu provozieren — Verbindungsabbrüche gegen `testnet.binance.vision` sind selten, und ein Prozess-Kill im richtigen Millisekundenfenster noch seltener. Die Wirksamkeit belegen hier die Tests, nicht der Livebetrieb. Im Normalbetrieb ist von dem Mechanismus nichts zu sehen: die Pending-Datei ist leer, ein Eintrag lebt Millisekunden. Die Stelle, an der sich etwas zeigen würde, ist `grep REKONZILIATION logs/*.log`.
 
+*(Korrektur 27.09.2026, Systemcheck: Zwei Annahmen dieses Abschnitts haben nicht gehalten. Erstens entfernte `_place_order()` den Pending-Eintrag nach einer erfolgreichen Order **vor** dem Ledger-Eintrag. Scheiterte danach das Schreiben ins Ledger, war der Trade wieder unsichtbar (W-A). Seitdem schließt die Strategie den Eintrag über `confirm_booked()` erst nach dem Ledger-Eintrag. Zweitens lief Teil B nur beim Start. Seitdem läuft er zu Beginn jedes Zyklus. Die „sechs Abweichungen“ oben gelten unverändert. Details unter „Systemcheck vom 27.09.2026“ weiter unten.)*
+
 ### Sicherheitsreview abgeschlossen: K1–K5 vollständig behoben (16.09.2026)
 
 Mit dem K2-Fix sind **alle fünf kritischen Punkte** aus dem Sicherheitsreview (Claude Opus 5, 15.09.2026) behoben:
@@ -1001,6 +1003,8 @@ Damit schreiben alle drei handelnden Bots bei echten Orders denselben Preis wie 
 
 **Entscheidung: so belassen, kein Code-Änderungsbedarf.** Die Asymmetrie zum Verkauf ist ein etabliertes Projektprinzip und kein Zufall. Ein wiederholter Verkauf senkt das Risiko, und Ledger-Position plus Guthabenprüfung (W11) schützen vor einem Doppelverkauf. Ein wiederholter Kauf erhöht das Risiko, und einen unverbuchten ersten Kauf erkennt nichts. Mit derselben Begründung lässt der Trendbruch-Stop-Loss Verkäufe durch und sperrt Käufe. Ein entgangener Trade ist ein vertretbarer Preis dafür, einen möglichen Doppelkauf bei unklarem Order-Ausgang zu vermeiden.
 
+*(Korrektur 27.09.2026, Systemcheck: Die Aussage „Ledger-Position plus Guthabenprüfung (W11) schützen vor einem Doppelverkauf“ trifft auf dem geteilten Konto nicht zu. W11 prüft nur das **freie** Guthaben, und das enthält das BTC des DCA-Bots. Ein Verkauf mit unklarem Ausgang wurde im nächsten Zyklus wiederholt, und der zweite Verkauf ging aus fremdem Bestand durch. Behoben mit K-B, siehe „Systemcheck vom 27.09.2026“ unten. Die Entscheidung zum Kauf bleibt davon unberührt. Stufen mit ungeklärtem Kauf gelten seitdem zusätzlich als belegt.)*
+
 Die verworfene Alternative wäre eine Wiederholung wie beim Verkauf gewesen. Sicher wäre sie nur mit einer Unterscheidung „eindeutig abgelehnt“ gegen „Ausgang unklar“, und die liefert `place_market_buy()` heute nicht, weil alle drei Fälle `None` ergeben. Dafür hätte die Client-Schnittstelle für alle drei Bots umgebaut werden müssen, dazu kämen Wiederholungszustand, Obergrenzen und ein Mengenlimit für Meldungen. Bei dauerhaft fehlendem Guthaben entstünde alle 5 Minuten eine abgelehnte Order.
 
 #### Punkt B: −2013 nach einem Timeout, Pending-Eintrag bleibt stehen (25.09.2026)
@@ -1012,6 +1016,8 @@ Die verworfene Alternative wäre eine Wiederholung wie beim Verkauf gewesen. Sic
 **Umgesetzt: B1.** In `_resolve_after_network_error()` sind `ORDER_UNKNOWN` (−2013) und `ORDER_WITHOUT_EFFECT` (Order existiert, ist ohne ausgeführte Menge beendet) jetzt getrennt. Nur der zweite Fall ist eine endgültige Antwort und löscht den Eintrag wie bisher. Bei −2013 bekommt die Strategie weiterhin `None` und bucht nichts, der Pending-Eintrag **bleibt aber stehen**. Die Reconciliation beim nächsten Start fragt erneut: Ist die Order weiterhin unbekannt, wird der Eintrag verworfen; ist sie doch ausgeführt, wird sie nachgetragen. Aus „für immer verloren“ wird damit „verzögert bis zum nächsten Start“. Bei den bisher üblichen regelmäßigen Deploys ist der nicht fern. Es gibt keine Telegram-Meldung, weil −2013 im Normalfall eine Order ist, die Binance nie erreicht hat, und keine Aufforderung zum Eingreifen. Ins Log geht eine Warnung mit dem Hinweis auf die Prüfung beim nächsten Start.
 
 **Bewusst nicht umgesetzt: B2**, also nach einer Wartezeit ein zweites Mal nachfragen. Das brächte zusätzliche Komplexität in die Hauptschleife für einen Fall, der ohnehin selten ist, und B1 hat das Risiko bereits von „verloren“ auf „verzögert“ reduziert.
+
+*(Korrektur 27.09.2026, Systemcheck: „Verzögert bis zum nächsten Start“ reichte nicht. In der Zwischenzeit handelte der Bot weiter, als hätte die Order nicht stattgefunden, und verkaufte dieselbe Position ein zweites Mal (K-B). Seitdem läuft die Reconciliation zu Beginn **jedes** Zyklus, und −2013 gilt ab einem Alter des Eintrags von 60 s als endgültig. B2 ist für genau einen Fall umgesetzt: einen Trend-Verkauf mit unklarem Ausgang, dort bis zu 3 × 20 s. Details unter „Systemcheck vom 27.09.2026“ unten.)*
 
 **Tests:** 3 neue in `tests/test_pending_orders.py`, ein bestehender umgestellt, Gesamtstand **622, alle grün**. Der umgestellte Test (`…_order_unknown_is_no_trade_but_entry_stays`) hatte das Löschen bei −2013 festgeschrieben, wie der Grid-Test in Priorität 1. Neu sind die Gegenprobe (eine ohne Wirkung beendete Order löscht den Eintrag weiterhin, sonst wäre „Eintrag bleibt“ auch grün, wenn nie mehr gelöscht würde) und zwei Tests, die zwei Schritte durchspielen: zur Laufzeit −2013, danach die Reconciliation beim nächsten Start. Ist die Order inzwischen gefüllt, wird sie mit der echten Order-Antwort zum Nachtragen weitergereicht. Ist sie weiter unbekannt, wird der Eintrag verworfen, die Pending-Datei wächst also nicht dauerhaft.
 
@@ -1080,6 +1086,54 @@ Reine Notiz für eine spätere Session, nichts umgesetzt.
 **Für eine spätere Session zu klären:** ob und wann eine Archivierungsstrategie für die Ledger-Dateien selbst sinnvoll wird, z. B. abgeschlossene, weit zurückliegende Positionen in eine separate Archiv-Datei auslagern, sodass die Dashboard-App nur noch die „aktiven“ Daten liest. **Kein akuter Handlungsbedarf**, der Eintrag soll nur verhindern, dass das unbemerkt zum Problem wird.
 
 **Dabei zu beachten:** Die Dashboard-App liest genau diese drei Ledger-Dateien. Wandern abgeschlossene Positionen in eine Archiv-Datei, die die App nicht mitliest, fehlen sie still im Steuer-Export, im realisierten Ergebnis und im PnL-Verlauf. Eine Archivierung ist deshalb zusammen mit der App zu planen, spätestens bevor der Steuer-Export ansteht (siehe Priorität 4 oben).
+
+### Systemcheck vom 27.09.2026: Überverkauf auf dem geteilten Konto (K-A, K-B, W-A, W-B)
+
+**Anlass.** Vollständiger Systemcheck mit Blick auf den Echtgeld-Betrieb (Claude Opus 5.5). Die Testsuite lief dabei zum ersten Mal selbst verifiziert statt nur laut Doku: 657 Tests, alle grün. Die vier Befunde unten haben eine gemeinsame Ursache, die keiner der bisherigen Tests sehen konnte: **DCA, Grid und Trend teilen sich ein Binance-Konto.** Die Deckungsprüfung (W11) vergleicht nur gegen das freie Guthaben, und das enthält das BTC des DCA-Bots. Verkauft Grid oder Trend mehr, als ihnen gehört, geht die Order trotzdem durch und verkauft fremden Bestand. Die Fakes aller bisherigen Testdateien starteten mit 1.000 BTC freiem Guthaben und deckten jeden Überverkauf still ab.
+
+**Die Befunde:**
+
+- **K-A, Trend: Teilfüllung der Stop-Order.** Binance storniert auch eine `PARTIALLY_FILLED`-Order, die Antwort trägt `executedQty`. `_resolve_stop_order_before_close()` prüfte nur, ob die Antwort `None` war, und verkaufte danach die **volle** Menge. Dieselbe Lücke gab es beim Start: eine Stop-Order, die teilweise gefüllt und danach beendet wurde, schloss die ganze Position mit dem Teilerlös, und der Rest lag ohne Ledger auf dem Konto. Der Log-Text zu W8 behauptete, ein Verkauf über die volle Menge „würde scheitern“. Auf dem geteilten Konto stimmt das nicht.
+- **K-B, Grid und Trend: zweiter Verkauf nach unklarem Ausgang.** Geht die Antwort auf einen Verkauf verloren und scheitert die Rückfrage (das Muster der nächtlichen Zwangstrennung), blieb die Position offen. Der nächste Zyklus verkaufte mit neuer clientOrderId erneut. War der erste Verkauf durchgegangen, kam der zweite aus dem Bestand des DCA-Bots. Beim Trend-Bot platzierte `_handle_failed_real_sell()` zusätzlich sofort eine neue Stop-Order über die volle Menge.
+- **W-A: Pending-Eintrag vor dem Ledger-Eintrag entfernt.** `_place_order()` löschte den Eintrag direkt nach der Antwort. Scheiterte danach das Schreiben ins Ledger, war der Trade unsichtbar, der K2-Schaden über einen anderen Weg.
+- **W-B, Trend: Stop-Order mit unklarem Ausgang.** Ging die Antwort auf eine Stop-Order verloren, platzierte `_ensure_stop_loss_protection()` im nächsten Zyklus eine zweite über dieselbe Menge.
+
+**Umgesetzt, gemeinsamer Mechanismus.** Der Pending-Eintrag einer Order ist jetzt die Sperre für die zugehörige Position:
+
+- **Reconciliation zu Beginn jedes Zyklus**, in allen drei Bots, direkt nach der Notaus-Prüfung. Das ist dieselbe Funktion wie beim Start. Bei leerer Pending-Datei (dem Normalfall) entsteht kein einziger API-Aufruf. Zur Laufzeit geht `[REKONZILIATION]`/`[ORDER-UNKLAR]` pro clientOrderId nur einmal je Prozesslauf per Telegram raus.
+- **−2013 ist ab 60 s endgültig** (`UNKNOWN_FINAL_AFTER_SECONDS`). Binance prüft `recvWindow` (5 s) ein zweites Mal direkt vor der Matching Engine, und die API wartet höchstens 10 s auf die Engine. Eine Order kann also nicht nach mehr als etwa 15 s noch auftauchen, 60 s sind der Sicherheitsabstand. Das gilt beim Start und zur Laufzeit gleich.
+- **`confirm_booked()` nach dem Ledger-Eintrag** (W-A) an allen 8 Order-Stellen. Stirbt der Prozess zwischen Ledger und Aufruf, räumt die nächste Reconciliation über die Idempotenz auf.
+- **Die Verkaufs-ID steht im Ledger:** `GridPosition.sell_client_order_id`, `TrendTrade.exit_client_order_id`. Damit ist das Nachtragen auch beim Verkauf idempotent. Findet die Reconciliation einen Verkauf zu einer Position, die mit einer **anderen** Order geschlossen wurde, meldet sie `[GRID-DOPPELVERKAUF]`/`[TREND-DOPPELVERKAUF]` als ERROR und per Telegram, mit Menge und Erlös. Der Eintrag bleibt stehen, bis ein Mensch ihn klärt (`ManualReviewRequired`). Nach dem Fix sollte das nicht mehr vorkommen, es ist die zweite Sicherung dahinter.
+
+**Umgesetzt, K-B und W-B:**
+
+- **Grid:** Solange für eine Position ein Verkauf in der Pending-Datei steht, wird sie nicht erneut verkauft (`[GRID-VERKAUF-UNGEKLAERT]` im Log). `[GRID-VERKAUF-FEHLGESCHLAGEN]` sagt jetzt, ob der nächste Zyklus es erneut versucht. Gegenstück beim Kauf: Stufen mit ungeklärtem Kauf gelten als belegt.
+- **Trend:** Nach einem Verkauf mit unklarem Ausgang wird bis zu dreimal im Abstand von 20 s nachgefragt. Bestätigt → Ausstieg verbuchen. Ohne Wirkung oder endgültig unbekannt → Stop-Order neu platzieren wie nach einer Ablehnung. Weiter unklar → **keine** neue Stop-Order, dafür `[TREND-WARNUNG]` „möglicherweise ungeschützt“. Solange ein Verkauf oder eine Stop-Order ungeklärt ist, gibt es keinen erneuten Ausstieg und keine neue Stop-Order. `_ensure_stop_loss_protection()` zählt den Zustand aber weiter und meldet ihn ab 3 Zyklen. Einen neuen Einstieg gibt es nicht, solange ein Kauf ungeklärt ist.
+
+**Umgesetzt, K-A:**
+
+- Die Storno-Antwort und jede beendete Stop-Order werden nach `executedQty` ausgewertet, der Status ausschließlich über `order_lifecycle_state()` (die direkten String-Vergleiche sind weg, damit stimmt die W8-Zusage). Ob eine Stop-Order die Position geschlossen hat, entscheidet die Menge mit einer Toleranz von einer `stepSize`, nicht der Status `FILLED`.
+- **Teilfüllung im Ledger**, rein zusätzlich: `partial_exit_qty`, `partial_exit_quote` (brutto), `partial_exit_proceeds` (netto), `partial_exit_order_ids`. `TrendLedger.record_partial_stop_fill()` schreibt alles in einem atomaren Schritt, löst die Stop-Zuordnung und ist über die orderId idempotent. `quantity` und `quote_spent` bleiben die Werte des Einstiegs. Die offene Menge liefert `open_quantity()`, und die gilt überall, wo verkauft, abgesichert oder abgeglichen wird (auch im Positions-Audit).
+- Danach wird nur der **Rest** verkauft. `realized_pnl` enthält beide Teile, `exit_price` ist der mengengewichtete Durchschnitt. Scheitert der Restverkauf, deckt die neue Stop-Order nur den Rest. `[TREND-TEILFUELLUNG]` in Log und Telegram, `[STOP-FILL-ANALYSE]` auch für die Teilfüllung.
+- Liegt der Rest unter dem Mindestvolumen, wird die Position geschlossen und der Rest als `dust_qty` ausgewiesen (`[TREND-STAUB]`, Telegram mit „Staub“). Dasselbe gilt in `_ensure_stop_loss_protection()`, wo eine Ersatz-Order über den Rest sonst abgelehnt würde.
+
+**Die fünf Entscheidungen** (vorab vorgelegt, bestätigt): (1) nach einer Teilfüllung `exit_reason = "stop_loss"` mit Latch, auch bei einem Signal-Ausstieg; (2) bis zu 60 s warten bei unklarem Trend-Verkauf (3 × 20 s) statt sofort bis zu 24 h ohne Absicherung, in dieser Zeit reagiert der Notaus verzögert; (3) Staub: Position schließen, Rest melden; (4) 60-s-Grenze für −2013; (5) ein erkannter Doppelverkauf bleibt bis zur manuellen Klärung stehen.
+
+**Tests.** Neue Datei `tests/test_shared_account.py` mit einem `FakeExchange`: Er ersetzt den **rohen** python-binance-Client, darüber laufen der echte `TradingClient` und die echten Strategien. Ein Konto mit `free`/`locked` für alle Bots, durchgesetzte Deckung (−2010), Storno auch bei `PARTIALLY_FILLED`, Mindestvolumen, eingespielte Fehler („Order ausgeführt, Antwort verloren“, „Rückfrage scheitert“). DCA hält freies BTC wie auf dem Homeserver. Nach jedem Szenario gilt für jeden Bot eine Invariante, die an keinem Codepfad hängt: netto nie mehr verkauft als gekauft, nie mehr gebunden als besessen, Börsenbestand = Ledger + ungeklärte Pending-Orders + Staub. Dazu 12 Szenarien (3 × K-A, 5 × K-B, 4 × W-A/W-B) und ein Dauerlauf über 8 Seeds × 200 Schritte mit DCA, Grid und Trend, zufälligen Kursen, Neustarts und Netzwerkfehlern, die Invariante nach jedem Schritt. Alle Szenarien wurden zuerst als erwartete Fehlschläge gegen den alten Code eingecheckt und schlugen mit der erwarteten Regel fehl. Mit jedem Fix-Schritt wurde die Markierung entfernt.
+
+Bestehende Tests: `test_grid_sell_safety.py`, der Wiederholungstest (bisher Zeile 417) wurde **ersetzt**. Er gilt jetzt nur nach einer eindeutigen Ablehnung, das Gegenstück prüft, dass bei unklarem Ausgang nicht erneut verkauft wird. Die Trend-Tests zu K1 sind ebenso aufgeteilt (neue Klasse `TrendUnclearSellTestCase`, 6 Tests). Neu sind außerdem `TrendPartialStopFillUnitTestCase` (6), `RuntimeReconciliationTestCase` (7) und ein Audit-Test. Die Fakes der übrigen Dateien haben eine echte `PendingOrderStore` im Speicher (`tests/fake_pending.py`), und der Trend-Fake storniert wie Binance auch teilgefüllte Orders. `tests/__init__.py` ist neu, damit läuft die ganze Suite über `python -m unittest discover -s tests -t .`. Gesamtstand **693, alle grün, keine erwarteten Fehlschläge mehr.**
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge (693 Tests, mit `-B`), alle 28 Mutationen gefangen, vier davon erst im zweiten Anlauf. Das Messskript prüft vor jeder Mutation, dass der Anker genau einmal vorkommt. Im ersten Lauf schlug das bei allen Ankern in `trend_strategy.py` an: die Datei hat gemischte Zeilenenden. Diese Mutationen wurden deshalb gar nicht erst ausgeführt statt still als „gefangen“ gezählt.
+
+- **K-A (11):** `executedQty` der Storno-Antwort ignoriert (5); Rest = volle Menge (3); Teilerlös weggelassen (2); Idempotenz der Teilfüllung entfernt (1); Ersatz-Stop nach Fehlschlag über die volle Menge (1); Staub-Regel im Ausstieg entfernt (1); `exit_reason` bleibt `signal` (1); beendete Order mit Teilfüllung, Rest nicht verkauft (1); Teilfüllung als Vollfüllung behandelt, also der alte Code (6); Staub-Regel in `_ensure_stop_loss_protection` entfernt (1); `open_quantity` ohne Rundung (1).
+- **K-B (10):** Sperre im Grid-Verkauf entfernt (3); Sperre im Trend-Ausstieg entfernt (1); neue Stop-Order trotz unklarem Verkauf (6); Altersgrenze für −2013 entfernt (3); Grid-Verkaufs-ID nicht gespeichert (1); Trend-Ausstiegs-ID nicht gespeichert (1); ID-Vergleich in der Grid-/Trend-Reconciliation entfernt (je 1); ungeklärter Grid-Kauf belegt die Stufe nicht (1); Trend-Einstiegssperre entfernt (1).
+- **W-A/W-B (7):** Pending-Eintrag wieder vor dem Ledger entfernt (2); `confirm_booked` beim Grid-Verkauf vergessen (1, der Dauerlauf); Reconciliation am Zyklusanfang entfernt, je Bot (Trend 2, Grid 1, DCA 1); Sperre in `_ensure_stop_loss_protection` entfernt (2); Telegram-Mengenlimit zur Laufzeit entfernt (1).
+
+**Was der erste Lauf aufgedeckt hat:** Vier Mutationen überlebten. `open_quantity` ohne Rundung überlebte, weil der Test ausgerechnet 0,0003 − 0,00015 nahm, das in Fließkomma exakt aufgeht. Jetzt nimmt er 0,0003 − 0,00017 (= 0,00012999…, ohne Rundung würde eine ganze `stepSize` verschluckt). Die beiden gespeicherten Verkaufs-IDs überlebten, weil kein Test den regulären Weg „verkauft und verbucht, Absturz vor `confirm_booked()`“ abdeckte. Genau dafür sind die IDs da, ohne sie meldet die nächste Reconciliation einen falschen Doppelverkauf. Dafür gibt es jetzt je einen Test für Grid und Trend. Die belegte Stufe beim ungeklärten Grid-Kauf hatte gar keinen Test, jetzt gibt es ein Szenario mit zweitem Durchqueren.
+
+**Hinweis für die Dashboard-App.** Alle neuen Felder kommen nur hinzu, bestehende Dateien bleiben lesbar. `realized_pnl` enthält eine Teilfüllung bereits. Nur solange eine Trend-Position nach einer Teilfüllung noch offen ist, zeigt `quantity` die Menge beim Einstieg und nicht die offene Menge (`quantity − partial_exit_qty`). `dust_qty` steht an geschlossenen Trades und ist Bestand, der auf dem Konto bleibt.
+
+**Bewusst nicht in dieser Runde:** Unterkonten pro Bot. Das wäre die eigentliche Lösung für das geteilte Konto, ist aber eine Konto- und Betriebsentscheidung. Ebenso offen aus dem Systemcheck: W-C (Pflichtprüfung im Live-Modus), W-D (`test_connection.py`), W-E (`check_orders.py`), W-F (Notaus-Doku), W-G (Allocator-Backtest), W14. Der Positions-Audit rechnet Staub nicht dem Trend-Bot zu, er erscheint dort als nicht zugeordneter Überschuss (kein Befund).
 
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
@@ -1388,15 +1442,29 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   `BinanceAPIException` meldet:
   ausgeführt → die echten Order-Daten werden zurückgegeben und regulär
   verbucht; nie angenommen (Fehlercode −2013) → für diesen Zyklus als
-  "kein Trade" gewertet, der Eintrag bleibt aber bis zum nächsten Start
-  stehen (die Nachfrage kommt unmittelbar nach dem Timeout, eine noch
-  laufende Order würde erst danach sichtbar); unklar → **nicht
-  geraten**, sondern `ERROR` + Telegram, und
-  der Eintrag bleibt für den nächsten Start stehen. Beim Bot-Start
-  arbeitet jeder Bot verbliebene Einträge ab und trägt fehlende
-  Ledger-Einträge als `[REKONZILIATION]` nach. Das schließt auch das
-  Fenster, das ohne jeden Netzwerkfehler durch einen Prozess-Kill
-  zwischen Order und Ledger-Eintrag entstand.
+  "kein Trade" gewertet, der Eintrag bleibt aber stehen (die Nachfrage
+  kommt unmittelbar nach dem Timeout, eine noch laufende Order würde erst
+  danach sichtbar) und gilt erst ab einem Alter von 60 s als endgültig
+  unbekannt; unklar → **nicht geraten**, sondern `ERROR` + Telegram, und
+  der Eintrag bleibt stehen. Der Eintrag wird auch nach einer
+  erfolgreichen Order erst entfernt, **nachdem** die Strategie den Trade
+  im Ledger hat (`confirm_booked()`). Zu Beginn **jedes Zyklus** und beim
+  Bot-Start arbeitet jeder Bot verbliebene Einträge ab und trägt fehlende
+  Ledger-Einträge als `[REKONZILIATION]` nach (zur Laufzeit per Telegram
+  nur einmal je Order und Prozesslauf). Das schließt auch das Fenster,
+  das ohne jeden Netzwerkfehler durch einen Prozess-Kill zwischen Order
+  und Ledger-Eintrag entstand.
+- **Kein zweiter Verkauf, solange der erste ungeklärt ist** (seit
+  27.09.2026): Steht für eine Position noch ein Verkauf oder eine
+  Stop-Order in der Pending-Datei, verkauft der Bot sie nicht erneut und
+  platziert keine weitere Stop-Order. Ohne diese Sperre ging ein zweiter
+  Verkauf auf dem geteilten Konto durch, gedeckt vom Bestand eines
+  anderen Bots. Die Verkaufs-ID steht im Ledger
+  (`sell_client_order_id`/`exit_client_order_id`), das Nachtragen ist
+  damit idempotent. Ein Verkauf zu einer Position, die mit einer anderen
+  Order geschlossen wurde, wird als `[GRID-DOPPELVERKAUF]`/
+  `[TREND-DOPPELVERKAUF]` gemeldet und bleibt bis zur manuellen Klärung in
+  der Pending-Datei.
 - **Beschädigtes Ledger stoppt den Bot, statt still zurückzusetzen**:
   Tageslimit und Stop-Loss-Kostenbasis werden bei jedem Zyklus aus der
   Ledger-Datei berechnet. Eine vorhandene, aber unparsbare Datei als
@@ -1519,7 +1587,11 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   dabei ohne Zugriff auf fremde Ledger beantworten - jede Order trägt
   seit dem K2-Fix ein Bot-Präfix in ihrer `clientOrderId`. Die Prüfung
   ist bewusst so gebaut, dass sie keine Fehlalarme erzeugen kann und
-  dafür nicht jeden Fall erkennt. Ein **nicht abrufbares** Guthaben lässt
+  dafür nicht jeden Fall erkennt. **Was sie nicht kann:** wissen, wem das
+  freie Guthaben gehört. Freies BTC des DCA-Bots deckt einen Überverkauf
+  von Grid oder Trend ab. Gegen einen Doppelverkauf schützt deshalb nicht
+  diese Prüfung, sondern die Sperre über die Pending-Datei (oben).
+  Ein **nicht abrufbares** Guthaben lässt
   den Verkauf zu: ein Netzwerkfehler ist keine Aussage über das Konto,
   und einen Stop-Loss-Ausstieg deswegen zu verweigern wäre die
   gefährlichere Richtung.
@@ -1661,9 +1733,14 @@ die Ergebnisse und einen wichtigen Caveat zur Preisspanne.
   zurück - im Dry-Run UND bei einem echten API-Fehler. Beide werden
   unterschieden: bei einem echten Fehler wird **kein** Erlös aus
   `quantity * price` erfunden, die Position bleibt **offen** im Ledger
-  (`[GRID-VERKAUF-FEHLGESCHLAGEN]` im Log und per Telegram) und der
-  nächste Zyklus versucht den Verkauf automatisch erneut, da ihr
-  Sell-Target weiterhin erreicht ist. Anders als beim Trend-Bot muss
+  (`[GRID-VERKAUF-FEHLGESCHLAGEN]` im Log und per Telegram). Nach einer
+  **eindeutigen** Ablehnung versucht der nächste Zyklus den Verkauf
+  automatisch erneut, da ihr Sell-Target weiterhin erreicht ist. Ist der
+  Ausgang **unklar** (Pending-Eintrag steht noch), wird nicht erneut
+  verkauft (`[GRID-VERKAUF-UNGEKLAERT]`), bis die Reconciliation zu
+  Beginn eines Zyklus ihn geklärt hat: ausgeführt → Position mit genau
+  dieser Order geschlossen, ohne Wirkung → regulärer Verkauf. Ebenso gilt
+  eine Stufe mit ungeklärtem Kauf als belegt. Anders als beim Trend-Bot muss
   dabei keine Absicherung wiederhergestellt werden - der Grid-Bot
   platziert nie eine exchange-seitige Stop-Order und storniert vor einem
   Verkauf entsprechend auch keine. Die Telegram-Meldung kommt pro
@@ -1673,7 +1750,8 @@ die Ergebnisse und einen wichtigen Caveat zur Preisspanne.
   `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (mit realisiertem
   Gewinn/Verlust dieser Position), `[GRID-VERKAUF-FEHLGESCHLAGEN]`,
   `[GRID-VERKAUF-GESPERRT]`,
-  `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`.
+  `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`,
+  `[GRID-DOPPELVERKAUF]` (seit 27.09.2026, siehe 7.1).
 - **Mengenlimit für Zyklusfehler:** Ein fehlgeschlagener Zyklus meldet
   `[GRID-FEHLER]` per Telegram nur beim ersten Auftreten seines
   Fehlertyps (Exception-Klasse). Weitere gleichartige Fehlschläge gehen
@@ -1764,7 +1842,8 @@ Bullenmarkt).
   realisiertem Gewinn/Verlust und Ausstiegsgrund),
   `[TREND-VERKAUF-FEHLGESCHLAGEN]`, `[TREND-AUSSTIEG-GESPERRT]`, `[TREND-STOP-LOSS]`,
   `[TREND-WARNUNG]`, `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`,
-  `[TREND-NOTAUS]`, `[TREND-FEHLER]`.
+  `[TREND-NOTAUS]`, `[TREND-FEHLER]`, seit 27.09.2026 außerdem
+  `[TREND-TEILFUELLUNG]` und `[TREND-DOPPELVERKAUF]`.
 
 #### Echter, exchange-seitiger Stop-Loss
 
@@ -1793,7 +1872,9 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   er selbst per Market-Order verkauft - sonst bliebe eine verwaiste
   Sell-Order an der Börse zurück. Ein Stornierungsfehler (z.B. Order war
   zwischenzeitlich bereits gefüllt) wird nur geloggt, nicht als Fehler
-  behandelt.
+  behandelt. Die Storno-Antwort wird nach `executedQty` ausgewertet: hat
+  die Order schon teilweise verkauft, wird das verbucht und nur der Rest
+  verkauft (siehe „Teilweise gefüllte Stop-Order“ unten).
 - **Erkennung einer bereits gefüllten Stop-Order:** vor jeder normalen
   Zyklus-Entscheidung fragt der Bot den Order-Status der hinterlegten
   Stop-Loss-Order ab. Ist sie bereits `FILLED` (die Börse hat also schon
@@ -1815,12 +1896,29 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   ausdrücklich nicht als „Order weg": sie sagt nichts über die Order,
   und ein Netzwerkhänger würde sonst eine zweite Order über dieselbe
   Menge auslösen.
-- **Teilweise gefüllte Stop-Order** (`PARTIALLY_FILLED`): wird gemeldet
-  (Log + Telegram), aber bewusst **nicht** korrigiert – die Order lebt
-  noch und kann vollständig füllen, jede jetzt notierte Teilmenge wäre
-  im nächsten Moment falsch. Sobald sie einen Endzustand erreicht,
-  greift der reguläre Pfad mit den echten Fülldaten. Bei 24-Stunden-Takt
-  ist das höchstens eine Erinnerung pro Tag.
+- **Teilweise gefüllte Stop-Order** (`PARTIALLY_FILLED`): solange sie
+  lebt, wird sie gemeldet (Log + Telegram), aber bewusst **nicht**
+  korrigiert – sie kann noch vollständig füllen, jede jetzt notierte
+  Teilmenge wäre im nächsten Moment falsch. Bei 24-Stunden-Takt ist das
+  höchstens eine Erinnerung pro Tag. **Endet** sie mit einer Teilfüllung
+  (storniert durch den eigenen Ausstieg, abgelaufen, manuell storniert),
+  wird die Teilfüllung verbucht und danach nur der **Rest** verkauft, als
+  Stop-Loss-Ausstieg mit Latch, auch wenn der Ausstieg vom Signal kam
+  (`[TREND-TEILFUELLUNG]`). Verbucht wird rein zusätzlich:
+  `partial_exit_qty`, `partial_exit_quote` (brutto),
+  `partial_exit_proceeds` (netto) und `partial_exit_order_ids`, atomar und
+  über die orderId idempotent. `quantity` und `quote_spent` bleiben die
+  Werte des Einstiegs; verkauft, abgesichert und abgeglichen wird die
+  offene Menge `open_quantity()` = `quantity − partial_exit_qty`.
+  `realized_pnl` enthält beide Teile, `exit_price` ist der
+  mengengewichtete Durchschnitt. Ob eine beendete Order die Position
+  geschlossen hat, entscheidet die Menge (Toleranz eine `stepSize`),
+  nicht der Status `FILLED`. Liegt der Rest unter dem Mindestvolumen,
+  wird die Position geschlossen und der Rest als `dust_qty` gemeldet
+  (`[TREND-STAUB]`, Telegram). Bis zum 27.09.2026 verkaufte der Ausstieg
+  hier die volle Menge, auf dem geteilten Konto aus fremdem Bestand, und
+  eine beendete Order mit Teilfüllung schloss die ganze Position mit dem
+  Teilerlös.
 - **Eine einzige Regel für Order-Status:** die Bewertung, ob eine Order
   gefüllt, noch aktiv, beendet oder unlesbar ist, steht genau einmal im
   Projekt (`order_lifecycle_state()` in `pending_orders.py`) und wird
@@ -1889,7 +1987,18 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   Ledger. Schlägt auch das fehl, wird der doppelt kritische Zustand
   (weder verkauft noch exchange-seitig abgesichert) als `ERROR` geloggt
   und per Telegram gemeldet; die stornierte Order-ID wird aus dem Ledger
-  entfernt, statt eine tote Order als Absicherung auszuweisen.
+  entfernt, statt eine tote Order als Absicherung auszuweisen. Das gilt
+  nach einer **eindeutigen** Ablehnung. Ist der Ausgang des Verkaufs
+  **unklar** (Pending-Eintrag steht noch), fragt der Bot bis zu dreimal im
+  Abstand von 20 s nach (`UNCLEAR_SELL_RECHECKS`,
+  `UNCLEAR_SELL_RECHECK_SECONDS`): ausgeführt → Ausstieg verbuchen; ohne
+  Wirkung oder nach 60 s weiter unbekannt → neue Stop-Order wie oben;
+  weiter unklar → **keine** neue Stop-Order (sie wäre, falls der Verkauf
+  durchging, aus fremdem Bestand gedeckt), dafür `[TREND-WARNUNG]`
+  „möglicherweise ungeschützt“. Bis der Eintrag geklärt ist, gibt es für
+  diesen Trade keinen erneuten Ausstieg (`[TREND-AUSSTIEG-UNGEKLAERT]`) und
+  keine neue Stop-Order; der fehlende Schutz wird gezählt und ab 3 Zyklen
+  gemeldet. Ein ungeklärter Kauf sperrt neue Einstiege.
 - **Selbstheilende Absicherung:** In jedem Zyklus, in dem eine offene,
   echte Position NICHT geschlossen wird, sowie beim Reconciliation-Schritt
   am Bot-Start prüft der Bot, ob überhaupt eine Stop-Loss-Order hinterlegt
@@ -2096,6 +2205,17 @@ allen drei `main*.py` hat einen eigenen Test; er liest den Quelltext
 der jeweiligen `main()`, statt sie auszuführen, und belegt damit genau
 den Fehler, der hier realistisch ist - drei beinahe identische
 Aufrufstellen, von denen später eine vergessen wird.
+
+`test_shared_account.py` (seit 27.09.2026) ist die einzige Testdatei, die
+das **geteilte Konto** abbildet: echter `TradingClient` und echte
+Strategien über einem `FakeExchange`, der den rohen python-binance-Client
+ersetzt und Deckung, Storno-Semantik, Mindestvolumen und Netzwerkfehler
+wie Binance behandelt. Geprüft wird eine Eigentums-Invariante pro Bot,
+unabhängig vom Codepfad (Details in 6g, „Systemcheck vom 27.09.2026“).
+Die übrigen Fakes starten weiterhin mit reichlich freiem Guthaben - neue
+Verkaufspfade gehören deshalb auch hier getestet.
+
+Die ganze Suite: `python -m unittest discover -s tests -t .`
 
 ---
 
