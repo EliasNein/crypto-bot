@@ -1175,6 +1175,18 @@ Die fünf übrigen „wichtigen“ Funde aus dem Systemcheck, voneinander unabh�
 
 Die Bot-Zuordnung überlebte im ersten Lauf. Die Zusicherung lautete `"grid" in grid_line`, und die Zeile enthält „grid“ schon in der clientOrderId selbst, die Prüfung war also immer wahr. Sie prüft jetzt die Spalte exakt, für Grid und DCA. Dieselbe Fehlerklasse wie der halbe Test beim Folgefund aus K3: eine Zusicherung, die auch ohne das geprüfte Verhalten erfüllt ist.
 
+#### W-D: `test_connection.py` gelöscht (27.09.2026)
+
+**Befund.** `python -m dca_bot.test_connection` rief nach Preis- und Guthabenabfrage `DCAStrategy.execute_once()` direkt auf. Bei `DCA_BOT_ENABLE_TRADING=true` war das ein **echter Kauf**, und zwar ohne alles, was `main.py` um einen Zyklus herum aufbaut: ohne Prozess-Lock (W4, der Kauf liefe also auch neben dem laufenden Service), ohne Live-Warnung (W12), ohne initialisierten Notifier (ein `[ORDER-UNKLAR]` ginge ins Leere) und ohne die W2-Wartezeit. Nirgends dokumentiert, und der Name klang harmlos.
+
+**Entscheidung: Option B, löschen** (statt A, Umbau zu einem reinen Verbindungstest). Seit W-E leistet `python -m dca_bot.check_orders` ohne Argumente alles, was das Skript an Verbindungstest bot: Kurs, signierter Guthabenabruf (prüft die Keys), dazu die letzten Orders. Und es kann strukturell keine Orders platzieren. Ein nur-lesendes Werkzeug weniger, das nur-lesend bleiben muss. Das Skript war außer in seinem eigenen Docstring nirgends erwähnt.
+
+**Gegen die Wiederholung:** Ein neuer Test hält fest, dass jedes der drei Strategie-Module (`strategy`, `grid_strategy`, `trend_strategy`) nur von seinem Einstiegspunkt importiert wird. Geprüft wird über den Syntaxbaum, nicht per Textsuche, weil `allocator.py` und `grid_backtest.py` die Strategien in Kommentaren erwähnen. Erkannt werden relative, `from . import`- und absolute Importe.
+
+**Tests:** 3 neue in `tests/test_strategy_entry_points.py`, Gesamtstand **733, alle grün**. Ein Prämissen-Test belegt, dass die drei `main*.py`-Importe überhaupt erkannt werden, sonst wäre der Haupttest auch mit einer Erkennung grün, die nichts findet. Gegen den alten Stand (vor dem Löschen) schlugen zwei der drei Tests fehl, der Haupttest mit `test_connection.py importiert strategy`.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 3 Mutationen gefangen (je 1): `check_orders.py` importiert `DCAStrategy` relativ, `audit_positions.py` importiert `grid_strategy` über `from . import`, `reset_trend_stop_loss.py` importiert `dca_bot.trend_strategy` absolut.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.

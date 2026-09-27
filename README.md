@@ -468,8 +468,11 @@ nächsten Zyklus nach“. Eine gescheiterte Abfrage ist keine Aussage über
 die Order (Exit-Code 2).
 
 Ohne Argumente zeigt es je Symbol der drei Bots Kurs, Guthaben und die
-letzten Orders (`--limit`, Default 10) mit clientOrderId und Bot. Das
-Skript liest nur: Es nutzt denselben Client wie das Positions-Audit
+letzten Orders (`--limit`, Default 10) mit clientOrderId und Bot. Das ist
+zugleich der **Verbindungstest**: Kommen Kurs und Guthaben an,
+funktionieren Verbindung und API-Keys. (Das frühere
+`python -m dca_bot.test_connection` ist entfernt, es löste bei aktivem
+Trading einen echten DCA-Kauf aus.) Das Skript liest nur: Es nutzt denselben Client wie das Positions-Audit
 (8.1), der strukturell keine Orders platzieren kann.
 
 ## 9. Tests
@@ -505,6 +508,7 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat-Zeitstempel, Mengenlimit für Zyklusfehler |
 | `test_shared_account` | Alle Bots auf einem geteilten Konto: Teilfüllung, unklare Verkäufe, Dauerlauf mit Eigentums-Invariante |
 | `test_check_orders` | Orders nachschlagen (nur lesend), Abgleich mit Pending-Datei und Ledger |
+| `test_strategy_entry_points` | Nur die Einstiegspunkte benutzen die handelnden Strategien |
 
 Was die einzelnen Tests prüfen und wie ihre Wirksamkeit gemessen wurde,
 steht bei den jeweiligen Fixes in `trading-bot-projekt.md` (6f, 6g, 6i,
