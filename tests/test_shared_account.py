@@ -746,7 +746,6 @@ class UnclearSellTestCase(SharedAccountTestBase):
         """Ein Verkauf, der real an der Boerse lief (Ausgang war verloren)."""
         self.exchange.order_market_sell(SYMBOL, qty, client_order_id)
 
-    @unittest.expectedFailure
     def test_grid_reconciliation_reports_a_double_sale_instead_of_swallowing_it(self):
         """
         Zweite Sicherung dahinter: Ist die Position schon geschlossen, aber
@@ -775,7 +774,6 @@ class UnclearSellTestCase(SharedAccountTestBase):
             "Der Eintrag bleibt bis zur manuellen Klaerung stehen",
         )
 
-    @unittest.expectedFailure
     def test_trend_reconciliation_reports_a_double_sale_instead_of_swallowing_it(self):
         self.seed_dca_holdings()
         trend = self.start_trend()
@@ -805,7 +803,6 @@ class UnclearSellTestCase(SharedAccountTestBase):
 
 
 class LedgerWindowTestCase(SharedAccountTestBase):
-    @unittest.expectedFailure
     def test_buy_whose_ledger_entry_failed_is_booked_in_the_next_cycle(self):
         """
         Reproduktion 3 (W-A): Die Order ist ausgefuehrt, das Schreiben ins
@@ -824,7 +821,6 @@ class LedgerWindowTestCase(SharedAccountTestBase):
         self.assertEqual(len(dca._ledger._read()), 2)
         self.assert_ownership()
 
-    @unittest.expectedFailure
     def test_trend_places_no_second_stop_order_after_an_unclear_one(self):
         """
         Reproduktion 4 (W-B): Die Stop-Order liegt an der Boerse, ihre

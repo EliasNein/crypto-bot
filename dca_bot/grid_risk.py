@@ -48,6 +48,14 @@ class GridPosition:
     sell_price: float | None = None
     sold_at: str | None = None
     realized_pnl: float | None = None
+    # Selbstvergebene `newClientOrderId` der VERKAUFS-Order (Systemcheck vom
+    # 27.09.2026, K-B). Macht das Nachtragen eines Verkaufs idempotent und
+    # unterscheidbar: Ist die Position schon geschlossen, zeigt der
+    # Vergleich mit dieser ID, ob die Order aus der Pending-Datei DIESER
+    # Verkauf war (nichts zu tun) oder ein ZWEITER (Doppelverkauf). Ohne
+    # sie waren beide Faelle gleich - und ein Doppelverkauf ging als
+    # "bereits verbucht" durch. None im Dry-Run und bei Altbestand.
+    sell_client_order_id: str | None = None
 
     @staticmethod
     def new(
@@ -222,7 +230,12 @@ class GridLedger:
         self._write(records)
 
     def record_sell(
-        self, position_id: str, sell_price: float, sold_at: str, realized_pnl: float
+        self,
+        position_id: str,
+        sell_price: float,
+        sold_at: str,
+        realized_pnl: float,
+        sell_client_order_id: str | None = None,
     ) -> None:
         records = self._read()
         for r in records:
@@ -231,6 +244,7 @@ class GridLedger:
                 r["sell_price"] = sell_price
                 r["sold_at"] = sold_at
                 r["realized_pnl"] = realized_pnl
+                r["sell_client_order_id"] = sell_client_order_id
                 break
         self._write(records)
 

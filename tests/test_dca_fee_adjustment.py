@@ -26,6 +26,8 @@ from dca_bot.config import Config
 from dca_bot.order_utils import SymbolTradingRules
 from dca_bot.strategy import DCAStrategy
 
+from tests.fake_pending import PendingOrdersMixin
+
 FAKE_TRADING_RULES = SymbolTradingRules(
     symbol="BTCUSDT",
     tick_size=0.01,
@@ -37,7 +39,7 @@ FAKE_TRADING_RULES = SymbolTradingRules(
 )
 
 
-class FakeDCAClient:
+class FakeDCAClient(PendingOrdersMixin):
     def __init__(self, trading_enabled: bool, price: float):
         self.trading_enabled = trading_enabled
         self.price = price
@@ -59,6 +61,7 @@ class FakeDCAClient:
         # und jede Order-Antwort traegt eine clientOrderId.
         self.order_contexts: list[dict | None] = []
         self._next_client_order_id = 0
+        self._init_pending("dca")
 
     def get_current_price(self, symbol: str) -> float:
         return self.price

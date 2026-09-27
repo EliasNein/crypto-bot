@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -140,6 +141,10 @@ class FakeReconcileClient:
         self.cancel_calls.append((symbol, order_id))
         return None
 
+    def confirm_booked(self, client_order_id: str | None) -> None:
+        if client_order_id:
+            self.pending_orders.remove(client_order_id)
+
 
 def filled_order(
     order_id: object = 4711,
@@ -245,8 +250,12 @@ class DCAReconciliationTestCase(ReconciliationTestBase):
         self._add_pending("dca-never", context={"price": 77_000.0}, bot_name="dca")
         client.lookups["dca-never"] = (LOOKUP_NOT_FOUND, None)
 
-        with self.assertLogs("dca_bot", level="INFO") as captured:
-            strategy.reconcile_pending_orders()
+        # -2013 ist erst ab UNKNOWN_FINAL_AFTER_SECONDS endgueltig
+        # (Systemcheck vom 27.09.2026) - der Start liegt hier 2 min danach.
+        later = datetime.now(timezone.utc) + timedelta(minutes=2)
+        with mock.patch("dca_bot.pending_orders._utcnow", return_value=later):
+            with self.assertLogs("dca_bot", level="INFO") as captured:
+                strategy.reconcile_pending_orders()
 
         self.assertEqual(strategy._ledger._read(), [])
         self.assertEqual(self._remaining_pending("dca"), [])
@@ -430,7 +439,12 @@ class GridReconciliationTestCase(ReconciliationTestBase):
             dry_run=False,
         )
         strategy._ledger.record_buy(position)
-        strategy._ledger.record_sell(position.id, 75_110.0, "2026-09-16T10:00:00+00:00", 0.22)
+        # Geschlossen mit GENAU der Order aus der Pending-Datei - nur dann
+        # ist "schon verbucht" richtig. Mit einer anderen Order waere es
+        # ein Doppelverkauf (siehe tests/test_shared_account.py).
+        strategy._ledger.record_sell(
+            position.id, 75_110.0, "2026-09-16T10:00:00+00:00", 0.22, "grid-sell-twice"
+        )
 
         self._add_pending(
             "grid-sell-twice",

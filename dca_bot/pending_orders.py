@@ -164,6 +164,36 @@ _UUID_HEX_CHARS = 24
 
 PENDING_FILE_VERSION = 1
 
+# Ab welchem Alter eines Pending-Eintrags die Antwort -2013 ("Order does
+# not exist") als ENDGUELTIG gilt (Systemcheck vom 27.09.2026, K-B).
+#
+# Unmittelbar nach einem Timeout ist -2013 keine sichere Aussage: die
+# Matching Engine kann die Order noch verarbeiten (Punkt B der
+# Code-Ueberpruefung vom 25.09.2026). Das Fenster dafuer ist aber laut
+# Binance-Doku begrenzt - `recvWindow` (Default 5000 ms) wird ein zweites
+# Mal unmittelbar vor der Weitergabe an die Matching Engine geprueft, und
+# die API wartet hoechstens 10 s auf die Engine ("APIs have a timeout of 10
+# seconds"). Eine Order, die nach mehr als ~15 s weiterhin unbekannt ist,
+# kann danach nicht mehr auftauchen. 60 s sind der Sicherheitsabstand.
+UNKNOWN_FINAL_AFTER_SECONDS = 60.0
+
+
+def _utcnow() -> datetime:
+    """Eigene Funktion statt datetime.now() direkt - Tests setzen die Uhr hier."""
+    return datetime.now(timezone.utc)
+
+
+class ManualReviewRequired(Exception):
+    """
+    Das Nachtragen einer Order hat einen Widerspruch gefunden, den der Bot
+    nicht selbst aufloesen darf - z.B. ist die Position bereits mit einer
+    ANDEREN Verkaufs-Order geschlossen (Doppelverkauf, K-B).
+
+    Die Meldung ist fuer Telegram formuliert. Der Pending-Eintrag bleibt
+    stehen, bis ein Mensch den Fall geklaert hat (Entscheidung vom
+    27.09.2026) - er wird deshalb bei jedem Start erneut gemeldet.
+    """
+
 
 def new_client_order_id(bot_name: str) -> str:
     """
@@ -214,9 +244,29 @@ class PendingOrder:
             kind=kind,
             symbol=symbol,
             side=side,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=_utcnow().isoformat(),
             context=dict(context or {}),
         )
+
+    def age_seconds(self) -> float | None:
+        """Alter des Eintrags in Sekunden, None bei unlesbarem Zeitstempel."""
+        try:
+            created = datetime.fromisoformat(self.created_at)
+        except (TypeError, ValueError):
+            return None
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (_utcnow() - created).total_seconds()
+
+    def unknown_is_final(self) -> bool:
+        """
+        Ob -2013 fuer diesen Eintrag eine endgueltige Antwort ist (siehe
+        UNKNOWN_FINAL_AFTER_SECONDS). Ein unlesbarer Zeitstempel gilt als
+        alt genug - sonst bliebe ein solcher Eintrag fuer immer stehen und
+        wuerde seine Position dauerhaft sperren.
+        """
+        age = self.age_seconds()
+        return age is None or age >= UNKNOWN_FINAL_AFTER_SECONDS
 
 
 class PendingOrderStore:
@@ -335,6 +385,27 @@ class PendingOrderStore:
         if len(remaining) == len(payload["orders"]):
             return
         self._write_payload(remaining)
+
+    def entries_for(self, *, side: str | None = None, kind: str | None = None, **context) -> list[PendingOrder]:
+        """
+        Offene Eintraege, die zu einer bestimmten Position gehoeren - z.B.
+        `entries_for(side="SELL", position_id=...)`.
+
+        Grundlage der Sperre aus K-B (Systemcheck vom 27.09.2026): Solange
+        fuer eine Position eine Order mit ungeklaertem Ausgang existiert,
+        startet kein Bot fuer sie eine neue Aktion. Die Kontext-Felder
+        schreibt die Strategie selbst beim Platzieren (siehe die
+        `context=`-Argumente der place_*-Aufrufe).
+        """
+        result = []
+        for entry in self.all():
+            if side is not None and entry.side != side:
+                continue
+            if kind is not None and entry.kind != kind:
+                continue
+            if all(entry.context.get(key) == value for key, value in context.items()):
+                result.append(entry)
+        return result
 
     def all(self) -> list[PendingOrder]:
         """Alle offenen Eintraege, aelteste zuerst (Einfuegereihenfolge)."""
@@ -496,10 +567,30 @@ def resolve_pending_order(client, pending: PendingOrder) -> tuple[str, dict | No
 RECONCILIATION_PREFIX = "[REKONZILIATION] "
 
 
-def reconcile_pending_orders(client, store, bot_logger, apply_confirmed) -> None:
+def reconcile_pending_orders(
+    client, store, bot_logger, apply_confirmed, escalated: set[str] | None = None
+) -> None:
     """
-    Teil B des K2-Fixes: arbeitet beim Bot-Start alle offenen
-    Order-Fragen aus einem frueheren Lauf ab.
+    Teil B des K2-Fixes: arbeitet alle offenen Order-Fragen ab - beim
+    Bot-Start UND seit dem Systemcheck vom 27.09.2026 zu Beginn jedes
+    Zyklus.
+
+    Vorher lief das nur beim Start. Ein `[ORDER-UNKLAR]` blieb damit bis
+    zum naechsten Neustart ungeklaert, und in dieser Zeit konnte der Bot
+    fuer dieselbe Position eine ZWEITE Order platzieren (K-B/W-B) - im
+    Echtgeld-Betrieb mit seltenen Neustarts womoeglich wochenlang. Ist die
+    Pending-Datei leer (der Normalfall), kostet der Aufruf keinen
+    einzigen API-Zugriff.
+
+    `escalated` ist fuer den Aufruf im laufenden Betrieb: eine Menge von
+    clientOrderIds, zu denen bereits per Telegram eskaliert wurde. Jede
+    geht dann nur EINMAL pro Prozesslauf raus - der Grid-Bot prueft alle
+    5 Minuten, ein haengender Fall waere sonst eine Meldung pro Zyklus.
+    Ohne `escalated` (Bot-Start) wird jedes Mal gemeldet.
+
+    "Order unbekannt" (-2013) gilt erst ab UNKNOWN_FINAL_AFTER_SECONDS als
+    endgueltig - vorher bleibt der Eintrag stehen, er koennte noch in der
+    Matching Engine liegen.
 
     Der gemeinsame Rahmen steht hier, weil er fuer alle drei Bots
     identisch ist: nachfragen, bewerten, Eintrag aufraeumen oder
@@ -522,10 +613,24 @@ def reconcile_pending_orders(client, store, bot_logger, apply_confirmed) -> None
     if not entries:
         return
 
-    bot_logger.warning(
-        "%s%d offene Order-Frage(n) aus einem frueheren Lauf gefunden (%s) - "
-        "sie werden jetzt gegen den tatsaechlichen Status bei Binance "
-        "geprueft, bevor der erste regulaere Zyklus laeuft.",
+    at_runtime = escalated is not None
+
+    def escalate(client_order_id: str, message: str) -> None:
+        if escalated is not None:
+            if client_order_id in escalated:
+                return
+            escalated.add(client_order_id)
+        send_notification(message)
+
+    def settled(client_order_id: str) -> None:
+        store.remove(client_order_id)
+        if escalated is not None:
+            escalated.discard(client_order_id)
+
+    (bot_logger.info if at_runtime else bot_logger.warning)(
+        "%s%d offene Order-Frage(n) gefunden (%s) - sie werden jetzt gegen "
+        "den tatsaechlichen Status bei Binance geprueft, bevor dieser Zyklus "
+        "handelt.",
         RECONCILIATION_PREFIX,
         len(entries),
         store.path,
@@ -537,23 +642,52 @@ def reconcile_pending_orders(client, store, bot_logger, apply_confirmed) -> None
         if state == ORDER_CONFIRMED and order is not None:
             try:
                 apply_confirmed(pending, order)
+            except ManualReviewRequired as exc:
+                # Ein Widerspruch, den der Bot nicht selbst aufloesen darf
+                # (z.B. Doppelverkauf). Der Eintrag bleibt stehen, bis ein
+                # Mensch ihn geklaert hat.
+                bot_logger.error(
+                    "%s%s Der Eintrag %s bleibt in '%s' stehen, bis der Fall "
+                    "manuell geklaert ist.",
+                    RECONCILIATION_PREFIX,
+                    exc,
+                    pending.client_order_id,
+                    store.path,
+                )
+                escalate(pending.client_order_id, str(exc))
+                continue
             except Exception:
                 bot_logger.exception(
                     "%sNachtragen der Order %s ist fehlgeschlagen - der "
-                    "Eintrag bleibt in '%s' stehen und wird beim naechsten "
-                    "Start erneut versucht.",
+                    "Eintrag bleibt in '%s' stehen und wird erneut versucht.",
                     RECONCILIATION_PREFIX,
                     pending.client_order_id,
                     store.path,
                 )
-                send_notification(
+                escalate(
+                    pending.client_order_id,
                     f"[REKONZILIATION] {pending.symbol}: Order "
                     f"{pending.client_order_id} existiert an der Boerse, "
                     "konnte aber nicht ins Ledger nachgetragen werden. Siehe "
-                    "Bot-Log, manuelle Pruefung noetig."
+                    "Bot-Log, manuelle Pruefung noetig.",
                 )
                 continue
-            store.remove(pending.client_order_id)
+            settled(pending.client_order_id)
+            continue
+
+        if state == ORDER_UNKNOWN and not pending.unknown_is_final():
+            # Punkt B der Code-Ueberpruefung vom 25.09.2026: kurz nach dem
+            # Absenden kann die Order noch in der Matching Engine liegen.
+            bot_logger.info(
+                "%sOrder %s (%s %s) ist Binance noch unbekannt, aber juenger "
+                "als %.0f s - der Eintrag bleibt stehen und wird erneut "
+                "geprueft.",
+                RECONCILIATION_PREFIX,
+                pending.client_order_id,
+                pending.side,
+                pending.symbol,
+                UNKNOWN_FINAL_AFTER_SECONDS,
+            )
             continue
 
         if state in (ORDER_UNKNOWN, ORDER_WITHOUT_EFFECT):
@@ -566,24 +700,25 @@ def reconcile_pending_orders(client, store, bot_logger, apply_confirmed) -> None
                 pending.symbol,
                 state,
             )
-            store.remove(pending.client_order_id)
+            settled(pending.client_order_id)
             continue
 
         bot_logger.error(
             "%sOrder %s (%s %s) ist weiterhin in unklarem Zustand - die "
             "Boerse gibt keine eindeutige Auskunft. Der Eintrag bleibt in "
-            "'%s' stehen und wird beim naechsten Start erneut geprueft. "
-            "Bitte manuell nachsehen (python -m dca_bot.check_orders).",
+            "'%s' stehen und wird erneut geprueft; solange handelt der Bot "
+            "fuer diese Position nicht.",
             RECONCILIATION_PREFIX,
             pending.client_order_id,
             pending.side,
             pending.symbol,
             store.path,
         )
-        send_notification(
+        escalate(
+            pending.client_order_id,
             f"[REKONZILIATION] {pending.symbol}: Order "
             f"{pending.client_order_id} ({pending.side}) weiterhin in "
-            "unklarem Zustand. Bitte manuell bei Binance nachsehen."
+            "unklarem Zustand. Bitte manuell bei Binance nachsehen.",
         )
 
 

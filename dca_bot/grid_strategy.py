@@ -38,6 +38,7 @@ from .order_utils import (
 )
 from .pending_orders import (
     RECONCILIATION_PREFIX,
+    ManualReviewRequired,
     PendingOrder,
     reconcile_pending_orders,
 )
@@ -80,6 +81,10 @@ class GridTradingStrategy:
         # Gleiche Ueberlegung und gleiche Kurzlebigkeit wie
         # _failed_sell_notified.
         self._balance_mismatch_notified = False
+        # clientOrderIds, zu denen die laufende Reconciliation bereits per
+        # Telegram eskaliert hat - bei 5-Minuten-Takt sonst eine Meldung
+        # pro Zyklus (siehe reconcile_pending_orders).
+        self._pending_escalated: set[str] = set()
         logger.info(
             "Grid initialisiert: %d Stufen von %.2f bis %.2f (Abstand %.2f%%, "
             "max. Kapitalbindung ca. %.2f)",
@@ -230,7 +235,12 @@ class GridTradingStrategy:
             realized_pnl = proceeds - record["quote_spent"]
 
             sold_at = datetime.now(timezone.utc).isoformat()
-            self._ledger.record_sell(record["id"], sell_price, sold_at, realized_pnl)
+            sell_client_order_id = order.get("clientOrderId") if order else None
+            self._ledger.record_sell(
+                record["id"], sell_price, sold_at, realized_pnl, sell_client_order_id
+            )
+            # Erst mit dem Verkauf im Ledger ist die Order-Frage erledigt (W-A).
+            self._client.confirm_booked(sell_client_order_id)
             self._failed_sell_notified.discard(record["id"])
 
             logger.info(
@@ -563,6 +573,8 @@ class GridTradingStrategy:
                 client_order_id=order.get("clientOrderId") if order else None,
             )
             self._ledger.record_buy(position)
+            # Erst mit dem Kauf im Ledger ist die Order-Frage erledigt (W-A).
+            self._client.confirm_booked(position.client_order_id)
 
             logger.info(
                 "Grid-Kauf: Stufe %d @ %.2f (Ziel-Verkauf @ %.2f)",
@@ -641,6 +653,22 @@ class GridTradingStrategy:
             store=self._client.pending_orders,
             bot_logger=logger,
             apply_confirmed=self._apply_reconciled_order,
+        )
+
+    def _reconcile_pending_at_runtime(self) -> None:
+        """
+        Dieselbe Reconciliation zu Beginn JEDES Zyklus (Systemcheck vom
+        27.09.2026, K-B/W-A). Ein Verkauf mit unklarem Ausgang wird damit
+        geklaert, sobald Binance wieder antwortet - und nicht erst beim
+        naechsten Neustart, waehrend der Bot dieselbe Position in der
+        Zwischenzeit womoeglich ein zweites Mal verkauft.
+        """
+        reconcile_pending_orders(
+            client=self._client,
+            store=self._client.pending_orders,
+            bot_logger=logger,
+            apply_confirmed=self._apply_reconciled_order,
+            escalated=self._pending_escalated,
         )
 
     def _apply_reconciled_order(self, pending: PendingOrder, order: dict) -> None:
@@ -766,17 +794,33 @@ class GridTradingStrategy:
             )
 
         if record["status"] != "open":
-            # Genau der Fall, für den die Idempotenz da ist: der Verkauf
-            # wurde schon verbucht, nur das Aufräumen des Pending-
-            # Eintrags kam nicht mehr dazu.
-            logger.info(
-                "%sPosition %s ist bereits geschlossen - Verkauf zu Order %s "
-                "war schon verbucht.",
-                RECONCILIATION_PREFIX,
-                position_id,
-                pending.client_order_id,
+            if record.get("sell_client_order_id") == pending.client_order_id:
+                # Genau der Fall, für den die Idempotenz da ist: der
+                # Verkauf wurde schon verbucht, nur das Aufräumen des
+                # Pending-Eintrags kam nicht mehr dazu.
+                logger.info(
+                    "%sPosition %s ist bereits geschlossen (mit Order %s) - "
+                    "nichts nachzutragen.",
+                    RECONCILIATION_PREFIX,
+                    position_id,
+                    pending.client_order_id,
+                )
+                return
+            # Die Position ist mit einer ANDEREN Order geschlossen worden -
+            # diese hier lief also zusätzlich: ein Doppelverkauf aus dem
+            # Bestand eines anderen Bots (Systemcheck vom 27.09.2026, K-B).
+            # Bis dahin ging genau dieser Fall als "schon verbucht" durch.
+            # Nicht raten, sondern stehen lassen und melden.
+            raise ManualReviewRequired(
+                f"[GRID-DOPPELVERKAUF] {self._config.symbol}: Position "
+                f"{position_id} (Stufe {record.get('level_index', '?')}) ist "
+                f"bereits mit Order {record.get('sell_client_order_id') or 'unbekannt'} "
+                f"geschlossen, Order {pending.client_order_id} hat an der Boerse "
+                f"ZUSAETZLICH {order.get('executedQty', '?')} verkauft "
+                f"(Erloes {order.get('cummulativeQuoteQty', '?')}). Das stammt "
+                "aus dem Bestand eines anderen Bots - bitte manuell klaeren "
+                "(python -m dca_bot.audit_positions)."
             )
-            return
 
         symbol = pending.symbol or self._config.symbol
         rules = self._client.get_symbol_trading_rules(symbol)
@@ -793,6 +837,7 @@ class GridTradingStrategy:
             sell_price,
             datetime.now(timezone.utc).isoformat(),
             realized_pnl,
+            pending.client_order_id,
         )
         self._failed_sell_notified.discard(record["id"])
 
@@ -818,6 +863,7 @@ class GridTradingStrategy:
         """Führt genau einen Grid-Zyklus aus: Preis holen, Verkäufe prüfen,
         Trendbruch-Stop-Loss prüfen, ggf. Käufe prüfen."""
         self._kill_switch.check()
+        self._reconcile_pending_at_runtime()
 
         price = self._client.get_current_price(self._config.symbol)
         logger.info("Aktueller Preis für %s: %.2f", self._config.symbol, price)

@@ -42,6 +42,8 @@ from dca_bot.grid_signals import find_triggered_buy_levels
 from dca_bot.order_utils import SymbolTradingRules, quantize_quantity
 from dca_bot.grid_strategy import GridTradingStrategy
 
+from tests.fake_pending import PendingOrdersMixin
+
 
 # Handelsregeln nahe an dem, was Binance fuer BTCUSDT meldet - damit die
 # Tests dieselbe Quantisierung durchlaufen wie der Live-Betrieb.
@@ -56,7 +58,7 @@ FAKE_TRADING_RULES = SymbolTradingRules(
 )
 
 
-class FakeGridClient:
+class FakeGridClient(PendingOrdersMixin):
     """
     Verhält sich wie der echte TradingClient (binance_client.py): im
     Dry-Run (trading_enabled=False) gibt place_market_sell() None zurück,
@@ -104,6 +106,7 @@ class FakeGridClient:
         self.open_orders: list[dict] | None = []
         self.balance_calls = 0
         self.open_orders_calls = 0
+        self._init_pending("grid")
 
     def _new_client_order_id(self) -> str:
         self._next_client_order_id += 1

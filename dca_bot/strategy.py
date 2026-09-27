@@ -40,6 +40,10 @@ class DCAStrategy:
         self._stop_loss = PortfolioStopLoss(
             self._ledger, config.stop_loss_pct, config.stop_loss_state_file
         )
+        # clientOrderIds, zu denen die laufende Reconciliation bereits per
+        # Telegram eskaliert hat - jede nur einmal pro Prozesslauf (siehe
+        # reconcile_pending_orders).
+        self._pending_escalated: set[str] = set()
 
     def _within_daily_limit(self, amount: float) -> bool:
         # Aus der persistenten Ledger-Datei berechnet statt In-Memory-Zähler,
@@ -122,6 +126,23 @@ class DCAStrategy:
             store=self._client.pending_orders,
             bot_logger=logger,
             apply_confirmed=self._record_reconciled_buy,
+        )
+
+    def _reconcile_pending_at_runtime(self) -> None:
+        """
+        Dieselbe Reconciliation zu Beginn JEDES Zyklus (Systemcheck vom
+        27.09.2026, W-A). Ein Kauf, dessen Ledger-Eintrag gescheitert ist
+        oder dessen Ausgang unklar war, wird damit im naechsten Zyklus
+        nachgetragen statt erst beim naechsten Neustart - Tageslimit und
+        Stop-Loss-Kostenbasis rechnen dann wieder mit dem echten Bestand.
+        Bei leerer Pending-Datei kein einziger API-Aufruf.
+        """
+        reconcile_pending_orders(
+            client=self._client,
+            store=self._client.pending_orders,
+            bot_logger=logger,
+            apply_confirmed=self._record_reconciled_buy,
+            escalated=self._pending_escalated,
         )
 
     def _record_reconciled_buy(self, pending: PendingOrder, order: dict) -> None:
@@ -207,6 +228,7 @@ class DCAStrategy:
     def execute_once(self) -> None:
         """Führt genau einen DCA-Kaufzyklus aus."""
         self._kill_switch.check()
+        self._reconcile_pending_at_runtime()
 
         symbol = self._config.symbol
         amount = self._config.quote_amount
@@ -344,6 +366,9 @@ class DCAStrategy:
                 client_order_id=order.get("clientOrderId") if order else None,
             )
         )
+        # Erst JETZT, mit dem Kauf im Ledger, ist die offene Order-Frage
+        # erledigt (W-A, siehe TradingClient.confirm_booked).
+        self._client.confirm_booked(order.get("clientOrderId") if order else None)
 
         if order is not None:
             logger.info(

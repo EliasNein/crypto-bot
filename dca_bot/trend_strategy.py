@@ -40,6 +40,7 @@ from .order_utils import (
 )
 from .pending_orders import (
     KIND_STOP_LOSS_LIMIT,
+    ManualReviewRequired,
     ORDER_LIFECYCLE_DEAD,
     ORDER_LIFECYCLE_FILLED,
     ORDER_LIFECYCLE_LIVE,
@@ -92,6 +93,9 @@ class TrendFollowingStrategy:
             config.ema_fast_period, config.ema_slow_period, config.min_gap_pct
         )
         self._seeded = False
+        # clientOrderIds, zu denen die laufende Reconciliation bereits per
+        # Telegram eskaliert hat - jede nur einmal pro Prozesslauf.
+        self._pending_escalated: set[str] = set()
 
     def _seed_with_history(self) -> None:
         """
@@ -217,6 +221,8 @@ class TrendFollowingStrategy:
         # erneut gekauft. Die Stop-Order wird jetzt nachträglich am
         # bereits bestehenden Eintrag hinterlegt.
         self._ledger.record_entry(trade)
+        # Erst mit dem Einstieg im Ledger ist die Order-Frage erledigt (W-A).
+        self._client.confirm_booked(trade.client_order_id)
 
         # Echte, exchange-seitige Stop-Loss-Order (STOP_LOSS_LIMIT) direkt
         # nach dem Entry platzieren - schützt die Position auch, wenn der
@@ -240,6 +246,7 @@ class TrendFollowingStrategy:
             self._ledger.set_stop_loss_order(
                 trade.id, trade.stop_loss_order_id, limit_price
             )
+            self._client.confirm_booked(stop_order.get("clientOrderId"))
         elif self._config.trading_enabled:
             # Echter Trading-Modus, aber die Stop-Loss-Order konnte nicht
             # platziert werden (siehe Fehler-Log in binance_client.py) -
@@ -505,7 +512,12 @@ class TrendFollowingStrategy:
         realized_pnl = proceeds - open_trade["quote_spent"]
 
         exit_time = datetime.now(timezone.utc).isoformat()
-        self._ledger.record_exit(open_trade["id"], exit_price, exit_time, reason, realized_pnl)
+        exit_client_order_id = order.get("clientOrderId") if order else None
+        self._ledger.record_exit(
+            open_trade["id"], exit_price, exit_time, reason, realized_pnl, exit_client_order_id
+        )
+        # Erst mit dem Ausstieg im Ledger ist die Order-Frage erledigt (W-A).
+        self._client.confirm_booked(exit_client_order_id)
 
         reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
         logger.info(
@@ -690,6 +702,7 @@ class TrendFollowingStrategy:
             self._ledger.set_stop_loss_order(
                 open_trade["id"], str(stop_order["orderId"]), limit_price
             )
+            self._client.confirm_booked(stop_order.get("clientOrderId"))
             logger.warning(
                 "Neue Stop-Loss-Order %s für die weiterhin offene Position "
                 "platziert (Stop %.2f, Limit %.2f) - die vor dem "
@@ -818,6 +831,7 @@ class TrendFollowingStrategy:
         if stop_order is not None:
             order_id = str(stop_order["orderId"])
             self._ledger.set_stop_loss_order(open_trade["id"], order_id, limit_price)
+            self._client.confirm_booked(stop_order.get("clientOrderId"))
             # Den uebergebenen Dict mitziehen, damit der laufende Zyklus
             # (und die aufrufende Seite) nicht mit einem veralteten Stand
             # weiterarbeitet.
@@ -974,7 +988,14 @@ class TrendFollowingStrategy:
         realized_pnl = proceeds - open_trade["quote_spent"]
 
         exit_time = datetime.now(timezone.utc).isoformat()
-        self._ledger.record_exit(open_trade["id"], exit_price, exit_time, "stop_loss", realized_pnl)
+        self._ledger.record_exit(
+            open_trade["id"],
+            exit_price,
+            exit_time,
+            "stop_loss",
+            realized_pnl,
+            order_status.get("clientOrderId"),
+        )
 
         # Der Stop-Loss-Latch gehört zum Ausstieg, nicht zum Logging
         # (Sicherheitsreview-Punkt W6). Er stand bis hierher am Ende von
@@ -1296,6 +1317,23 @@ class TrendFollowingStrategy:
             apply_confirmed=self._apply_reconciled_order,
         )
 
+    def _reconcile_pending_at_runtime(self) -> None:
+        """
+        Dieselbe Reconciliation zu Beginn JEDES Zyklus (Systemcheck vom
+        27.09.2026, K-B/W-A/W-B). Eine Stop-Order, deren Antwort verloren
+        ging, haengt sie wieder an ihren Trade, BEVOR
+        `_ensure_stop_loss_protection()` eine zweite platzieren koennte; ein
+        Verkauf mit unklarem Ausgang wird verbucht, BEVOR der Bot dieselbe
+        Position ein zweites Mal verkauft.
+        """
+        reconcile_pending_orders(
+            client=self._client,
+            store=self._client.pending_orders,
+            bot_logger=logger,
+            apply_confirmed=self._apply_reconciled_order,
+            escalated=self._pending_escalated,
+        )
+
     def _apply_reconciled_order(self, pending: PendingOrder, order: dict) -> None:
         if pending.kind == KIND_STOP_LOSS_LIMIT:
             self._attach_reconciled_stop_order(pending, order)
@@ -1393,14 +1431,28 @@ class TrendFollowingStrategy:
             )
 
         if open_trade["status"] != "open":
-            logger.info(
-                "%sTrade %s ist bereits geschlossen - Verkauf zu Order %s war "
-                "schon verbucht.",
-                RECONCILIATION_PREFIX,
-                trade_id,
-                pending.client_order_id,
+            if open_trade.get("exit_client_order_id") == pending.client_order_id:
+                logger.info(
+                    "%sTrade %s ist bereits geschlossen (mit Order %s) - nichts "
+                    "nachzutragen.",
+                    RECONCILIATION_PREFIX,
+                    trade_id,
+                    pending.client_order_id,
+                )
+                return
+            # Mit einer ANDEREN Order geschlossen: diese hier lief
+            # zusätzlich - ein Doppelverkauf aus fremdem Bestand
+            # (Systemcheck vom 27.09.2026, K-B). Stehen lassen und melden.
+            raise ManualReviewRequired(
+                f"[TREND-DOPPELVERKAUF] {self._config.symbol}: Trade {trade_id} "
+                f"ist bereits mit Order "
+                f"{open_trade.get('exit_client_order_id') or 'unbekannt'} "
+                f"geschlossen, Order {pending.client_order_id} hat an der Boerse "
+                f"ZUSAETZLICH {order.get('executedQty', '?')} verkauft "
+                f"(Erloes {order.get('cummulativeQuoteQty', '?')}). Das stammt "
+                "aus dem Bestand eines anderen Bots - bitte manuell klaeren "
+                "(python -m dca_bot.audit_positions)."
             )
-            return
 
         symbol = pending.symbol or self._config.symbol
         reason = str(pending.context.get("reason", "signal"))
@@ -1422,6 +1474,7 @@ class TrendFollowingStrategy:
             datetime.now(timezone.utc).isoformat(),
             reason,
             realized_pnl,
+            pending.client_order_id,
         )
 
         reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
@@ -1484,6 +1537,17 @@ class TrendFollowingStrategy:
             )
 
         if trade["status"] != "open":
+            if trade.get("exit_client_order_id") == pending.client_order_id:
+                # Genau diese Stop-Order hat den Trade geschlossen - sie ist
+                # also nicht verwaist, nur ihr Pending-Eintrag war noch da.
+                logger.info(
+                    "%sStop-Loss-Order %s hat Trade %s bereits geschlossen - "
+                    "nichts zu tun.",
+                    RECONCILIATION_PREFIX,
+                    order_id,
+                    trade_id,
+                )
+                return
             logger.error(
                 "%sStop-Loss-Order %s (clientOrderId %s) liegt an der Börse, "
                 "ihr Trade %s ist aber bereits geschlossen - es handelt sich "
@@ -1651,6 +1715,7 @@ class TrendFollowingStrategy:
         Tagesabschluss warten, das wäre für diesen Bot unnötig komplex.
         """
         self._kill_switch.check()
+        self._reconcile_pending_at_runtime()
 
         if not self._seeded:
             self._seed_with_history()

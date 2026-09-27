@@ -29,6 +29,7 @@ import json
 import logging
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -521,7 +522,15 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
 
     # -- Normalbetrieb --
 
-    def test_successful_order_sends_client_order_id_and_clears_pending(self):
+    def test_successful_order_keeps_pending_until_the_ledger_confirms(self):
+        """
+        Seit dem Systemcheck vom 27.09.2026 (W-A) entfernt der Client den
+        Eintrag NICHT mehr selbst: er bleibt stehen, bis die Strategie den
+        Trade im Ledger hat und confirm_booked() aufruft. Bis dahin wurde
+        er hier entfernt - scheiterte danach der Ledger-Eintrag, blieb ein
+        echter Trade fuer immer unverbucht. Dieser Test schrieb das alte
+        Verhalten ("Pending-Eintrag muss weg sein") fest.
+        """
         client, raw = self._make_client()
 
         order = client.place_market_buy("BTCUSDT", 15.0)
@@ -529,7 +538,16 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
         self.assertIsNotNone(order)
         sent_id = raw.placed_client_order_ids[0]
         self.assertTrue(sent_id.startswith("dca-"), sent_id)
-        self.assertEqual(self._pending_ids(), [], "Pending-Eintrag muss weg sein")
+        self.assertEqual(self._pending_ids(), [sent_id], "Eintrag bleibt bis zur Bestaetigung")
+
+        client.confirm_booked(sent_id)
+        self.assertEqual(self._pending_ids(), [], "Nach confirm_booked() erledigt")
+
+    def test_confirm_booked_without_an_order_is_harmless(self):
+        """Dry-Run: keine Order, keine ID - der Aufruf darf nichts tun."""
+        client, _ = self._make_client()
+        client.confirm_booked(None)
+        self.assertEqual(self._pending_ids(), [])
 
     def test_dry_run_writes_no_pending_entry(self):
         """
@@ -626,7 +644,9 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
         self.assertEqual(
             raw.get_order_calls[0]["origClientOrderId"], raw.placed_client_order_ids[0]
         )
-        self.assertEqual(self._pending_ids(), [])
+        # Wie im regulaeren Erfolgsfall: der Eintrag bleibt bis zur
+        # Bestaetigung durch die Strategie (W-A).
+        self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
         notify.assert_not_called()
         self.assertTrue(
             any("trotz des Verbindungs- oder Serverfehlers" in line for line in captured.output)
@@ -647,7 +667,7 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
                 order = client.place_market_sell("BTCUSDT", 0.0002)
 
         self.assertIsNotNone(order)
-        self.assertEqual(self._pending_ids(), [])
+        self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
 
     def test_network_error_on_stop_order_accepts_status_new(self):
         """
@@ -668,7 +688,7 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
                 )
 
         self.assertIsNotNone(order)
-        self.assertEqual(self._pending_ids(), [])
+        self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
         notify.assert_not_called()
 
     # -- Szenario 2: Netzwerkfehler, Order nie angekommen --
@@ -698,7 +718,7 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
         self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
         notify.assert_not_called()
         self.assertTrue(
-            any("beim nächsten Bot-Start erneut geprüft" in line for line in captured.output)
+            any("im nächsten Zyklus erneut geprüft" in line for line in captured.output)
         )
 
     def test_network_error_and_order_without_effect_still_clears_the_entry(self):
@@ -724,16 +744,23 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
             any("nicht wirksam erreicht" in line for line in captured.output)
         )
 
-    def _reconcile_at_next_start(self, client) -> mock.Mock:
+    def _reconcile_at_next_start(self, client, seconds_later: float = 120.0) -> mock.Mock:
+        """
+        Reconciliation `seconds_later` Sekunden nach dem Absenden. Der
+        Default liegt ueber UNKNOWN_FINAL_AFTER_SECONDS: ab dort gilt
+        -2013 als endgueltig (Systemcheck vom 27.09.2026).
+        """
         apply_confirmed = mock.Mock()
-        with mock.patch("dca_bot.pending_orders.send_notification"):
-            with self.assertLogs("dca_bot", level="INFO"):
-                reconcile_pending_orders(
-                    client=client,
-                    store=client.pending_orders,
-                    bot_logger=logging.getLogger("dca_bot"),
-                    apply_confirmed=apply_confirmed,
-                )
+        later = datetime.now(timezone.utc) + timedelta(seconds=seconds_later)
+        with mock.patch("dca_bot.pending_orders._utcnow", return_value=later):
+            with mock.patch("dca_bot.pending_orders.send_notification"):
+                with self.assertLogs("dca_bot", level="INFO"):
+                    reconcile_pending_orders(
+                        client=client,
+                        store=client.pending_orders,
+                        bot_logger=logging.getLogger("dca_bot"),
+                        apply_confirmed=apply_confirmed,
+                    )
         return apply_confirmed
 
     def test_late_executed_order_is_recovered_at_the_next_start(self):
@@ -783,6 +810,26 @@ class TradingClientPendingOrderTestCase(TradingClientTestBase):
 
         apply_confirmed.assert_not_called()
         self.assertEqual(self._pending_ids(), [])
+
+    def test_young_unknown_order_is_kept_even_at_a_restart(self):
+        """
+        Gegenprobe zur Altersgrenze: startet der Bot unmittelbar nach dem
+        Timeout neu (systemd, RestartSec=30), ist -2013 noch keine sichere
+        Aussage - die Order kann noch in der Matching Engine liegen. Der
+        Eintrag bleibt stehen. Vor dem Systemcheck vom 27.09.2026 wurde er
+        beim Start sofort verworfen.
+        """
+        client, raw = self._make_client()
+        raw.order_behaviour = requests.exceptions.ReadTimeout("weg")
+        raw.status_behaviour = "not_found"
+        with mock.patch("dca_bot.binance_client.send_notification"):
+            with self.assertLogs("dca_bot", level="WARNING"):
+                client.place_market_buy("BTCUSDT", 15.0)
+
+        apply_confirmed = self._reconcile_at_next_start(client, seconds_later=30.0)
+
+        apply_confirmed.assert_not_called()
+        self.assertEqual(len(self._pending_ids()), 1)
 
     # -- Szenario 3: Netzwerkfehler UND Status-Abfrage scheitert --
 
@@ -911,7 +958,7 @@ class ServerErrorWithUnknownOutcomeTestCase(TradingClientTestBase):
         self.assertEqual(
             raw.get_order_calls[0]["origClientOrderId"], raw.placed_client_order_ids[0]
         )
-        self.assertEqual(self._pending_ids(), [])
+        self.assertEqual(self._pending_ids(), [raw.placed_client_order_ids[0]])
         notify.assert_not_called()
         self.assertTrue(any("HTTP 503" in line for line in log_lines), log_lines)
 
@@ -1144,6 +1191,133 @@ class SafeStartupReconciliationTestCase(unittest.TestCase):
 
     def test_no_steps_is_harmless(self):
         safe_startup_reconciliation(self.logger, "[FEHLER]", [])
+
+
+class RuntimeReconciliationTestCase(unittest.TestCase):
+    """
+    Die Bausteine, die der Systemcheck vom 27.09.2026 (K-B/W-A/W-B) dem
+    Pending-Pfad hinzugefuegt hat: Suche nach offenen Eintraegen einer
+    Position, Altersgrenze fuer -2013, Mengenlimit der Telegram-Meldungen
+    im laufenden Betrieb und der Fall "manuell klaeren".
+
+    Das Zusammenspiel mit den Strategien auf einem geteilten Konto steht
+    in tests/test_shared_account.py.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.store = PendingOrderStore(str(Path(self._tmpdir.name) / "p.json"), "grid")
+        self.logger = logging.getLogger("dca_bot")
+
+    def _add(self, cid: str, side: str = "SELL", **context) -> PendingOrder:
+        pending = PendingOrder.new(cid, KIND_MARKET, "BTCUSDT", side, context)
+        self.store.add(pending)
+        return pending
+
+    def _reconcile(self, client, apply_confirmed=None, escalated=None):
+        with mock.patch("dca_bot.pending_orders.send_notification") as notify:
+            with self.assertLogs("dca_bot", level="INFO"):
+                reconcile_pending_orders(
+                    client=client,
+                    store=self.store,
+                    bot_logger=self.logger,
+                    apply_confirmed=apply_confirmed or mock.Mock(),
+                    escalated=escalated,
+                )
+        return notify
+
+    # -- entries_for --
+
+    def test_entries_for_filters_by_side_and_context(self):
+        self._add("grid-a", "SELL", position_id="p1")
+        self._add("grid-b", "SELL", position_id="p2")
+        self._add("grid-c", "BUY", level_index=3)
+
+        self.assertEqual(
+            [e.client_order_id for e in self.store.entries_for(side="SELL", position_id="p1")],
+            ["grid-a"],
+        )
+        self.assertEqual(
+            [e.client_order_id for e in self.store.entries_for(side="BUY", level_index=3)],
+            ["grid-c"],
+        )
+        self.assertEqual(self.store.entries_for(side="SELL", position_id="p9"), [])
+
+    # -- Altersgrenze fuer -2013 --
+
+    def test_unknown_is_final_only_after_the_threshold(self):
+        from dca_bot.pending_orders import UNKNOWN_FINAL_AFTER_SECONDS
+
+        pending = self._add("grid-a")
+        start = datetime.fromisoformat(pending.created_at)
+        for seconds, expected in (
+            (UNKNOWN_FINAL_AFTER_SECONDS - 1, False),
+            (UNKNOWN_FINAL_AFTER_SECONDS, True),
+        ):
+            with self.subTest(sekunden=seconds):
+                with mock.patch(
+                    "dca_bot.pending_orders._utcnow",
+                    return_value=start + timedelta(seconds=seconds),
+                ):
+                    self.assertIs(pending.unknown_is_final(), expected)
+
+    def test_unreadable_timestamp_counts_as_final(self):
+        """Sonst sperrte ein kaputter Eintrag seine Position fuer immer."""
+        pending = PendingOrder("grid-a", KIND_MARKET, "BTCUSDT", "SELL", "kaputt")
+        self.assertTrue(pending.unknown_is_final())
+
+    # -- Mengenlimit im laufenden Betrieb --
+
+    def test_runtime_escalation_is_sent_once_per_order(self):
+        """
+        Der Grid-Bot prueft alle 5 Minuten. Ein haengender Fall darf nicht
+        zu einer Meldung pro Zyklus werden - aber im Log steht er jedes Mal.
+        """
+        self._add("grid-a")
+        client = FakeLookupClient((LOOKUP_FAILED, None))
+        escalated: set[str] = set()
+
+        first = self._reconcile(client, escalated=escalated)
+        second = self._reconcile(client, escalated=escalated)
+
+        self.assertEqual(first.call_count, 1)
+        self.assertEqual(second.call_count, 0)
+        self.assertEqual(len(self.store.all()), 1, "Der Eintrag bleibt")
+
+    def test_startup_escalates_every_time(self):
+        """Gegenprobe: ohne `escalated` (Bot-Start) wird jedes Mal gemeldet."""
+        self._add("grid-a")
+        client = FakeLookupClient((LOOKUP_FAILED, None))
+
+        self.assertEqual(self._reconcile(client).call_count, 1)
+        self.assertEqual(self._reconcile(client).call_count, 1)
+
+    def test_a_settled_order_is_forgotten_by_the_escalation_limit(self):
+        self._add("grid-a")
+        escalated = {"grid-a"}
+        client = FakeLookupClient((LOOKUP_FOUND, {"status": "FILLED", "executedQty": "0.1"}))
+
+        self._reconcile(client, escalated=escalated)
+
+        self.assertEqual(self.store.all(), [])
+        self.assertEqual(escalated, set())
+
+    # -- manuell zu klaeren --
+
+    def test_manual_review_keeps_the_entry_and_sends_its_own_message(self):
+        from dca_bot.pending_orders import ManualReviewRequired
+
+        self._add("grid-a")
+        client = FakeLookupClient((LOOKUP_FOUND, {"status": "FILLED", "executedQty": "0.1"}))
+
+        def conflict(pending, order):
+            raise ManualReviewRequired("[GRID-DOPPELVERKAUF] Testfall")
+
+        notify = self._reconcile(client, apply_confirmed=conflict)
+
+        self.assertEqual([e.client_order_id for e in self.store.all()], ["grid-a"])
+        notify.assert_called_once_with("[GRID-DOPPELVERKAUF] Testfall")
 
 
 if __name__ == "__main__":
