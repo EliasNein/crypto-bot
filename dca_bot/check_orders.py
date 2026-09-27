@@ -6,7 +6,9 @@ Zwei Aufrufe:
     python -m dca_bot.check_orders
         Die letzten Orders aller Symbole von DCA, Grid und Trend, jeweils
         mit clientOrderId und dem Bot, der sie platziert hat, dazu Kurs und
-        Guthaben von Base- und Quote-Asset.
+        Guthaben von Base- und Quote-Asset. Zugleich der Verbindungstest:
+        ersetzt das frühere test_connection.py, das bei aktivem Trading
+        einen echten DCA-Kauf auslöste (Systemcheck vom 27.09.2026, W-D).
 
     python -m dca_bot.check_orders --client-order-id grid-7f3a9c2e14b84d6fa0e51c83
         Die eine Frage nach einem [ORDER-UNKLAR]: Gibt es diese Order bei
