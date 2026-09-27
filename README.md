@@ -221,6 +221,7 @@ trading-bot/
 │   ├── allocator_backtest.py # Backtest: kombiniert vs. isoliert DCA/Trend
 │   ├── main_allocator.py    # Einstiegspunkt Allocator
 │   ├── audit_positions.py         # CLI: Bestand aller drei Bots + Kontoabgleich (nur lesend)
+│   ├── check_orders.py            # CLI: Orders nachschlagen, z.B. nach [ORDER-UNKLAR] (nur lesend)
 │   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
 │   ├── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
@@ -278,7 +279,10 @@ rm STOP_ALL        # gibt alle wieder frei
   Netzwerk-Call in einer Pending-Datei. Nach einem Verbindungsfehler oder
   einer Antwort mit unbekanntem Ausgang (HTTP 5xx, −1006/−1007) fragt der
   Bot bei Binance nach, statt zu raten; der nächste Zyklus trägt Fehlendes
-  als `[REKONZILIATION]` nach.
+  als `[REKONZILIATION]` nach. Lässt sich der Ausgang nicht klären, meldet
+  er `[ORDER-UNKLAR]` mit der clientOrderId. Nachschlagen, ob es die
+  Order gibt und ob sie verbucht ist (Abschnitt 8.4):
+  `python -m dca_bot.check_orders --client-order-id grid-7f3a9c2e14b84d6fa0e51c83`
 - **Kein zweiter Verkauf bei unklarem Ausgang:** solange ein Verkauf oder
   eine Stop-Order ungeklärt ist, verkauft der Bot dieselbe Position nicht
   erneut - auf dem geteilten Konto ginge das aus fremdem Bestand durch.
@@ -397,8 +401,8 @@ Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
 - **Kapital-Allocator:** `[ALLOCATION-UPDATE]` (bei signifikanter
   Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
 - **Alle vier:** `[HEARTBEAT]` (Lebenszeichen, siehe Abschnitt 6).
-  Botübergreifend außerdem `[ORDER-UNKLAR]`, `[REKONZILIATION]` und die
-  `[…BESTAND-DISKREPANZ]`-Meldungen.
+  Botübergreifend außerdem `[ORDER-UNKLAR]` (nachschlagen: Abschnitt
+  8.4), `[REKONZILIATION]` und die `[…BESTAND-DISKREPANZ]`-Meldungen.
 
 `[GRID-FEHLER]` und `[ALLOCATOR-FEHLER]` kommen pro Fehlertyp nur einmal,
 bis ein Zyklus wieder erfolgreich war - weitere gleichartige Fehlschläge
@@ -446,6 +450,28 @@ Einmaliges Korrektur-Werkzeug zum Fund vom 22.09.2026: rechnet
 und Eigenschaften: `trading-bot-projekt.md` Abschnitt 6g („Folgefund aus
 K3“).
 
+### 8.4 Orders nachschlagen (z.B. nach `[ORDER-UNKLAR]`)
+
+```bash
+python -m dca_bot.check_orders --client-order-id grid-7f3a9c2e14b84d6fa0e51c83
+python -m dca_bot.check_orders             # Übersicht aller drei Bots
+```
+
+Mit `--client-order-id` beantwortet das Skript die Frage hinter einer
+`[ORDER-UNKLAR]`-Meldung (die Meldung nennt den fertigen Aufruf): Gibt
+es diese Order bei Binance, und was ist aus ihr geworden? Das Symbol
+folgt aus dem Präfix (`dca-`, `grid-`, `trend-`), `--symbol` überschreibt
+es. Dazu prüft es die eigene Buchhaltung des Bots: Steht die ID noch in
+seiner Pending-Datei, steht sie im Ledger? Die letzte Zeile ordnet das
+ein, z.B. „Ausgeführt, noch NICHT im Ledger – der Bot trägt die Order im
+nächsten Zyklus nach“. Eine gescheiterte Abfrage ist keine Aussage über
+die Order (Exit-Code 2).
+
+Ohne Argumente zeigt es je Symbol der drei Bots Kurs, Guthaben und die
+letzten Orders (`--limit`, Default 10) mit clientOrderId und Bot. Das
+Skript liest nur: Es nutzt denselben Client wie das Positions-Audit
+(8.1), der strukturell keine Orders platzieren kann.
+
 ## 9. Tests
 
 ```bash
@@ -478,6 +504,7 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_request_timeout` | Request-Timeout des Grid-Bots |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat-Zeitstempel, Mengenlimit für Zyklusfehler |
 | `test_shared_account` | Alle Bots auf einem geteilten Konto: Teilfüllung, unklare Verkäufe, Dauerlauf mit Eigentums-Invariante |
+| `test_check_orders` | Orders nachschlagen (nur lesend), Abgleich mit Pending-Datei und Ledger |
 
 Was die einzelnen Tests prüfen und wie ihre Wirksamkeit gemessen wurde,
 steht bei den jeweiligen Fixes in `trading-bot-projekt.md` (6f, 6g, 6i,
