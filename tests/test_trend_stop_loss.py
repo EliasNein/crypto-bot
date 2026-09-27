@@ -23,24 +23,31 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from dca_bot.order_utils import SymbolTradingRules
 from dca_bot.pending_orders import (
+    KIND_MARKET,
     KIND_STOP_LOSS_LIMIT,
+    LOOKUP_FAILED,
+    LOOKUP_FOUND,
+    LOOKUP_NOT_FOUND,
     ORDER_CONFIRMED,
     ORDER_LIFECYCLE_DEAD,
     ORDER_LIFECYCLE_FILLED,
     ORDER_LIFECYCLE_LIVE,
     ORDER_WITHOUT_EFFECT,
+    PendingOrder,
     classify_order_status,
     order_lifecycle_state,
 )
 from dca_bot.trend_config import TrendConfig
 from dca_bot.trend_strategy import (
     UNCERTAIN_CYCLES_WARNING_THRESHOLD,
+    UNCLEAR_SELL_RECHECK_SECONDS,
+    UNCLEAR_SELL_RECHECKS,
     UNPROTECTED_CYCLES_WARNING_THRESHOLD,
     TrendFollowingStrategy,
 )
@@ -99,7 +106,16 @@ class FakeTradingClient(PendingOrdersMixin):
         # trading_enabled=True ist - simuliert einen echten API-Fehler
         # beim Verkauf (der zweite, voellig andere Grund fuer None neben
         # dem Dry-Run; siehe K1 in TrendSellSafetyTestCase unten).
+        # Das ist eine EINDEUTIGE Ablehnung: der echte Client entfernt den
+        # Pending-Eintrag dann selbst.
         self.force_market_sell_failure = False
+        # Der andere Fall (Systemcheck vom 27.09.2026, K-B): die Antwort
+        # ging verloren, der Pending-Eintrag bleibt stehen. Der Wert legt
+        # fest, was die Boerse spaeter per get_order_by_client_id() dazu
+        # sagt: "lookup_down" (Abfrage scheitert weiter), "filled" (der
+        # Verkauf ist durchgegangen), "never_arrived" (-2013).
+        self.unclear_market_sell: str | None = None
+        self.failing_lookups: set[str] = set()
         # Erzwingt, dass auch das Platzieren einer Stop-Loss-Order
         # fehlschlaegt - fuer den doppelt kritischen Fall "weder verkauft
         # noch abgesichert".
@@ -246,6 +262,24 @@ class FakeTradingClient(PendingOrdersMixin):
             return None
         if self.force_market_sell_failure:
             return None
+        if self.unclear_market_sell is not None:
+            client_order_id = self._new_client_order_id()
+            self.pending_orders.add(
+                PendingOrder.new(client_order_id, KIND_MARKET, symbol, "SELL", context)
+            )
+            if self.unclear_market_sell == "lookup_down":
+                self.failing_lookups.add(client_order_id)
+            elif self.unclear_market_sell == "filled":
+                fill_price = self.price if self.fill_price is None else self.fill_price
+                order_id = self._new_order_id()
+                self.orders[order_id] = {
+                    "orderId": order_id,
+                    "clientOrderId": client_order_id,
+                    "status": "FILLED",
+                    "executedQty": str(quantity),
+                    "cummulativeQuoteQty": str(quantity * fill_price),
+                }
+            return None
         fill_price = self.price if self.fill_price is None else self.fill_price
         gross = quantity * fill_price
         # executedQty gehoert zu jeder echten Market-Order-Antwort - ohne
@@ -316,6 +350,14 @@ class FakeTradingClient(PendingOrdersMixin):
     def get_order_status(self, symbol: str, order_id: str) -> dict | None:
         self.order_status_calls.append((symbol, order_id))
         return self.orders.get(order_id)
+
+    def get_order_by_client_id(self, symbol: str, client_order_id: str):
+        if client_order_id in self.failing_lookups:
+            return LOOKUP_FAILED, None
+        for order in self.orders.values():
+            if order.get("clientOrderId") == client_order_id:
+                return LOOKUP_FOUND, order
+        return LOOKUP_NOT_FOUND, None
 
     def fill_order(
         self,
@@ -979,7 +1021,12 @@ class TrendSellSafetyTestCase(TrendStrategyTestBase):
         self.assertIsNotNone(strategy._ledger.open_position())
 
     def test_failed_real_sell_is_retried_next_cycle(self):
-        """Die offene Position wird im nächsten Zyklus erneut verkauft."""
+        """
+        Nach einer EINDEUTIGEN Ablehnung wird die offene Position im
+        nächsten Zyklus erneut verkauft. Bei unklarem Ausgang gilt das
+        seit dem Systemcheck vom 27.09.2026 nicht mehr (K-B) - siehe
+        TrendUnclearSellTestCase.
+        """
         strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
         strategy._open_position(50_000.0)
         client.force_market_sell_failure = True
@@ -1034,6 +1081,154 @@ class TrendSellSafetyTestCase(TrendStrategyTestBase):
             any("[TREND-POSITION-UNKLAR]" in line for line in captured.output),
             "Der unklare Zustand muss sichtbar geloggt werden",
         )
+
+
+class TrendUnclearSellTestCase(TrendStrategyTestBase):
+    """
+    K-B/W-B (Systemcheck vom 27.09.2026): ein Market-Sell, dessen Antwort
+    verloren ging. Die Stop-Order ist zu diesem Zeitpunkt bereits
+    storniert. Bis zum Fix platzierte _handle_failed_real_sell() sofort
+    eine neue Stop-Order ueber die volle Menge und der naechste Zyklus
+    verkaufte erneut - war der erste Verkauf durchgegangen, beides aus dem
+    Bestand eines anderen Bots.
+
+    Jetzt: bis zu UNCLEAR_SELL_RECHECKS Nachpruefungen im Abstand von
+    UNCLEAR_SELL_RECHECK_SECONDS; `_sleep` wird dafuer durch eine Uhr
+    ersetzt, die die Zeit der Pending-Ablage mitlaufen laesst - so greift
+    auch die 60-s-Grenze fuer -2013 wie im Betrieb.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.clock = [datetime(2026, 9, 27, 12, 0, tzinfo=timezone.utc)]
+        self.sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.clock[0] += timedelta(seconds=seconds)
+
+        for target, replacement in (
+            ("dca_bot.trend_strategy._sleep", fake_sleep),
+            ("dca_bot.pending_orders._utcnow", lambda: self.clock[0]),
+        ):
+            patcher = mock.patch(target, replacement)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _open_real_position(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        return strategy, client, strategy._ledger.open_position()
+
+    def test_unclear_sell_places_no_new_stop_order_and_warns(self):
+        strategy, client, open_trade = self._open_real_position()
+        client.unclear_market_sell = "lookup_down"
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(self.sleeps, [UNCLEAR_SELL_RECHECK_SECONDS] * UNCLEAR_SELL_RECHECKS)
+        self.assertEqual(len(client.stop_order_calls), 1, "Nur die Stop-Order vom Entry")
+        still_open = strategy._ledger.open_position()
+        self.assertIsNotNone(still_open)
+        self.assertIsNone(
+            still_open["stop_loss_order_id"],
+            "Die stornierte Order darf nicht als Absicherung stehen bleiben",
+        )
+        self.assertEqual(len(client.pending_orders.entries_for(side="SELL")), 1)
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-WARNUNG]", text)
+        self.assertIn("UNGESCHUETZT", text)
+
+    def test_unclear_sell_blocks_the_next_exit_and_new_stop_orders(self):
+        """Die naechsten Zyklen verkaufen nicht erneut und platzieren keine Stop-Order (W-B)."""
+        strategy, client, open_trade = self._open_real_position()
+        client.unclear_market_sell = "lookup_down"
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+        client.unclear_market_sell = None
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as mock_notify:
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                for _ in range(UNPROTECTED_CYCLES_WARNING_THRESHOLD):
+                    strategy._close_position(
+                        strategy._ledger.open_position(), price=52_000.0, reason="signal"
+                    )
+
+        self.assertEqual(len(client.market_sell_calls), 1, "Kein zweiter Verkauf")
+        self.assertEqual(len(client.stop_order_calls), 1, "Keine neue Stop-Order")
+        self.assertEqual(
+            len([line for line in captured.output if "[TREND-AUSSTIEG-UNGEKLAERT]" in line]),
+            UNPROTECTED_CYCLES_WARNING_THRESHOLD,
+        )
+        still_open = strategy._ledger.open_position()
+        self.assertEqual(still_open["unprotected_cycles"], UNPROTECTED_CYCLES_WARNING_THRESHOLD)
+        # Ab der Schwelle meldet die bestehende Zaehlung - mit Ursache.
+        (text,), _ = mock_notify.call_args
+        self.assertIn("[TREND-WARNUNG]", text)
+        self.assertIn("ungeklaert", text)
+
+    def test_unclear_sell_that_went_through_is_booked_during_rechecks(self):
+        strategy, client, open_trade = self._open_real_position()
+        client.unclear_market_sell = "filled"
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(open_trade, price=44_000.0, reason="stop_loss")
+
+        self.assertEqual(self.sleeps, [UNCLEAR_SELL_RECHECK_SECONDS], "Erste Nachpruefung reicht")
+        self.assertIsNone(strategy._ledger.open_position())
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["exit_reason"], "stop_loss")
+        (sell_context,) = [c for c in client.order_contexts if c and "reason" in c]
+        self.assertEqual(sell_context["trade_id"], open_trade["id"])
+        self.assertTrue(closed["exit_client_order_id"].startswith("trend-test-"))
+        self.assertEqual(client.pending_orders.all(), [])
+        self.assertEqual(len(client.stop_order_calls), 1, "Keine neue Stop-Order")
+        self.assertTrue(strategy._stop_loss.is_paused(), "Der Ausstieg war real")
+
+    def test_unclear_sell_that_never_arrived_restores_protection_after_60_seconds(self):
+        """
+        -2013 ist erst nach 60 s endgueltig (Order kann kurz unsichtbar
+        sein). Danach gilt der Verkauf als nie angekommen - die
+        Absicherung wird wie nach einer Ablehnung wiederhergestellt.
+        """
+        strategy, client, open_trade = self._open_real_position()
+        client.unclear_market_sell = "never_arrived"
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(self.sleeps, [UNCLEAR_SELL_RECHECK_SECONDS] * UNCLEAR_SELL_RECHECKS)
+        self.assertEqual(client.pending_orders.all(), [])
+        self.assertEqual(len(client.stop_order_calls), 2, "Absicherung wiederhergestellt")
+        still_open = strategy._ledger.open_position()
+        self.assertEqual(client.orders[still_open["stop_loss_order_id"]]["status"], "NEW")
+
+    def test_definite_rejection_does_not_wait(self):
+        """Eine eindeutige Ablehnung braucht keine Nachpruefung."""
+        strategy, client, open_trade = self._open_real_position()
+        client.force_market_sell_failure = True
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(open_trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(len(client.stop_order_calls), 2)
+
+    def test_entry_is_blocked_while_a_buy_is_unclear(self):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        client.pending_orders.add(
+            PendingOrder.new("trend-unklar-1", KIND_MARKET, "BTCUSDT", "BUY", {"price": 50_000.0})
+        )
+        client.failing_lookups.add("trend-unklar-1")
+        strategy._signal_gen.feed = lambda price: {"confirmed_direction": "up"}
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            with self.assertLogs("trend_bot", level="INFO") as captured:
+                strategy.execute_once()
+
+        self.assertEqual(client.market_buy_calls, [])
+        self.assertTrue(any("[TREND-EINSTIEG-UNGEKLAERT]" in line for line in captured.output))
 
 
 class TrendStopLossProtectionTestCase(TrendStrategyTestBase):

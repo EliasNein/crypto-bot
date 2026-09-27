@@ -18,6 +18,7 @@ kein geteilter Zustand.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
@@ -39,16 +40,21 @@ from .order_utils import (
     quantize_quantity,
 )
 from .pending_orders import (
+    KIND_MARKET,
     KIND_STOP_LOSS_LIMIT,
     ManualReviewRequired,
+    ORDER_CONFIRMED,
     ORDER_LIFECYCLE_DEAD,
     ORDER_LIFECYCLE_FILLED,
     ORDER_LIFECYCLE_LIVE,
+    ORDER_UNKNOWN,
+    ORDER_WITHOUT_EFFECT,
     RECONCILIATION_PREFIX,
     PendingOrder,
     executed_quantity,
     order_lifecycle_state,
     reconcile_pending_orders,
+    resolve_pending_order,
 )
 from .risk import KillSwitch
 from .startup_checks import report_ledger_vs_account
@@ -80,6 +86,21 @@ UNPROTECTED_CYCLES_WARNING_THRESHOLD = 3
 # ist fuer die manuelle Pruefung eine andere Aussage als jeder echte
 # Order-Status.
 STOP_ORDER_STATUS_UNAVAILABLE = "nicht abrufbar"
+
+# Nachfrage nach einem Verkauf mit unklarem Ausgang (Systemcheck vom
+# 27.09.2026, K-B, Entscheidung 2): bis zu 3 Rueckfragen im Abstand von
+# 20 s, zusammen etwa eine Minute. Der Trend-Bot laeuft nur einmal am Tag -
+# ohne diese Nachfrage laege bis zum naechsten Zyklus weder eine
+# Stop-Order an der Boerse noch waere klar, ob die Position ueberhaupt noch
+# existiert. Eine Minute deckt die naechtliche Zwangstrennung (wenige
+# Sekunden) ab und reicht, damit "Order unbekannt" endgueltig wird (siehe
+# pending_orders.UNKNOWN_FINAL_AFTER_SECONDS). Der Notaus reagiert in dieser
+# Zeit verzoegert.
+UNCLEAR_SELL_RECHECKS = 3
+UNCLEAR_SELL_RECHECK_SECONDS = 20.0
+
+# Eigener Name statt time.sleep direkt - die Tests ersetzen ihn.
+_sleep = time.sleep
 
 
 class TrendFollowingStrategy:
@@ -434,6 +455,26 @@ class TrendFollowingStrategy:
             self._ensure_stop_loss_protection(open_trade)
             return
 
+        # Sperre (Systemcheck vom 27.09.2026, K-B): Steht fuer diesen Trade
+        # noch ein Verkauf oder eine Stop-Order mit ungeklaertem Ausgang in
+        # der Pending-Datei, wird NICHT erneut ausgestiegen. War die fruehere
+        # Order durchgegangen, kaeme ein zweiter Verkauf aus dem Bestand
+        # eines anderen Bots - die Deckungspruefung sieht nur `free`, nicht,
+        # wem es gehoert. Die Reconciliation zu Beginn jedes Zyklus klaert
+        # den Eintrag, sobald Binance wieder antwortet.
+        pending = self._pending_sells(open_trade)
+        if pending:
+            logger.warning(
+                "[TREND-AUSSTIEG-UNGEKLAERT] Ausstieg (%s) fuer Trade %s waere "
+                "faellig, aber die Order(s) %s haben noch keinen geklaerten "
+                "Ausgang - es wird NICHT erneut verkauft.",
+                reason,
+                open_trade["id"],
+                ", ".join(p.client_order_id for p in pending),
+            )
+            self._ensure_stop_loss_protection(open_trade)
+            return
+
         # Siehe _open_position: Regeln vor der ersten Order holen, damit
         # ein Fehlschlag folgenlos abbricht statt einen bereits
         # ausgeführten Verkauf unverbucht zu lassen.
@@ -644,6 +685,81 @@ class TrendFollowingStrategy:
             "Aussteigen TREND_BOT_ENABLE_TRADING=true setzen."
         )
 
+    def _pending_sells(self, open_trade: dict) -> list[PendingOrder]:
+        """
+        Verkaufs- und Stop-Orders dieses Trades, deren Ausgang noch nicht
+        geklaert ist (Pending-Eintrag steht noch). Solange es welche gibt,
+        platziert der Bot fuer den Trade keine weitere Sell-Order
+        (Systemcheck vom 27.09.2026, K-B/W-B).
+        """
+        return self._client.pending_orders.entries_for(
+            side="SELL", trade_id=open_trade["id"]
+        )
+
+    def _settle_unclear_sell(
+        self, open_trade: dict, unclear: list[PendingOrder]
+    ) -> bool:
+        """
+        Klaert einen Market-Sell mit unklarem Ausgang durch bis zu
+        UNCLEAR_SELL_RECHECKS Nachpruefungen im Abstand von
+        UNCLEAR_SELL_RECHECK_SECONDS (zusammen 60 s - die Altersgrenze,
+        ab der -2013 endgueltig ist, siehe pending_orders.py).
+
+        Rueckgabe True: der Fall ist hier erledigt - entweder wurde der
+        Verkauf als ausgefuehrt verbucht, oder sein Ausgang bleibt unklar
+        und es wird bewusst KEINE neue Stop-Order platziert. False: der
+        Verkauf hat nachweislich nichts bewirkt, der Aufrufer stellt die
+        Absicherung wie bei einer eindeutigen Ablehnung wieder her.
+
+        Warum warten statt gleich den naechsten Zyklus: der Trend-Bot
+        laeuft im 24-Stunden-Takt. Eine Minute Nachpruefung ist gegen einen
+        Tag ohne exchange-seitigen Schutz der deutlich kleinere Preis.
+        """
+        store = self._client.pending_orders
+        remaining = list(unclear)
+        for _ in range(UNCLEAR_SELL_RECHECKS):
+            _sleep(UNCLEAR_SELL_RECHECK_SECONDS)
+            still_open = []
+            for pending in remaining:
+                state, order = resolve_pending_order(self._client, pending)
+                if state == ORDER_CONFIRMED:
+                    self._record_reconciled_exit(pending, order)
+                    store.remove(pending.client_order_id)
+                    return True
+                if state == ORDER_WITHOUT_EFFECT or (
+                    state == ORDER_UNKNOWN and pending.unknown_is_final()
+                ):
+                    store.remove(pending.client_order_id)
+                    continue
+                still_open.append(pending)
+            remaining = still_open
+            if not remaining:
+                return False
+
+        # Die stornierte Stop-Order ist nicht mehr da - die alte ID stehen
+        # zu lassen waere eine Falschangabe (siehe unten im Aufrufer).
+        self._ledger.set_stop_loss_order(open_trade["id"], None, None)
+        open_trade["stop_loss_order_id"] = None
+        ids = ", ".join(p.client_order_id for p in remaining)
+        logger.warning(
+            "[TREND-VERKAUF-UNGEKLAERT] Ausgang des Verkaufs %s fuer Position "
+            "%s auch nach %d Nachpruefungen unklar - es wird KEINE neue "
+            "Stop-Order platziert (waere der Verkauf durchgegangen, liefe sie "
+            "gegen den Bestand eines anderen Bots). Die Reconciliation zu "
+            "Beginn jedes Zyklus prueft weiter.",
+            ids,
+            open_trade["id"],
+            UNCLEAR_SELL_RECHECKS,
+        )
+        send_notification(
+            f"[TREND-WARNUNG] {self._config.symbol}: Ausgang des Verkaufs {ids} "
+            "ungeklaert. Die Stop-Order war dafuer bereits storniert - die "
+            "Position ist moeglicherweise UNGESCHUETZT, falls der Verkauf nicht "
+            "durchging. Keine neue Order, bis Binance den Ausgang bestaetigt. "
+            "Bitte pruefen."
+        )
+        return True
+
     def _handle_failed_real_sell(
         self, open_trade: dict, price: float, cause: str | None = None
     ) -> None:
@@ -677,6 +793,26 @@ class TrendFollowingStrategy:
         dort geht es darum, eine BESTEHENDE Order nicht rückwirkend mit
         einem geänderten Config-Wert zu verfälschen.
         """
+        # Ausgang des Verkaufs unklar (Systemcheck vom 27.09.2026, K-B)?
+        # Erkennbar daran, dass sein Pending-Eintrag noch steht - bei einer
+        # eindeutigen Ablehnung hat der Client ihn bereits entfernt. Dann
+        # wird hier KEINE neue Stop-Order ueber die volle Menge platziert:
+        # war der Verkauf durchgegangen, waere sie aus fremdem Bestand
+        # gedeckt, und der naechste Zyklus verkaufte ein zweites Mal.
+        if cause is None:
+            unclear = [
+                p for p in self._pending_sells(open_trade) if p.kind == KIND_MARKET
+            ]
+            if unclear and self._settle_unclear_sell(open_trade, unclear):
+                return
+            if self._pending_sells(open_trade):
+                # Kein Market-Sell mehr offen, wohl aber eine Stop-Order
+                # mit unklarem Ausgang - auch dann keine zweite Order.
+                self._ledger.set_stop_loss_order(open_trade["id"], None, None)
+                open_trade["stop_loss_order_id"] = None
+                self._ensure_stop_loss_protection(open_trade)
+                return
+
         headline = cause or "Echter Verkauf fehlgeschlagen"
         logger.warning(
             "[TREND-VERKAUF-FEHLGESCHLAGEN] %s für %s (Position %s, Preis "
@@ -801,6 +937,27 @@ class TrendFollowingStrategy:
             return  # bereits abgesichert, nichts zu tun
 
         previous_count = open_trade.get("unprotected_cycles", 0)
+
+        # Sperre (Systemcheck vom 27.09.2026, W-B): Hat eine fruehere
+        # Stop-Order oder ein Verkauf dieses Trades noch keinen geklaerten
+        # Ausgang, wird keine neue Order platziert. Die fruehere kann an der
+        # Boerse liegen - eine zweite waere dann aus dem Bestand eines
+        # anderen Bots gedeckt. Gezaehlt und gemeldet wird trotzdem, denn
+        # ob die Position abgesichert ist, weiss der Bot in dieser Lage nicht.
+        pending = self._pending_sells(open_trade)
+        if pending:
+            self._count_unprotected_cycle(
+                open_trade,
+                previous_count,
+                log_prefix,
+                cause=(
+                    "der Ausgang einer frueheren Order ("
+                    + ", ".join(p.client_order_id for p in pending)
+                    + ") ist ungeklaert, eine neue Stop-Order waere womoeglich "
+                    "aus fremdem Bestand gedeckt"
+                ),
+            )
+            return
 
         if not self._config.trading_enabled:
             # Keine Platzierung (der Bot darf im Dry-Run keine echte Order
@@ -1775,4 +1932,17 @@ class TrendFollowingStrategy:
 
         action = decide_action(confirmed, has_open_position=False, stop_loss_paused=False)
         if action == "ENTER":
+            # Ein Einstieg mit ungeklaertem Ausgang kann eine offene Position
+            # sein, die das Ledger noch nicht kennt - ein zweiter Kauf braeche
+            # die Ein-Positions-Regel (Systemcheck vom 27.09.2026, K-B).
+            unclear_buys = self._client.pending_orders.entries_for(side="BUY")
+            if unclear_buys:
+                logger.warning(
+                    "[TREND-EINSTIEG-UNGEKLAERT] Einstiegssignal fuer %s, aber "
+                    "der Ausgang von Kauf-Order(s) %s ist noch ungeklaert - kein "
+                    "neuer Einstieg, bis die Reconciliation sie geklaert hat.",
+                    self._config.symbol,
+                    ", ".join(p.client_order_id for p in unclear_buys),
+                )
+                return
             self._open_position(price)

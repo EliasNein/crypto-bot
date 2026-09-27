@@ -40,6 +40,7 @@ from dca_bot.grid_config import GridConfig
 from dca_bot.grid_risk import GridPosition
 from dca_bot.grid_signals import find_triggered_buy_levels
 from dca_bot.order_utils import SymbolTradingRules, quantize_quantity
+from dca_bot.pending_orders import KIND_MARKET, PendingOrder
 from dca_bot.grid_strategy import GridTradingStrategy
 
 from tests.fake_pending import PendingOrdersMixin
@@ -65,6 +66,11 @@ class FakeGridClient(PendingOrdersMixin):
     ohne eine Order zu platzieren. `force_market_sell_failure` simuliert
     zusätzlich den ANDEREN None-Fall - einen echten API-Fehler trotz
     aktiviertem Trading (genau die Zweideutigkeit, um die es in K1 geht).
+
+    Dieser Fehler ist eine EINDEUTIGE Ablehnung: der echte Client entfernt
+    den Pending-Eintrag dann selbst. `unclear_market_sell` bildet den
+    anderen Fall nach (Systemcheck vom 27.09.2026, K-B) - die Antwort ging
+    verloren, der Ausgang ist offen, der Pending-Eintrag bleibt stehen.
     """
 
     def __init__(self, trading_enabled: bool, price: float):
@@ -73,6 +79,7 @@ class FakeGridClient(PendingOrdersMixin):
         self.market_sell_calls: list[tuple] = []
         self.market_buy_calls: list[tuple] = []
         self.force_market_sell_failure = False
+        self.unclear_market_sell = False
         # Siehe FakeTradingClient in tests/test_trend_stop_loss.py: Default
         # 0.0 entspricht dem beobachteten Testnet-Verhalten, Tests zur
         # Gebuehrenkorrektur setzen 0.001 (Live-Standardsatz).
@@ -163,6 +170,13 @@ class FakeGridClient(PendingOrdersMixin):
         if not self.trading_enabled:
             return None
         if self.force_market_sell_failure:
+            return None
+        if self.unclear_market_sell:
+            self.pending_orders.add(
+                PendingOrder.new(
+                    self._new_client_order_id(), KIND_MARKET, symbol, "SELL", context
+                )
+            )
             return None
         fill_price = self.price if self.fill_price is None else self.fill_price
         gross = quantity * fill_price
@@ -417,12 +431,17 @@ class GridSellSafetyTestCase(GridStrategyTestBase):
         (text,), _ = mock_notify.call_args
         self.assertIn("[GRID-VERKAUF-FEHLGESCHLAGEN]", text)
 
-    def test_failed_real_sell_is_retried_next_cycle_without_notification_spam(self):
+    def test_rejected_real_sell_is_retried_next_cycle_without_notification_spam(self):
         """
-        Die Position bleibt offen und ihr Sell-Target weiterhin erreicht,
-        der nächste Zyklus versucht den Verkauf also automatisch erneut.
-        Telegram darf dabei nur EINMAL pro Prozesslauf melden (sonst im
-        5-Minuten-Takt), ins Log geht jeder Fehlschlag.
+        Die Börse hat den Verkauf EINDEUTIG abgelehnt (kein Pending-Eintrag
+        mehr). Die Position bleibt offen und ihr Sell-Target weiterhin
+        erreicht, der nächste Zyklus versucht den Verkauf also automatisch
+        erneut. Telegram darf dabei nur EINMAL pro Prozesslauf melden (sonst
+        im 5-Minuten-Takt), ins Log geht jeder Fehlschlag.
+
+        Bis zum Systemcheck vom 27.09.2026 galt das für JEDEN
+        fehlgeschlagenen Verkauf - auch für einen mit unklarem Ausgang
+        (K-B). Den Fall prüft jetzt der Test darunter.
         """
         strategy, client = self._make_strategy(trading_enabled=True, price=79_000.0)
         self._add_open_position(strategy, dry_run=False)
@@ -445,6 +464,47 @@ class GridSellSafetyTestCase(GridStrategyTestBase):
         # Klappt der Verkauf später doch, wird regulär geschlossen.
         client.force_market_sell_failure = False
         strategy._process_sells(79_000.0)
+        self.assertEqual(strategy._ledger.open_positions(), [])
+
+    def test_unclear_real_sell_is_not_retried_while_outcome_unclear(self):
+        """
+        K-B (Systemcheck vom 27.09.2026): Ging die Antwort auf den Verkauf
+        verloren, kann er an der Börse durchgegangen sein. Ein zweiter
+        Versuch im nächsten Zyklus wäre dann aus dem Bestand eines anderen
+        Bots gedeckt - die Deckungsprüfung sieht nur `free`, nicht, wem es
+        gehört. Also: kein neuer Versuch, solange der Pending-Eintrag
+        steht; erst wenn die Reconciliation ihn geklärt (entfernt) hat.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=79_000.0)
+        record = self._add_open_position(strategy, dry_run=False)
+        client.unclear_market_sell = True
+
+        with mock.patch("dca_bot.grid_strategy.send_notification") as mock_notify:
+            with self.assertLogs("grid_bot", level="INFO") as captured:
+                strategy._process_sells(79_000.0)
+                strategy._process_sells(79_000.0)
+                strategy._process_sells(79_000.0)
+
+        self.assertEqual(len(client.market_sell_calls), 1, "Nur der erste Versuch")
+        self.assertEqual(len(strategy._ledger.open_positions()), 1)
+        failed = [line for line in captured.output if "[GRID-VERKAUF-FEHLGESCHLAGEN]" in line]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("UNKLAR", failed[0])
+        self.assertEqual(
+            len([line for line in captured.output if "[GRID-VERKAUF-UNGEKLAERT]" in line]),
+            2,
+            "Jeder gesperrte Zyklus steht im Log",
+        )
+        self.assertEqual(mock_notify.call_count, 1)
+
+        # Die Reconciliation stellt fest: ohne Wirkung - Eintrag weg, der
+        # nächste Zyklus verkauft regulär.
+        (pending,) = client.pending_orders.entries_for(side="SELL", position_id=record["id"])
+        client.pending_orders.remove(pending.client_order_id)
+        client.unclear_market_sell = False
+        with mock.patch("dca_bot.grid_strategy.send_notification"):
+            strategy._process_sells(79_000.0)
+        self.assertEqual(len(client.market_sell_calls), 2)
         self.assertEqual(strategy._ledger.open_positions(), [])
 
     # -- Regression: erfolgreicher echter Verkauf funktioniert unverändert --

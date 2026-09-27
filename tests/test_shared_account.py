@@ -684,7 +684,6 @@ class UnclearSellTestCase(SharedAccountTestBase):
         self.assertEqual(len(positions), 1, "Testaufbau: genau ein Grid-Kauf")
         return grid, positions[0]
 
-    @unittest.expectedFailure
     def test_grid_does_not_sell_again_while_the_first_sell_is_unclear(self):
         """
         Reproduktion 2: Der Verkauf geht durch, die Antwort geht verloren,
@@ -713,7 +712,6 @@ class UnclearSellTestCase(SharedAccountTestBase):
         self.assertEqual(grid._client.pending_orders.all(), [])
         self.assert_ownership()
 
-    @unittest.expectedFailure
     def test_trend_places_no_stop_order_from_foreign_holdings_after_unclear_sell(self):
         """
         Trend-Seite von K-B: Nach dem unklaren Verkauf platzierte
