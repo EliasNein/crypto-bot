@@ -26,9 +26,18 @@ Ausfuehren mit:  python -m unittest tests.test_allocator_backtest -v
 
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
+from unittest import mock
 
-from dca_bot.allocator_backtest import run_allocated_backtest
+from dca_bot import allocator_backtest
+from dca_bot.allocator_backtest import (
+    isolated_dca_summary,
+    isolated_trend_summary,
+    run_allocated_backtest,
+)
+from dca_bot.backtest import run_dca_backtest
 from dca_bot.trend_backtest import run_trend_backtest
 
 from tests.test_trend_auto_reset import (
@@ -186,6 +195,137 @@ class ConsistencyWithTrendBacktestTestCase(unittest.TestCase):
         self.assertEqual(
             allocated.trade_log[0]["entry_date"], isolated.trade_log[0]["entry_date"]
         )
+
+
+# --------------------------------------------------------------------------
+# Vergleichszeilen des Reports (Berichtsfehler aus dem W-G-Nebenbefund)
+# --------------------------------------------------------------------------
+
+# Zwei per Signal abgeschlossene Trades, am Ende nichts offen - der Aufbau
+# des 2023-Falls (dort zwei abgeschlossene Trades, 30,00 investiert).
+TWO_CLOSED_TRADES = RISE + SIGNAL_REVERSAL + SECOND_RISE + [125.0, 116.0, 110.0, 105.0]
+# Ein abgeschlossener Trade plus eine am Ende offene Position.
+TRADE_THEN_OPEN = RISE + SIGNAL_REVERSAL + SECOND_RISE
+# Nur eine offene Position, kein abgeschlossener Trade - der 2021-Fall.
+ONLY_OPEN = RISE
+
+TREND_AMOUNT = 15.0
+
+
+class IsolatedTrendSummaryTestCase(unittest.TestCase):
+    """
+    Die Zeile "isoliert Trend" stellte `total_pnl_pct` aus run_trend_backtest
+    neben den investierten Gesamtbetrag. Der Wert ist dort bewusst auf EINEN
+    Trade-Betrag bezogen - bei mehreren Trades also zu gross, und eine am
+    Ende offene Position fehlte ganz im PnL, zaehlte aber zum Einsatz.
+    """
+
+    def test_premise_two_closed_trades_reproduce_the_old_report_value(self):
+        """
+        Die Reihe hat genau zwei abgeschlossene Trades und nichts offen, und
+        der bisher angezeigte Wert ist die Summe bezogen auf 15,00 - also
+        genau der Fehler aus 2023 (dort +13,14 % statt +6,57 %).
+        """
+        result = run_trend(TWO_CLOSED_TRADES)
+        self.assertEqual(len(result.trade_log), 2)
+        self.assertIsNone(result.open_position_unrealized_pnl)
+        self.assertAlmostEqual(
+            result.total_pnl_pct, result.total_pnl / TREND_AMOUNT * 100
+        )
+
+    def test_two_closed_trades_are_related_to_the_total_invested(self):
+        result = run_trend(TWO_CLOSED_TRADES)
+        summary = isolated_trend_summary(result, TREND_AMOUNT)
+
+        self.assertEqual(summary.invested, 30.0)
+        self.assertAlmostEqual(summary.pnl, sum(t["pnl"] for t in result.trade_log))
+        self.assertAlmostEqual(summary.return_pct, summary.pnl / 30.0 * 100)
+        # Und das ist ein anderer Wert als der bisher angezeigte - halb so gross.
+        self.assertAlmostEqual(summary.return_pct * 2, result.total_pnl_pct)
+
+    def test_open_position_is_valued_at_period_end(self):
+        for name, prices, entries in (
+            ("Trade plus offene Position", TRADE_THEN_OPEN, 2),
+            ("nur offene Position (2021-Fall)", ONLY_OPEN, 1),
+        ):
+            with self.subTest(series=name):
+                result = run_trend(prices)
+                # Praemisse: es gibt ein unrealisiertes Ergebnis, das fehlen koennte.
+                self.assertIsNotNone(result.open_position_unrealized_pnl)
+                self.assertNotAlmostEqual(result.open_position_unrealized_pnl, 0.0)
+
+                summary = isolated_trend_summary(result, TREND_AMOUNT)
+                expected_pnl = result.total_pnl + result.open_position_unrealized_pnl
+                self.assertEqual(summary.invested, TREND_AMOUNT * entries)
+                self.assertAlmostEqual(summary.pnl, expected_pnl)
+                self.assertAlmostEqual(summary.return_pct, expected_pnl / summary.invested * 100)
+
+    def test_no_trade_at_all(self):
+        summary = isolated_trend_summary(run_trend([100.0] * 12), TREND_AMOUNT)
+        self.assertEqual((summary.invested, summary.pnl, summary.return_pct), (0.0, 0.0, 0.0))
+
+
+class IsolatedDcaSummaryTestCase(unittest.TestCase):
+    def test_dca_is_valued_at_period_end(self):
+        """
+        DCA verkauft nie: PnL = Endwert - Einsatz, bezogen auf den Einsatz.
+        Das war schon vorher richtig (dca_return_pct) - der Test haelt fest,
+        dass die neue Zeile dieselbe Zahl liefert und jetzt auch den PnL.
+        """
+        result = run_dca_backtest(
+            make_klines(RISE + CRASH), symbol="TESTUSDT", quote_amount=15.0, buy_every_n_candles=1
+        )
+        summary = isolated_dca_summary(result)
+        self.assertEqual(summary.invested, result.total_invested)
+        self.assertAlmostEqual(summary.pnl, result.dca_final_value - result.total_invested)
+        self.assertAlmostEqual(summary.return_pct, result.dca_return_pct)
+
+
+class ReportWiringTestCase(unittest.TestCase):
+    """
+    Der Fehler sass nicht in einer Rechenfunktion, sondern in main(), das
+    den falschen Wert an print_report weitergab. Deshalb laeuft dieser Test
+    durch die echte main(), nur die Kursdaten sind ersetzt.
+    """
+
+    def run_main(self, prices) -> str:
+        argv = [
+            "allocator_backtest", "--symbol", "TESTUSDT",
+            "--start", START_DATE, "--end", "2024-12-31",
+            "--ema-fast", str(FAST_PERIOD), "--ema-slow", str(SLOW_PERIOD),
+            "--trend-min-gap-pct", str(MIN_GAP_PCT), "--trend-stop-loss-pct", str(STOP_LOSS_PCT),
+            "--trend-amount", str(TREND_AMOUNT), "--fee-pct", str(FEE_PCT),
+        ]
+        out = io.StringIO()
+        with mock.patch("sys.argv", argv), mock.patch.object(
+            allocator_backtest, "fetch_historical_klines", return_value=make_klines(prices)
+        ), contextlib.redirect_stdout(out):
+            allocator_backtest.main()
+        return out.getvalue()
+
+    @staticmethod
+    def line(output: str, marker: str) -> str:
+        return next(line for line in output.splitlines() if marker in line)
+
+    def test_trend_line_shows_total_based_pnl_and_percent(self):
+        summary = isolated_trend_summary(run_trend(TWO_CLOSED_TRADES), TREND_AMOUNT)
+        line = self.line(self.run_main(TWO_CLOSED_TRADES), "isoliert Trend")
+        self.assertIn(
+            f"investiert {summary.invested:,.2f}, PnL {summary.pnl:+,.2f} ({summary.return_pct:+.2f}%)",
+            line,
+        )
+
+    def test_trend_line_includes_open_position(self):
+        summary = isolated_trend_summary(run_trend(TRADE_THEN_OPEN), TREND_AMOUNT)
+        line = self.line(self.run_main(TRADE_THEN_OPEN), "isoliert Trend")
+        self.assertIn(f"PnL {summary.pnl:+,.2f} ({summary.return_pct:+.2f}%)", line)
+
+    def test_dca_line_shows_pnl(self):
+        output = self.run_main(TWO_CLOSED_TRADES)
+        self.assertRegex(self.line(output, "isoliert DCA"), r"PnL [+-][\d,]+\.\d\d \([+-]\d+\.\d\d%\)")
+
+    def test_valuation_rule_is_stated_in_the_report(self):
+        self.assertIn("realisiert + unrealisiert", self.run_main(TWO_CLOSED_TRADES))
 
 
 if __name__ == "__main__":

@@ -53,8 +53,14 @@ from .allocator_signals import (
     derive_trend_strength,
     smooth_fraction,
 )
-from .backtest import fetch_historical_klines, run_dca_backtest
-from .trend_backtest import DEFAULT_PERIODS, _extended_start_date, compute_max_drawdown, run_trend_backtest
+from .backtest import BacktestResult, fetch_historical_klines, run_dca_backtest
+from .trend_backtest import (
+    DEFAULT_PERIODS,
+    TrendBacktestResult,
+    _extended_start_date,
+    compute_max_drawdown,
+    run_trend_backtest,
+)
 from .trend_signals import TrendSignalGenerator, decide_action, is_stop_loss_hit
 
 
@@ -249,12 +255,55 @@ def run_allocated_backtest(
     )
 
 
+@dataclass(frozen=True)
+class IsolatedSummary:
+    """
+    Eine isolierte Vergleichszeile, nach derselben Regel bewertet wie
+    KOMBINIERT: investierter Gesamtbetrag, PnL zum Periodenende (realisiert
+    plus unrealisiert) und der Prozentwert genau darauf bezogen.
+    """
+
+    invested: float
+    pnl: float
+    return_pct: float
+
+
+def _summary(invested: float, pnl: float) -> IsolatedSummary:
+    return IsolatedSummary(invested, pnl, pnl / invested * 100 if invested > 0 else 0.0)
+
+
+def isolated_dca_summary(result: BacktestResult) -> IsolatedSummary:
+    """DCA verkauft nie - der PnL ist der Endwert abzüglich des Einsatzes."""
+    return _summary(result.total_invested, result.dca_final_value - result.total_invested)
+
+
+def isolated_trend_summary(result: TrendBacktestResult, amount_per_trade: float) -> IsolatedSummary:
+    """
+    Der isolierte Trend-Backtest als Vergleichszeile.
+
+    Bis zum 27.09.2026 stand hier `result.total_pnl_pct` neben dem
+    investierten Gesamtbetrag. Dieser Wert ist in run_trend_backtest
+    bewusst anders definiert - Summe aller realisierten Trades bezogen auf
+    EINEN Trade-Betrag ("ggü. Positionsgröße") - und passte deshalb nicht
+    zur Zeile: 2023 zeigte der Report +13,14 % bei 30,00 investiert,
+    tatsächlich waren es +1,97, also +6,57 %. Außerdem zählte eine am Ende
+    offene Position zwar zum investierten Betrag, ihr unrealisiertes
+    Ergebnis aber nicht zum PnL (2021: 0,00 % statt +11,83 %), während
+    KOMBINIERT und isoliert DCA offene Positionen zum Periodenende bewerten.
+
+    Jeder Trade setzt `amount_per_trade` ein (die Gebühr steckt in der
+    Menge, nicht im Betrag), der Einsatz ist also Betrag x Anzahl der
+    Einstiege - abgeschlossene plus die offene.
+    """
+    open_pnl = result.open_position_unrealized_pnl
+    entries = len(result.trade_log) + (1 if open_pnl is not None else 0)
+    return _summary(amount_per_trade * entries, result.total_pnl + (open_pnl or 0.0))
+
+
 def print_report(
     allocated: AllocatedBacktestResult,
-    dca_isolated_invested: float,
-    dca_isolated_return_pct: float,
-    trend_isolated_invested: float,
-    trend_isolated_return_pct: float,
+    dca_isolated: IsolatedSummary,
+    trend_isolated: IsolatedSummary,
     label: str,
 ) -> None:
     print(f"\n{'=' * 60}")
@@ -270,12 +319,16 @@ def print_report(
     if allocated.trend_stop_loss_paused_at_end:
         print("  Stop-Loss-Sperre am Ende aktiv: nach dem Stop-Loss keine neuen Einstiege (wie live bis zum manuellen Reset)")
     print(f"{'-' * 60}")
+    print("PnL jeweils realisiert + unrealisiert (offene Positionen zum Periodenende bewertet),")
+    print("Prozent jeweils bezogen auf den investierten Betrag derselben Zeile.")
     print(f"KOMBINIERT (mit Allocator): investiert {allocated.combined_total_invested:,.2f}, "
           f"PnL {allocated.combined_pnl:+,.2f} ({allocated.combined_return_pct:+.2f}%)")
     print(f"Max. Drawdown (kombiniert): {allocated.max_drawdown:,.2f}")
     print(f"{'-' * 60}")
-    print(f"Vergleich - isoliert DCA:   investiert {dca_isolated_invested:,.2f}, Rendite {dca_isolated_return_pct:+.2f}%")
-    print(f"Vergleich - isoliert Trend: investiert {trend_isolated_invested:,.2f}, Rendite {trend_isolated_return_pct:+.2f}%")
+    print(f"Vergleich - isoliert DCA:   investiert {dca_isolated.invested:,.2f}, "
+          f"PnL {dca_isolated.pnl:+,.2f} ({dca_isolated.return_pct:+.2f}%)")
+    print(f"Vergleich - isoliert Trend: investiert {trend_isolated.invested:,.2f}, "
+          f"PnL {trend_isolated.pnl:+,.2f} ({trend_isolated.return_pct:+.2f}%)")
     print(f"Vergleich - Buy & Hold über denselben Zeitraum: {allocated.buy_and_hold_return_pct:+.2f}%")
     print(f"{'=' * 60}")
     print(
@@ -368,15 +421,10 @@ def main() -> None:
                 fee_pct=args.fee_pct,
             )
 
-            trend_isolated_invested = args.trend_amount * (
-                len(trend_isolated.trade_log) + (1 if trend_isolated.open_position_unrealized_pnl is not None else 0)
-            )
             print_report(
                 allocated,
-                dca_isolated.total_invested,
-                dca_isolated.dca_return_pct,
-                trend_isolated_invested,
-                trend_isolated.total_pnl_pct,
+                isolated_dca_summary(dca_isolated),
+                isolated_trend_summary(trend_isolated, args.trend_amount),
                 label,
             )
         except ValueError as exc:
