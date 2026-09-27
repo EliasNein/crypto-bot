@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +81,27 @@ class TrendTrade:
     # 27.09.2026, K-B. Gleiche Rolle wie GridPosition.sell_client_order_id:
     # macht das Nachtragen idempotent und einen Doppelverkauf erkennbar.
     exit_client_order_id: str | None = None
+    # Teilfuellung(en) der exchange-seitigen Stop-Order, die VOR dem
+    # Ausstieg verbucht wurden (Systemcheck vom 27.09.2026, K-A). Eine
+    # Stop-Order kann teilweise fuellen und danach storniert werden oder
+    # ablaufen - dann ist ein Teil der Position an der Boerse schon
+    # verkauft. `quantity` und `quote_spent` bleiben bewusst die Werte des
+    # Einstiegs (Steuer-Export, Dashboard); die noch offene Menge liefert
+    # `open_quantity()` unten.
+    #   partial_exit_qty       verkaufte Menge
+    #   partial_exit_quote     Brutto-Erloes (cummulativeQuoteQty) - fuer
+    #                          den gewichteten exit_price
+    #   partial_exit_proceeds  Netto-Erloes nach Gebuehr - fuer realized_pnl
+    #   partial_exit_order_ids orderIds der verbuchten Stop-Orders; macht
+    #                          das Verbuchen idempotent
+    partial_exit_qty: float = 0.0
+    partial_exit_quote: float = 0.0
+    partial_exit_proceeds: float = 0.0
+    partial_exit_order_ids: list[str] = field(default_factory=list)
+    # Rest unter dem Mindestvolumen, der nach einer Teilfuellung nicht mehr
+    # verkaufbar war und beim Schliessen als Staub auf dem Konto blieb
+    # (K-A, Entscheidung 3). 0.0 im Normalfall.
+    dust_qty: float = 0.0
 
     @staticmethod
     def new(
@@ -99,6 +120,21 @@ class TrendTrade:
             dry_run=dry_run,
             client_order_id=client_order_id,
         )
+
+
+def open_quantity(trade: dict) -> float:
+    """
+    Noch offene Menge einer Position: Einstiegsmenge minus bereits
+    verbuchte Teilfuellungen der Stop-Order (K-A). Gerundet, damit aus
+    0.0003 - 0.00015 nicht 0.00014999999999999999 wird und die
+    Quantisierung nach unten eine ganze stepSize verschluckt.
+
+    Ueberall dort zu verwenden, wo verkauft, abgesichert oder gegen das
+    Konto abgeglichen wird - `quantity` ist die Menge beim Einstieg.
+    """
+    quantity = float(trade.get("quantity") or 0.0)
+    partial = float(trade.get("partial_exit_qty") or 0.0)
+    return max(round(quantity - partial, 12), 0.0)
 
 
 class TrendLedger:
@@ -301,6 +337,41 @@ class TrendLedger:
                 break
         self._write(records)
 
+    def record_partial_stop_fill(
+        self, trade_id: str, order_id: str, quantity: float, quote: float, proceeds: float
+    ) -> bool:
+        """
+        Verbucht die Teilfuellung einer beendeten (stornierten oder
+        abgelaufenen) Stop-Order an einer offenen Position (K-A) - in EINEM
+        atomaren Schreibvorgang: Mengen und Erloese aufaddieren, orderId
+        eintragen, Stop-Order-Zuordnung loesen (die Order ist beendet).
+
+        Idempotent ueber die orderId: ist sie schon eingetragen, passiert
+        nichts und es kommt False zurueck. So wird eine Teilfuellung auch
+        nach einem Absturz zwischen zwei Schritten nie doppelt gezaehlt.
+        """
+        records = self._read()
+        for r in records:
+            if r["id"] != trade_id:
+                continue
+            order_ids = list(r.get("partial_exit_order_ids") or [])
+            if str(order_id) in order_ids:
+                return False
+            order_ids.append(str(order_id))
+            r["partial_exit_order_ids"] = order_ids
+            r["partial_exit_qty"] = round(
+                float(r.get("partial_exit_qty") or 0.0) + quantity, 12
+            )
+            r["partial_exit_quote"] = float(r.get("partial_exit_quote") or 0.0) + quote
+            r["partial_exit_proceeds"] = (
+                float(r.get("partial_exit_proceeds") or 0.0) + proceeds
+            )
+            r["stop_loss_order_id"] = None
+            r["stop_limit_price"] = None
+            self._write(records)
+            return True
+        return False
+
     def record_exit(
         self,
         trade_id: str,
@@ -309,6 +380,7 @@ class TrendLedger:
         exit_reason: str,
         realized_pnl: float,
         exit_client_order_id: str | None = None,
+        dust_qty: float = 0.0,
     ) -> None:
         records = self._read()
         for r in records:
@@ -319,6 +391,8 @@ class TrendLedger:
                 r["exit_reason"] = exit_reason
                 r["realized_pnl"] = realized_pnl
                 r["exit_client_order_id"] = exit_client_order_id
+                if dust_qty:
+                    r["dust_qty"] = dust_qty
                 break
         self._write(records)
 

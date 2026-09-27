@@ -163,10 +163,18 @@ def _summarize_dry_run(open_records: list[dict]) -> None:
 
 
 def _quantity_of(record: dict) -> float:
+    """
+    Offene Menge eines Eintrags. Bei Trend-Trades abzueglich bereits
+    verbuchter Teilfuellungen der Stop-Order (`partial_exit_qty`, seit dem
+    Systemcheck vom 27.09.2026) - `quantity` ist dort die Menge beim
+    Einstieg. DCA- und Grid-Eintraege haben das Feld nicht.
+    """
     try:
-        return float(record.get("quantity", 0.0) or 0.0)
+        quantity = float(record.get("quantity", 0.0) or 0.0)
+        partial = float(record.get("partial_exit_qty", 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    return max(round(quantity - partial, 12), 0.0)
 
 
 def _float_or_none(value: object) -> float | None:
@@ -570,6 +578,11 @@ def audit_trend(path: Path) -> None:
         print(f"  ID:              {r.get('id', '?')}")
         print(f"  Einstiegspreis:  {_fmt(r.get('entry_price'), '.2f')}")
         print(f"  Menge:           {_fmt(r.get('quantity'), '.8f')}")
+        if r.get("partial_exit_qty"):
+            print(
+                f"  Teilfüllung:     {_fmt(r.get('partial_exit_qty'), '.8f')} bereits "
+                f"verkauft, offen {_quantity_of(r):.8f}"
+            )
         print(f"  Einsatz:         {_fmt(r.get('quote_spent'), '.2f')}")
         print(f"  Modus:           {_dry_run_label(r)}")
         print(f"  Eingestiegen am: {r.get('entry_time', '?')}")
