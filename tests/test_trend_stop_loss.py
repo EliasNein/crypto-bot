@@ -340,7 +340,11 @@ class FakeTradingClient(PendingOrdersMixin):
             # aussagt (z.B. Netzwerk-Timeout beim Cancel-Request selbst).
             return None
         order = self.orders.get(order_id)
-        if order is None or order["status"] != "NEW":
+        # Wie Binance: auch eine TEILGEFUELLTE Order ist stornierbar, die
+        # Antwort traegt executedQty/cummulativeQuoteQty (Systemcheck vom
+        # 27.09.2026, K-A). Bis dahin liess der Fake nur NEW zu - genau die
+        # Luecke, durch die der Teilfuellungs-Fehler unsichtbar blieb.
+        if order is None or order["status"] not in ("NEW", "PARTIALLY_FILLED"):
             # Wie der echte Client: harmloser Fehlschlag (z.B. schon
             # gefüllt), keine Exception.
             return None
@@ -402,15 +406,17 @@ class FakeTradingClient(PendingOrdersMixin):
         order["executedQty"] = "0"
         order["cummulativeQuoteQty"] = "0"
 
-    def partially_fill_order(self, order_id: str, executed_qty: float) -> None:
+    def partially_fill_order(
+        self, order_id: str, executed_qty: float, cumulative_quote: float = 0.0
+    ) -> None:
         """
-        Testhilfe fuer W8: die Order ist teilweise gefuellt und
+        Testhilfe fuer W8/K-A: die Order ist teilweise gefuellt und
         weiterhin offen.
         """
         order = self.orders[order_id]
         order["status"] = "PARTIALLY_FILLED"
         order["executedQty"] = executed_qty
-        order["cummulativeQuoteQty"] = "0"
+        order["cummulativeQuoteQty"] = cumulative_quote
 
 
 class TrendStrategyTestBase(unittest.TestCase):
@@ -1229,6 +1235,129 @@ class TrendUnclearSellTestCase(TrendStrategyTestBase):
 
         self.assertEqual(client.market_buy_calls, [])
         self.assertTrue(any("[TREND-EINSTIEG-UNGEKLAERT]" in line for line in captured.output))
+
+
+class TrendPartialStopFillUnitTestCase(TrendStrategyTestBase):
+    """
+    K-A (Systemcheck vom 27.09.2026) auf Ebene der Strategie: eine
+    Stop-Order hat teilweise verkauft. Die Szenarien gegen das geteilte
+    Konto stehen in tests/test_shared_account.py - hier die Einzelregeln.
+
+    Einstieg 50.000, Menge 0,0003; Stop 45.000, Limit 44.775.
+    """
+
+    HALF = 0.00015
+
+    def _open_with_partial_stop(self, price_after: float):
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        trade = strategy._ledger.open_position()
+        client.partially_fill_order(
+            trade["stop_loss_order_id"], self.HALF, self.HALF * 44_775.0
+        )
+        client.price = price_after
+        return strategy, client, trade
+
+    def test_signal_exit_after_partial_fill_sells_remainder_as_stop_loss(self):
+        """Entscheidung 1: Grund stop_loss und Latch, auch bei Signal-Ausstieg."""
+        strategy, client, trade = self._open_with_partial_stop(52_000.0)
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(trade, price=52_000.0, reason="signal")
+
+        self.assertEqual(len(client.market_sell_calls), 1)
+        self.assertAlmostEqual(client.market_sell_calls[0][1], self.HALF, places=12)
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["exit_reason"], "stop_loss")
+        self.assertTrue(strategy._stop_loss.is_paused())
+        proceeds = self.HALF * 44_775.0 + self.HALF * 52_000.0
+        self.assertAlmostEqual(closed["realized_pnl"], proceeds - closed["quote_spent"], places=6)
+        self.assertAlmostEqual(closed["exit_price"], (44_775.0 + 52_000.0) / 2, places=6)
+        self.assertAlmostEqual(closed["partial_exit_qty"], self.HALF, places=12)
+
+    def test_partial_fill_is_booked_only_once(self):
+        strategy, client, trade = self._open_with_partial_stop(52_000.0)
+        ledger = strategy._ledger
+
+        self.assertTrue(ledger.record_partial_stop_fill(trade["id"], "77", 0.0001, 4.5, 4.4))
+        self.assertFalse(ledger.record_partial_stop_fill(trade["id"], "77", 0.0001, 4.5, 4.4))
+
+        booked = ledger.trade_by_id(trade["id"])
+        self.assertAlmostEqual(booked["partial_exit_qty"], 0.0001, places=12)
+        self.assertAlmostEqual(booked["partial_exit_proceeds"], 4.4, places=12)
+        self.assertEqual(booked["partial_exit_order_ids"], ["77"])
+        self.assertIsNone(booked["stop_loss_order_id"])
+
+    def test_failed_remainder_sale_protects_only_the_remainder(self):
+        """K1-Pfad nach Teilfuellung: neue Stop-Order nur ueber den Rest."""
+        strategy, client, trade = self._open_with_partial_stop(52_000.0)
+        client.force_market_sell_failure = True
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy._close_position(trade, price=52_000.0, reason="signal")
+
+        still_open = strategy._ledger.open_position()
+        self.assertIsNotNone(still_open)
+        self.assertAlmostEqual(still_open["partial_exit_qty"], self.HALF, places=12)
+        self.assertEqual(len(client.stop_order_calls), 2)
+        self.assertAlmostEqual(client.stop_order_calls[1][1], self.HALF, places=12)
+
+    def test_dust_remainder_is_closed_when_protection_would_be_restored(self):
+        """
+        Rest unter dem Mindestvolumen, Kurs wieder ueber der Schwelle: die
+        Ersatz-Stop-Order wuerde abgelehnt. Also schliessen und melden
+        (Entscheidung 3), statt Zyklus fuer Zyklus "ungeschuetzt" zu zaehlen.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        trade = strategy._ledger.open_position()
+        strategy._ledger.record_partial_stop_fill(
+            trade["id"], trade["stop_loss_order_id"], 0.00025, 0.00025 * 44_775.0,
+            0.00025 * 44_775.0,
+        )
+        client.price = 51_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification") as notify:
+            strategy.execute_once()
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertAlmostEqual(closed["dust_qty"], 0.00005, places=12)
+        self.assertEqual(closed["exit_reason"], "stop_loss")
+        self.assertEqual(len(client.stop_order_calls), 1, "Keine Ersatz-Order fuer Staub")
+        self.assertEqual(client.market_sell_calls, [])
+        self.assertTrue(any("Staub" in c.args[0] for c in notify.call_args_list))
+
+    def test_nearly_full_fill_within_one_step_closes_the_position(self):
+        """
+        Weniger als eine stepSize Rest ist keine Teilfuellung - z.B. eine
+        auf die stepSize abgerundete Stop-Menge. Dann gilt die Position als
+        durch die Stop-Order geschlossen, wie bisher.
+        """
+        strategy, client = self._make_strategy(trading_enabled=True, price=50_000.0)
+        strategy._open_position(50_000.0)
+        trade = strategy._ledger.open_position()
+        client.fill_order(
+            trade["stop_loss_order_id"], trade["quantity"] - 0.000001,
+            (trade["quantity"] - 0.000001) * 44_775.0,
+        )
+        client.price = 44_000.0
+
+        with mock.patch("dca_bot.trend_strategy.send_notification"):
+            strategy.execute_once()
+
+        closed = strategy._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(client.market_sell_calls, [])
+        self.assertFalse(closed.get("partial_exit_qty"))
+
+    def test_open_quantity_is_not_eaten_by_float_noise(self):
+        from dca_bot.order_utils import quantize_quantity
+        from dca_bot.trend_risk import open_quantity
+
+        rest = open_quantity({"quantity": 0.0003, "partial_exit_qty": 0.00015})
+        self.assertEqual(quantize_quantity(rest, 0.00001), 0.00015)
+        self.assertEqual(open_quantity({"quantity": 0.0003}), 0.0003)
 
 
 class TrendStopLossProtectionTestCase(TrendStrategyTestBase):

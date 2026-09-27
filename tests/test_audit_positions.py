@@ -210,6 +210,13 @@ class GridAndTrendClaimTestCase(LedgerFileTestBase):
         path = self._write("trend.json", [self._position(0.3, False, status="closed")])
         self.assertEqual(trend_claim(path, "BTCUSDT").quantity, 0.0)
 
+    def test_trend_claims_only_what_is_left_after_a_partial_stop_fill(self):
+        """K-A (27.09.2026): `quantity` ist die Einstiegsmenge, offen ist der Rest."""
+        position = self._position(0.3, False)
+        position["partial_exit_qty"] = 0.1
+        path = self._write("trend.json", [position])
+        self.assertAlmostEqual(trend_claim(path, "BTCUSDT").quantity, 0.2, places=9)
+
 
 class SplitLockedByBotTestCase(unittest.TestCase):
     """

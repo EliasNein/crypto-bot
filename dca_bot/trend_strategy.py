@@ -59,7 +59,7 @@ from .pending_orders import (
 from .risk import KillSwitch
 from .startup_checks import report_ledger_vs_account
 from .trend_config import TrendConfig
-from .trend_risk import TrendLedger, TrendStopLoss, TrendTrade
+from .trend_risk import TrendLedger, TrendStopLoss, TrendTrade, open_quantity
 from .trend_signals import TrendSignalGenerator, decide_action, is_stop_loss_hit
 
 logger = logging.getLogger("trend_bot")
@@ -304,7 +304,7 @@ class TrendFollowingStrategy:
             f"{tag} Long {quantity:.8f} {self._config.symbol} @ {entry_price:.2f}"
         )
 
-    def _resolve_stop_order_before_close(self, open_trade: dict) -> str:
+    def _resolve_stop_order_before_close(self, open_trade: dict, rules=None) -> str:
         """
         Storniert eine noch offene, exchange-seitige Stop-Loss-Order,
         BEVOR der Bot selbst per Market-Order verkauft (Signal-Exit oder
@@ -342,28 +342,242 @@ class TrendFollowingStrategy:
           das eine explizite Telegram-Warnung aus (manuelle Prüfung
           empfohlen - der Bot kann diesen Zustand allein nicht auflösen).
           Bei jedem eindeutigen Ergebnis wird der Zähler zurückgesetzt.
+
+        TEILFÜLLUNG (Systemcheck vom 27.09.2026, K-A): Binance storniert
+        auch eine PARTIALLY_FILLED-Order, und die Antwort trägt
+        `executedQty`. Bis zu diesem Fix wurde nur geprüft, ob die Antwort
+        None ist - danach verkaufte der Bot die VOLLE Menge, obwohl ein Teil
+        schon weg war. Die Deckungsprüfung ließ das durch, weil auf dem
+        geteilten Konto das freie BTC des DCA-Bots den Fehlbetrag deckte.
+        Jetzt wird die Teilfüllung verbucht (_book_stop_fill) und danach
+        nur noch der Rest verkauft. Der Status wird dabei ausschließlich
+        über `order_lifecycle_state()` bewertet (W8) - die früheren
+        String-Vergleiche kannten "beendet MIT Teilfüllung" nicht.
         """
         order_id = open_trade.get("stop_loss_order_id")
         if not order_id:
             return "safe_to_sell"  # keine Stop-Order vorhanden (Dry-Run o.ä.)
 
-        if self._client.cancel_order(self._config.symbol, order_id) is not None:
+        cancelled = self._client.cancel_order(self._config.symbol, order_id)
+        if cancelled is not None:
             self._reset_uncertain_cycles(open_trade)
+            if executed_quantity(cancelled) > 0:
+                if self._book_stop_fill(open_trade, cancelled, rules) == "already_closed":
+                    return "already_closed"
             return "safe_to_sell"
 
         status = self._client.get_order_status(self._config.symbol, order_id)
-        order_state = status.get("status") if status is not None else None
+        state = order_lifecycle_state(status)
 
-        if order_state == "FILLED":
-            self._close_from_filled_stop_order(open_trade, status)
-            return "already_closed"
+        if state == ORDER_LIFECYCLE_FILLED:
+            self._reset_uncertain_cycles(open_trade)
+            if self._book_stop_fill(open_trade, status, rules) == "already_closed":
+                return "already_closed"
+            return "safe_to_sell"  # Teilfüllung verbucht, Order beendet
 
-        if order_state in ("CANCELED", "EXPIRED", "REJECTED"):
+        if state == ORDER_LIFECYCLE_DEAD:
             self._reset_uncertain_cycles(open_trade)
             return "safe_to_sell"
 
+        order_state = status.get("status") if isinstance(status, dict) else None
         self._register_uncertain_cycle(open_trade, order_id, order_state)
         return "uncertain"
+
+    def _book_stop_fill(
+        self, open_trade: dict, order: dict, rules=None, log_prefix: str = ""
+    ) -> str:
+        """
+        Verbucht eine BEENDETE Stop-Order, die Menge bewegt hat (K-A).
+
+        - Hat sie die offene Menge (bis auf weniger als eine stepSize)
+          verkauft, ist die Position geschlossen: _close_from_filled_stop_order,
+          Rückgabe "already_closed".
+        - Sonst war es eine Teilfüllung: Menge und Erlös kommen an die
+          Position (record_partial_stop_fill, idempotent über die orderId),
+          die Stop-Zuordnung wird gelöst, Rückgabe "partial". Der Aufrufer
+          verkauft danach den Rest.
+
+        Bewusst über die Menge und nicht über den Status "FILLED"
+        entschieden: eine Stop-Order über eine auf die stepSize
+        abgerundete Menge ist FILLED, obwohl ein Rest unterhalb einer
+        stepSize im Ledger steht - und eine stornierte Order kann trotzdem
+        fast alles verkauft haben.
+
+        Ohne Handelsregeln (Abruf gescheitert) gilt als Toleranz 0 - im
+        Zweifel wird also eine Teilfüllung verbucht und der Rest später
+        als Staub geschlossen, statt einen offenen Rest zu verschweigen.
+        """
+        if rules is None:
+            try:
+                rules = self._client.get_symbol_trading_rules(self._config.symbol)
+            except Exception as exc:
+                logger.warning(
+                    "%sHandelsregeln nicht abrufbar (%s) - Teilfüllung wird "
+                    "ohne stepSize-Toleranz bewertet.",
+                    log_prefix,
+                    type(exc).__name__,
+                )
+        step_size = rules.step_size if rules is not None else 0.0
+
+        executed = executed_quantity(order)
+        remainder = open_quantity(open_trade) - executed
+        if remainder < step_size or remainder <= 1e-12:
+            self._close_from_filled_stop_order(open_trade, order, log_prefix=log_prefix)
+            return "already_closed"
+
+        order_id = str(order.get("orderId", ""))
+        gross = float(order.get("cummulativeQuoteQty", 0.0) or 0.0)
+        proceeds = gross
+        try:
+            enriched = self._client.get_order_with_fills(self._config.symbol, order)
+            if rules is not None:
+                proceeds = net_proceeds(enriched, rules, fallback=gross)
+        except Exception as exc:
+            # Gleiche Abwägung wie in _close_from_filled_stop_order: der
+            # Verkauf hat stattgefunden, er MUSS ins Ledger - notfalls brutto.
+            logger.warning(
+                "%sGebührendaten zur Teilfüllung von Order %s nicht abrufbar "
+                "(%s) - verbucht wird der Brutto-Erlös.",
+                log_prefix,
+                order_id,
+                type(exc).__name__,
+            )
+
+        limit_price = open_trade.get("stop_limit_price")
+        booked = self._ledger.record_partial_stop_fill(
+            open_trade["id"], order_id, executed, gross, proceeds
+        )
+        if not booked:
+            logger.info(
+                "%sTeilfüllung von Stop-Order %s ist bereits verbucht.",
+                log_prefix,
+                order_id,
+            )
+        # Den Dict mitziehen - der laufende Zyklus arbeitet mit ihm weiter.
+        refreshed = self._ledger.trade_by_id(open_trade["id"]) or {}
+        for key in (
+            "partial_exit_qty",
+            "partial_exit_quote",
+            "partial_exit_proceeds",
+            "partial_exit_order_ids",
+            "stop_loss_order_id",
+            "stop_limit_price",
+        ):
+            open_trade[key] = refreshed.get(key)
+        if not booked:
+            return "partial"
+
+        fill_price = gross / executed if executed > 0 else 0.0
+        logger.warning(
+            "%s[TREND-TEILFUELLUNG] Stop-Loss-Order %s hat %.8f von %.8f "
+            "verkauft (@ %.2f, Erlös netto %.2f) und ist beendet. Verbucht; "
+            "offen bleiben %.8f.",
+            log_prefix,
+            order_id,
+            executed,
+            float(open_trade["quantity"]),
+            fill_price,
+            proceeds,
+            open_quantity(open_trade),
+        )
+        if limit_price:
+            diff_pct = (fill_price - limit_price) / limit_price * 100
+            logger.info(
+                "%s[STOP-FILL-ANALYSE] Limit: %.2f, gefüllt bei: %.2f, "
+                "Differenz: %+.3f%% (Teilfüllung %.8f)",
+                log_prefix,
+                limit_price,
+                fill_price,
+                diff_pct,
+                executed,
+            )
+        send_notification(
+            f"{log_prefix}[TREND-TEILFUELLUNG] {self._config.symbol}: Stop-Loss-"
+            f"Order {order_id} hat {executed:.8f} von "
+            f"{float(open_trade['quantity']):.8f} @ {fill_price:.2f} verkauft. "
+            f"Verbucht - der Rest ({open_quantity(open_trade):.8f}) wird als "
+            "Stop-Loss-Ausstieg abgeschlossen."
+        )
+        return "partial"
+
+    def _with_partial_fill(
+        self, open_trade: dict, exit_price: float, sold_qty: float, proceeds: float
+    ) -> tuple[float, float]:
+        """
+        Rechnet eine verbuchte Teilfüllung in den Ausstieg ein (K-A):
+        exit_price als mengengewichteter Durchschnitt beider Teile,
+        Erlös als Summe. Ohne Teilfüllung unverändert.
+        """
+        partial_qty = float(open_trade.get("partial_exit_qty") or 0.0)
+        if partial_qty <= 0:
+            return exit_price, proceeds
+        partial_quote = float(open_trade.get("partial_exit_quote") or 0.0)
+        partial_proceeds = float(open_trade.get("partial_exit_proceeds") or 0.0)
+        total_qty = partial_qty + sold_qty
+        weighted = (partial_quote + exit_price * sold_qty) / total_qty if total_qty else exit_price
+        return weighted, proceeds + partial_proceeds
+
+    def _remainder_is_dust(self, quantity: float, price: float, rules) -> bool:
+        """
+        Ob sich der Rest einer teilgefüllten Position noch verkaufen lässt:
+        weniger als eine stepSize oder unter dem Mindestvolumen lehnt
+        Binance jede Order ab.
+        """
+        sellable = quantize_quantity(quantity, rules.step_size)
+        return sellable <= 0 or sellable * price < rules.min_notional
+
+    def _close_with_dust(self, open_trade: dict, price: float, log_prefix: str = "") -> None:
+        """
+        Schließt eine Position, deren Rest nach einer Teilfüllung nicht mehr
+        verkaufbar ist (K-A, Entscheidung 3 vom 27.09.2026). Ohne diese
+        Regel käme der abgelehnte Verkauf jeden Zyklus als K1-Fehlschlag
+        wieder - oder, schlimmer, eine neue Stop-Order über den Rest würde
+        ebenfalls abgelehnt und die Position gälte als ungeschützt.
+
+        Der Rest bleibt als Staub auf dem Konto und steht als `dust_qty` im
+        Ledger; gemeldet wird er per Log und Telegram. Der Erlös ist allein
+        der der Teilfüllung(en). Ausstiegsgrund stop_loss mit Latch - es
+        hat ein Stop-Loss-Ereignis stattgefunden.
+        """
+        dust = open_quantity(open_trade)
+        partial_qty = float(open_trade.get("partial_exit_qty") or 0.0)
+        partial_quote = float(open_trade.get("partial_exit_quote") or 0.0)
+        proceeds = float(open_trade.get("partial_exit_proceeds") or 0.0)
+        exit_price = partial_quote / partial_qty if partial_qty > 0 else price
+        realized_pnl = proceeds - open_trade["quote_spent"]
+
+        self._ledger.record_exit(
+            open_trade["id"],
+            exit_price,
+            datetime.now(timezone.utc).isoformat(),
+            "stop_loss",
+            realized_pnl,
+            None,
+            dust_qty=dust,
+        )
+        logger.warning(
+            "%s[TREND-STAUB] Position %s geschlossen: nach der Teilfüllung "
+            "bleiben %.8f %s (~%.2f USDT), unter dem Mindestvolumen und damit "
+            "nicht verkaufbar. Der Rest bleibt als Staub auf dem Konto "
+            "(dust_qty im Ledger). Realisiert %.2f.",
+            log_prefix,
+            open_trade["id"],
+            dust,
+            self._config.symbol,
+            dust * price,
+            realized_pnl,
+        )
+        send_notification(
+            f"{log_prefix}[TREND-AUSSTIEG] (Stop-Loss, Teilfüllung): "
+            f"{partial_qty:.8f} {self._config.symbol} @ {exit_price:.2f} verkauft, "
+            f"realisiert: {realized_pnl:+.2f}. Rest {dust:.8f} (~{dust * price:.2f} "
+            "USDT) liegt unter dem Mindestvolumen und bleibt als Staub auf dem "
+            "Konto."
+        )
+        loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
+        self._stop_loss.pause(
+            self._config.symbol, open_trade["entry_price"], exit_price, loss_pct
+        )
 
     def _reset_uncertain_cycles(self, open_trade: dict) -> None:
         if open_trade.get("uncertain_cycles", 0) != 0:
@@ -480,11 +694,22 @@ class TrendFollowingStrategy:
         # ausgeführten Verkauf unverbucht zu lassen.
         rules = self._client.get_symbol_trading_rules(self._config.symbol)
 
-        outcome = self._resolve_stop_order_before_close(open_trade)
+        outcome = self._resolve_stop_order_before_close(open_trade, rules)
         if outcome == "already_closed":
             return  # per _close_from_filled_stop_order bereits erledigt
         if outcome == "uncertain":
             return  # nichts tun, naechster Zyklus prueft erneut
+
+        # Hat die Stop-Order schon teilweise verkauft (K-A), ist ein
+        # Stop-Loss-Ereignis eingetreten - auch wenn dieser Ausstieg vom
+        # Signal kam. Grund und Latch folgen dem, wie bei einer komplett
+        # gefuellten Stop-Order (Entscheidung 1 vom 27.09.2026).
+        if float(open_trade.get("partial_exit_qty") or 0.0) > 0:
+            reason = "stop_loss"
+            if self._remainder_is_dust(open_quantity(open_trade), price, rules):
+                self._close_with_dust(open_trade, price)
+                return
+        sell_quantity = open_quantity(open_trade)
 
         if position_dry_run and self._config.trading_enabled:
             # place_market_sell() prüft nur config.trading_enabled, NICHT
@@ -522,7 +747,7 @@ class TrendFollowingStrategy:
 
             order = self._client.place_market_sell(
                 self._config.symbol,
-                open_trade["quantity"],
+                sell_quantity,
                 context={
                     "trade_id": open_trade["id"],
                     "reason": reason,
@@ -546,10 +771,13 @@ class TrendFollowingStrategy:
             exit_price = average_fill_price(order, fallback=price)
             # Netto, also abzüglich der in USDT abgerechneten
             # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
-            proceeds = net_proceeds(order, rules, fallback=open_trade["quantity"] * price)
+            proceeds = net_proceeds(order, rules, fallback=sell_quantity * price)
         else:
             exit_price = price
-            proceeds = open_trade["quantity"] * price
+            proceeds = sell_quantity * price
+        exit_price, proceeds = self._with_partial_fill(
+            open_trade, exit_price, sell_quantity, proceeds
+        )
         realized_pnl = proceeds - open_trade["quote_spent"]
 
         exit_time = datetime.now(timezone.utc).isoformat()
@@ -611,7 +839,7 @@ class TrendFollowingStrategy:
         if snapshot is None:
             return True
 
-        quantity = float(open_trade["quantity"])
+        quantity = open_quantity(open_trade)
 
         if ledger_exceeds_account(snapshot, quantity, rules.step_size):
             logger.error(
@@ -828,7 +1056,7 @@ class TrendFollowingStrategy:
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
         stop_order = self._client.place_stop_loss_limit_sell(
             self._config.symbol,
-            open_trade["quantity"],
+            open_quantity(open_trade),
             stop_price,
             limit_price,
             context={"trade_id": open_trade["id"], "limit_price": limit_price},
@@ -977,9 +1205,21 @@ class TrendFollowingStrategy:
 
         stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
         limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
+
+        # Rest einer Teilfuellung unter dem Mindestvolumen (K-A): Binance
+        # wuerde auch die Stop-Order darueber ablehnen, die Position gaelte
+        # Zyklus fuer Zyklus als ungeschuetzt. Stattdessen schliessen und
+        # den Rest als Staub melden - wie im Ausstiegspfad.
+        if float(open_trade.get("partial_exit_qty") or 0.0) > 0:
+            rules = self._client.get_symbol_trading_rules(self._config.symbol)
+            if self._remainder_is_dust(open_quantity(open_trade), limit_price, rules):
+                price = self._client.get_current_price(self._config.symbol)
+                self._close_with_dust(open_trade, price, log_prefix)
+                return
+
         stop_order = self._client.place_stop_loss_limit_sell(
             self._config.symbol,
-            open_trade["quantity"],
+            open_quantity(open_trade),
             stop_price,
             limit_price,
             context={"trade_id": open_trade["id"], "limit_price": limit_price},
@@ -1128,7 +1368,7 @@ class TrendFollowingStrategy:
                 type(exc).__name__,
             )
 
-        executed_qty = float(order_status.get("executedQty", open_trade["quantity"]))
+        executed_qty = float(order_status.get("executedQty", open_quantity(open_trade)))
         cumulative_quote = float(order_status.get("cummulativeQuoteQty", 0.0))
         if executed_qty > 0 and cumulative_quote > 0:
             exit_price = cumulative_quote / executed_qty
@@ -1141,17 +1381,24 @@ class TrendFollowingStrategy:
             )
         else:
             exit_price = float(order_status.get("price", open_trade["entry_price"]))
-            proceeds = open_trade["quantity"] * exit_price
+            proceeds = open_quantity(open_trade) * exit_price
+        # Eine frueher verbuchte Teilfuellung (K-A) gehoert zum Ausstieg dazu.
+        stop_fill_price = exit_price
+        exit_price, proceeds = self._with_partial_fill(
+            open_trade, exit_price, open_quantity(open_trade), proceeds
+        )
         realized_pnl = proceeds - open_trade["quote_spent"]
 
         exit_time = datetime.now(timezone.utc).isoformat()
+        # Eine Storno-Antwort traegt die ID der Stornierung in
+        # `clientOrderId`, die der Order selbst in `origClientOrderId`.
         self._ledger.record_exit(
             open_trade["id"],
             exit_price,
             exit_time,
             "stop_loss",
             realized_pnl,
-            order_status.get("clientOrderId"),
+            order_status.get("origClientOrderId") or order_status.get("clientOrderId"),
         )
 
         # Der Stop-Loss-Latch gehört zum Ausstieg, nicht zum Logging
@@ -1179,7 +1426,7 @@ class TrendFollowingStrategy:
             open_trade["entry_price"],
             realized_pnl,
         )
-        self._log_stop_fill_analysis(open_trade, exit_price, log_prefix)
+        self._log_stop_fill_analysis(open_trade, stop_fill_price, log_prefix)
         send_notification(
             f"{log_prefix}[TREND-AUSSTIEG] (Stop-Loss, Exchange-Order gefüllt): "
             f"{open_trade['quantity']:.8f} {self._config.symbol} @ {exit_price:.2f} "
@@ -1269,7 +1516,15 @@ class TrendFollowingStrategy:
         state = order_lifecycle_state(status)
 
         if state == ORDER_LIFECYCLE_FILLED:
-            self._close_from_filled_stop_order(open_trade, status, log_prefix=log_prefix)
+            if self._book_stop_fill(open_trade, status, log_prefix=log_prefix) == "already_closed":
+                return True
+            # Beendet MIT Teilfuellung (K-A, z.B. waehrend einer Downtime
+            # abgelaufen): verbucht - jetzt den Rest als Stop-Loss-Ausstieg
+            # abschliessen. Bis zum Fix wurde hier die GANZE Position mit
+            # dem Teilerloes geschlossen, der Rest lag danach ohne Ledger
+            # auf dem Konto.
+            price = self._client.get_current_price(self._config.symbol)
+            self._close_position(open_trade, price, reason="stop_loss")
             return True
 
         if state == ORDER_LIFECYCLE_DEAD:
@@ -1363,8 +1618,17 @@ class TrendFollowingStrategy:
 
         Was hier zählt, ist die Sichtbarkeit: ein Teil der Position ist an
         der Börse bereits verkauft, während das Ledger die volle Menge
-        führt. Ein späterer eigener Market-Sell über diese volle Menge
-        würde scheitern. Die Meldung geht bewusst in JEDEM Zyklus raus -
+        führt.
+
+        Korrektur (Systemcheck vom 27.09.2026, K-A): Hier stand bis dahin,
+        ein eigener Market-Sell über die volle Menge "würde scheitern".
+        Auf dem geteilten Konto stimmt das nicht - das freie BTC des
+        DCA-Bots deckt den Fehlbetrag, der Verkauf geht durch und
+        verkauft fremden Bestand. Seit dem Fix storniert der Ausstieg die
+        Order zuerst, verbucht deren `executedQty` und verkauft nur den
+        Rest (_resolve_stop_order_before_close, _book_stop_fill).
+
+        Die Meldung geht bewusst in JEDEM Zyklus raus -
         beim 24-Stunden-Takt des Trend-Bots ist das höchstens eine
         Erinnerung pro Tag, dass der Zustand weiter besteht, und keine
         Spam-Gefahr (anders als bei uncertain_cycles, wo der Takt
@@ -1377,19 +1641,20 @@ class TrendFollowingStrategy:
         logger.warning(
             "%sExchange-seitige Stop-Loss-Order %s ist TEILWEISE gefüllt "
             "(%.8f von %.8f, Status %s) und weiterhin offen. Das Ledger führt "
-            "bis zum Abschluss der Order die volle Menge - ein eigener "
-            "Verkauf über diese Menge würde derzeit scheitern. Es wird "
-            "bewusst nichts korrigiert, solange die Order noch füllen kann.",
+            "bis zum Abschluss der Order die offene Menge unverändert - bei "
+            "einem Ausstieg wird die Order zuerst storniert und nur der Rest "
+            "verkauft. Es wird bewusst nichts korrigiert, solange die Order "
+            "noch füllen kann.",
             log_prefix,
             order_id,
             filled_qty,
-            open_trade["quantity"],
+            open_quantity(open_trade),
             status.get("status"),
         )
         send_notification(
             f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: Stop-Loss-Order "
             f"{order_id} ist teilweise gefüllt ({filled_qty:.8f} von "
-            f"{open_trade['quantity']:.8f}) und noch offen. Position im Ledger "
+            f"{open_quantity(open_trade):.8f}) und noch offen. Position im Ledger "
             "unverändert, bitte im Auge behalten."
         )
 
@@ -1434,7 +1699,7 @@ class TrendFollowingStrategy:
         open_trade = self._ledger.open_position()
         quantity = 0.0
         if open_trade is not None and not open_trade.get("dry_run", True):
-            quantity = float(open_trade.get("quantity", 0.0))
+            quantity = open_quantity(open_trade)
         report_ledger_vs_account(
             client=self._client,
             logger=logger,
@@ -1620,8 +1885,10 @@ class TrendFollowingStrategy:
         exit_price = average_fill_price(
             order, fallback=float(pending.context.get("price", 0.0)) or 0.0
         )
-        proceeds = net_proceeds(
-            order, rules, fallback=open_trade["quantity"] * exit_price
+        sold_qty = open_quantity(open_trade)
+        proceeds = net_proceeds(order, rules, fallback=sold_qty * exit_price)
+        exit_price, proceeds = self._with_partial_fill(
+            open_trade, exit_price, sold_qty, proceeds
         )
         realized_pnl = proceeds - open_trade["quote_spent"]
 
