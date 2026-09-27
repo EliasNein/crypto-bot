@@ -527,6 +527,7 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_shared_account` | Alle Bots auf einem geteilten Konto: Teilfüllung, unklare Verkäufe, Dauerlauf mit Eigentums-Invariante |
 | `test_check_orders` | Orders nachschlagen (nur lesend), Abgleich mit Pending-Datei und Ledger |
 | `test_strategy_entry_points` | Nur die Einstiegspunkte benutzen die handelnden Strategien |
+| `test_allocator_backtest` | Allocator-Backtest: Stop-Loss-Sperre und Konsistenz mit dem Trend-Backtest |
 
 Was die einzelnen Tests prüfen und wie ihre Wirksamkeit gemessen wurde,
 steht bei den jeweiligen Fixes in `trading-bot-projekt.md` (6f, 6g, 6i,
