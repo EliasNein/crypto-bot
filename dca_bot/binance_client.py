@@ -32,6 +32,7 @@ from .pending_orders import (
     ORDER_WITHOUT_EFFECT,
     PendingOrder,
     PendingOrderStore,
+    lookup_command,
     new_client_order_id,
     resolve_pending_order,
 )
@@ -385,6 +386,35 @@ class TradingClient:
             return None
         return [o for o in orders if isinstance(o, dict)]
 
+    def get_recent_orders(self, symbol: str, limit: int = 10) -> list[dict] | None:
+        """
+        Die letzten `limit` Orders eines Symbols, egal in welchem Status -
+        nur für das Nachschlage-Werkzeug check_orders.py, kein Bot ruft sie
+        auf.
+
+        Gleiche Unterscheidung wie get_open_orders(): `None` heißt "Abfrage
+        gescheitert", eine leere Liste "keine Orders". Und gleiche
+        Log-Hygiene: nur der Exception-Typ, nie str(exc) - bei einem
+        requests-Fehler stünde dort die signierte Request-URL.
+        """
+        try:
+            orders = self._client.get_all_orders(symbol=symbol, limit=limit)
+        except (
+            BinanceAPIException,
+            BinanceOrderException,
+            *INCONCLUSIVE_REQUEST_ERRORS,
+        ) as exc:
+            logger.warning(
+                "Letzte Orders für %s konnten nicht abgefragt werden (%s).",
+                symbol,
+                type(exc).__name__,
+            )
+            return None
+
+        if not isinstance(orders, list):
+            return None
+        return [o for o in orders if isinstance(o, dict)]
+
     def get_order_by_client_id(
         self, symbol: str, client_order_id: str
     ) -> tuple[str, dict | None]:
@@ -721,18 +751,21 @@ class TradingClient:
             "Verbindungs- oder Serverfehler nicht geklärt werden. Die "
             "clientOrderId %s steht in '%s' und wird im nächsten Zyklus "
             "erneut geprüft; bis dahin handelt der Bot für diese Position "
-            "nicht. Offen ist, ob diese Order an der Börse existiert.",
+            "nicht. Offen ist, ob diese Order an der Börse existiert. "
+            "Nachschlagen: %s",
             label,
             pending.symbol,
             pending.client_order_id,
             self._pending_store.path,
+            lookup_command(pending.client_order_id),
         )
         send_notification(
             f"[ORDER-UNKLAR] {pending.symbol}: {label} in unklarem Zustand "
             f"(clientOrderId {pending.client_order_id}). Es ist offen, ob die "
             "Order an der Börse existiert. Sie steht in der "
             "pending-orders-Datei und wird im nächsten Zyklus erneut "
-            "geprüft - bis dahin keine neue Order für diese Position."
+            "geprüft - bis dahin keine neue Order für diese Position. "
+            f"Nachschlagen: {lookup_command(pending.client_order_id)}"
         )
         return None
 

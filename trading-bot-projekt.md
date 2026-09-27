@@ -1156,6 +1156,25 @@ Die fünf übrigen „wichtigen“ Funde aus dem Systemcheck, voneinander unabh�
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 9 Mutationen gefangen: Testwert-Prüfung entfernt (13), Textvergleich statt Zahlenvergleich (3), `GRID_SPACING_PCT` nicht in der Pflichtliste (2), `TREND_STOP_LIMIT_OFFSET_PCT` nicht verlangt (4), Bestätigung ignoriert den Wert (2), unbekannter Name akzeptiert (1), doppelte Bestätigung akzeptiert (1), Listenwert weicht von `.env.example` ab (1), Prüfung auch im Testnet (1 Fehlschlag, 9 Fehler). Das Messskript prüft vor jeder Mutation, dass der Anker genau einmal vorkommt, und läuft mit `-B`.
 
+#### W-E: `check_orders.py` beantwortet die Frage nach `[ORDER-UNKLAR]` (27.09.2026)
+
+**Befund.** Nach einer `[ORDER-UNKLAR]`-Meldung will man genau eines wissen: Gibt es diese clientOrderId bei Binance? Das Skript `check_orders.py` konnte das nicht. Es zeigte die letzten 10 Orders des DCA-Symbols, ohne clientOrderId und ohne Grid und Trend, leitete Base- und Quote-Asset per `symbol.replace("BTC", "")` ab und war nirgends dokumentiert. Präzisierung zum Befund: Die `[ORDER-UNKLAR]`-Meldung selbst verwies gar nicht auf das Skript, nur die Warnung zu einer beschädigten Pending-Datei (`pending_orders.py`) tat das.
+
+**Umgesetzt.** `check_orders.py` ist neu geschrieben, nur lesend:
+
+- **`--client-order-id <id>`:** Das Präfix (`dca-`, `grid-`, `trend-`) bestimmt den Bot und damit das Symbol, `--symbol` überschreibt es, bei unbekanntem Präfix wird unter allen Symbolen der drei Bots gesucht. Nachgeschlagen wird mit `get_order_by_client_id()`, bewertet mit `order_lifecycle_state()`, also mit denselben drei Ausgängen und derselben Einstufung wie im Bot. Über mehrere Symbole gilt „nicht gefunden“ nur, wenn jede Abfrage −2013 ergab. Ist eine gescheitert, kann die Order genau dort liegen, und das Ergebnis ist „keine Aussage“ (Exit-Code 2).
+- **Abgleich mit der eigenen Buchhaltung:** Steht die ID noch in der Pending-Datei des Bots, steht sie im Ledger (Kauf-, Verkaufs- und Ausstiegs-ID; die Trend-Stop-Order über ihre orderId)? Die letzte Zeile ordnet das ein, von „verbucht, nichts zu tun“ über „der Bot trägt sie im nächsten Zyklus nach, nicht von Hand ins Ledger schreiben“ bis „weder verbucht noch in der Pending-Datei, also für den Bot unsichtbar“. Eine unlesbare Datei wird als solche gemeldet, nicht als „nicht enthalten“.
+- **Ohne Argumente:** je Symbol Kurs, Guthaben von Base- und Quote-Asset (aus `exchangeInfo`) und die letzten Orders mit clientOrderId und Bot.
+- **Nur lesend, übernommen statt neu gebaut:** Der Client kommt aus `audit_positions._build_read_only_client()`. Beim Testen zeigte sich, dass ein `place_*`-Aufruf mit dieser Konfiguration schon eine Ebene vor der Pending-Prüfung scheitert, weil `_ReadOnlyClientConfig` gar kein `trading_enabled` hat. Beide Ebenen sind getestet.
+- `TradingClient.get_recent_orders()` ist neu, mit derselben Log-Hygiene wie die übrigen Lesemethoden (nur der Exception-Typ, nie die signierte URL). `bot_for_client_order_id()` und der Aufruf `lookup_command()` stehen in `pending_orders.py` neben `new_client_order_id()`, also dort, wo das Format der ID definiert ist.
+- **Die `[ORDER-UNKLAR]`-Meldung** in Log und Telegram nennt jetzt den fertigen Aufruf mit der ID. README: Beispielaufruf direkt bei „Keine Order ohne Ledger-Eintrag“ (Abschnitt 6, wo `[ORDER-UNKLAR]` erklärt ist), neuer Abschnitt 8.4, Projektstruktur; hier 7.1 und 7.5.
+
+**Tests:** 24 neue in `tests/test_check_orders.py`, Gesamtstand **730, alle grün**. Unter dem echten `TradingClient`, gebaut mit derselben Konfiguration wie im Skript, liegt ein gefälschter roher Client, dessen schreibende Methoden jeden Aufruf als Fehler werten. Geprüft werden Symbolwahl (Präfix, `--symbol`, unbekanntes Präfix, Treffer unter dem zweiten Symbol), die drei Ausgänge samt „eine gescheiterte Abfrage verhindert ‚nicht gefunden‘“ mit Gegenprobe, die Einstufung nach der Regel des Bots (`EXPIRED` mit Menge gilt als ausgeführt), die vier Einordnungen des Buchhaltungsabgleichs, alle Ledger-Felder einschließlich der Stop-Order, unlesbare Dateien, Exit-Codes, die Übersicht, Base/Quote bei `ETHBTC` (dort ergäbe die alte String-Ersetzung „ETH“ als Quote-Asset), keine URL oder Signatur in Ausgabe **und** Log, beide Nur-Lesend-Ebenen, und dass der Aufruf in der `[ORDER-UNKLAR]`-Meldung mit dem Parser des Skripts funktioniert.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 15 Mutationen gefangen, eine davon erst im zweiten Anlauf: Präfix ignoriert (1), `--symbol` ignoriert (1), gescheiterte Abfrage zählt als nicht gefunden (3), eigene Status-Regel „nur FILLED“ (2), Ledger-Suche nur im Kauf-Feld (2), Stop-Order nicht über orderId (1), Pending-Datei nicht geprüft (3), unlesbare Pending-Datei gilt als leer (1), Assets per String-Ersetzung (1), Übersicht ohne clientOrderId (1), Übersicht ohne Bot-Zuordnung (1), `get_recent_orders` loggt `str(exc)` (1), Exit-Code 0 bei gescheiterter Abfrage (1), `[ORDER-UNKLAR]` ohne Aufruf in Telegram (1) bzw. im Log (1).
+
+Die Bot-Zuordnung überlebte im ersten Lauf. Die Zusicherung lautete `"grid" in grid_line`, und die Zeile enthält „grid“ schon in der clientOrderId selbst, die Prüfung war also immer wahr. Sie prüft jetzt die Spalte exakt, für Grid und DCA. Dieselbe Fehlerklasse wie der halbe Test beim Folgefund aus K3: eine Zusicherung, die auch ohne das geprüfte Verhalten erfüllt ist.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
@@ -1466,8 +1485,10 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   "kein Trade" gewertet, der Eintrag bleibt aber stehen (die Nachfrage
   kommt unmittelbar nach dem Timeout, eine noch laufende Order würde erst
   danach sichtbar) und gilt erst ab einem Alter von 60 s als endgültig
-  unbekannt; unklar → **nicht geraten**, sondern `ERROR` + Telegram, und
-  der Eintrag bleibt stehen. Der Eintrag wird auch nach einer
+  unbekannt; unklar → **nicht geraten**, sondern `ERROR` + Telegram
+  (`[ORDER-UNKLAR]`, mit dem fertigen Aufruf
+  `python -m dca_bot.check_orders --client-order-id <id>` zum
+  Nachschlagen), und der Eintrag bleibt stehen. Der Eintrag wird auch nach einer
   erfolgreichen Order erst entfernt, **nachdem** die Strategie den Trade
   im Ledger hat (`confirm_booked()`). Zu Beginn **jedes Zyklus** und beim
   Bot-Start arbeitet jeder Bot verbliebene Einträge ab und trägt fehlende
@@ -2217,6 +2238,25 @@ Weitere Eigenschaften:
 - Die Toleranz stammt aus demselben `balance_guard`, nach dem auch die
   Bots entscheiden - zwei getrennte Toleranzen für dieselbe Frage wären
   der sichere Weg zu einem Audit, das einem Bot widerspricht.
+
+#### Orders nachschlagen (`check_orders.py`, seit 27.09.2026)
+
+Das Gegenstück zum Audit für eine einzelne Order: `python -m
+dca_bot.check_orders --client-order-id <id>` (README 8.4). Das Symbol
+folgt aus dem Präfix der clientOrderId, bei unbekanntem Präfix wird unter
+allen Symbolen der drei Bots gesucht. Nachgeschlagen wird mit
+`get_order_by_client_id()` und bewertet mit `order_lifecycle_state()`,
+also mit denselben Regeln, nach denen der Bot selbst entscheidet. „Nicht
+gefunden“ gilt nur, wenn **jede** Abfrage −2013 ergab; ist eine
+gescheitert, lautet das Ergebnis „keine Aussage“. Dazu der Abgleich mit
+der eigenen Buchhaltung: Steht die ID in der Pending-Datei des Bots, steht
+sie im Ledger (`client_order_id`, `sell_client_order_id`,
+`exit_client_order_id`, bei der Trend-Stop-Order `stop_loss_order_id` über
+die orderId)? Ohne Argumente zeigt das Skript je Symbol Kurs, Guthaben
+(Base- und Quote-Asset aus `exchangeInfo`) und die letzten Orders mit
+clientOrderId und Bot; das ist zugleich der Verbindungstest. Es nutzt den
+Client des Audits (`_build_read_only_client()`) und kann damit
+strukturell keine Orders platzieren.
 
 ### 7.6 Tests
 

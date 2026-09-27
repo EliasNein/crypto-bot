@@ -213,6 +213,30 @@ def new_client_order_id(bot_name: str) -> str:
     return candidate
 
 
+def bot_for_client_order_id(client_order_id: str, bot_names) -> str | None:
+    """
+    Welcher der `bot_names` eine clientOrderId vergeben hat - die
+    Umkehrung von new_client_order_id(). None, wenn keines der Praefixe
+    passt (manuelle Order ueber die Boersen-Oberflaeche, Tippfehler).
+    """
+    text = str(client_order_id or "")
+    for name in bot_names:
+        if text.startswith(f"{name}-"):
+            return name
+    return None
+
+
+# Der Aufruf, mit dem sich eine einzelne Order nachschlagen laesst (siehe
+# check_orders.py). Steht hier und nicht dort, weil binance_client.py ihn
+# in die [ORDER-UNKLAR]-Meldung schreibt und check_orders.py seinerseits
+# den TradingClient braucht - so gibt es keinen Zirkelbezug.
+LOOKUP_COMMAND = "python -m dca_bot.check_orders --client-order-id {client_order_id}"
+
+
+def lookup_command(client_order_id: str) -> str:
+    return LOOKUP_COMMAND.format(client_order_id=client_order_id)
+
+
 @dataclass
 class PendingOrder:
     """
@@ -317,7 +341,8 @@ class PendingOrderStore:
                 "Pending-Orders-Datei '%s' fehlt oder ist beschaedigt - es kann "
                 "keine offene Order-Frage aus einem frueheren Lauf geprueft "
                 "werden. Bitte die letzten Orders bei Binance manuell "
-                "gegenpruefen (python -m dca_bot.check_orders).",
+                "gegenpruefen (python -m dca_bot.check_orders zeigt sie mit "
+                "clientOrderId und Bot).",
                 self._path,
             )
             return {"version": PENDING_FILE_VERSION, "bot": self._bot_name, "orders": []}
