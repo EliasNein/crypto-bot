@@ -1187,6 +1187,18 @@ Die Bot-Zuordnung überlebte im ersten Lauf. Die Zusicherung lautete `"grid" in 
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 3 Mutationen gefangen (je 1): `check_orders.py` importiert `DCAStrategy` relativ, `audit_positions.py` importiert `grid_strategy` über `from . import`, `reset_trend_stop_loss.py` importiert `dca_bot.trend_strategy` absolut.
 
+#### W-F: Die Notaus-Doku versprach ein Wiederanlaufen, das es nicht gibt (27.09.2026)
+
+**Befund.** README und `.env.example` sagten „`rm STOP_ALL` gibt alle wieder frei“. Tatsächlich beendet ein Notaus den Prozess regulär: In allen vier `main*.py` führt `BotHalted` bzw. ein Notaus in der Wartezeit zu `break`/`return`, `main()` kehrt normal zurück, Exit-Code 0 (nachgeprüft in allen vier Dateien). `Restart=on-failure` startet nur nach einem Fehler neu. Nach dem Entfernen der Datei lief also nichts, bis jemand `systemctl start` aufrief, und in dieser Zeit gab es keinen Heartbeat, und offene Grid-Positionen waren ungeschützt (W14). Bemerkenswert: 6b hatte genau diese Semantik am 13.09. richtig beschrieben („`BotHalted` führt zu regulärem `break` und Exit-Code 0, `Restart=on-failure` reagiert nur auf Fehler-Exits“), allerdings als Argument, dass Notaus und `systemctl stop` sich nicht in die Quere kommen. Dass daraus auch folgt, dass das Aufheben nichts startet, stand nirgends.
+
+**Entscheidung: F1, nur die Doku.** Die Option F2, ein Halte-Modus im Prozess (Notaus pausiert statt zu beenden, Wiederanlauf von selbst, Heartbeat läuft weiter), ist bewusst **nicht** umgesetzt: Sie fasst alle vier Einstiegspunkte an, und das kurz vor dem Cutover am 05.10. Außerdem hieße Notaus dann „pausiert“ statt „Prozess weg“, der Prozess hielte weiter Lock und API-Client. F2 ist zusammen mit Punkt 13 (gemeinsame Bot-Runtime, 6i) für die Zeit nach dem Cutover vorgemerkt. Verworfen ist die systemd-seitige Variante (Neustart, sobald die Datei weg ist): systemd hat keinen Auslöser für „Datei entfernt“. `Restart=always` mit einer Vorbedingung `test ! -e STOP_ALL` versuchte alle 30 s einen Start, erreichte nach fünf Versuchen `StartLimitBurst` und gäbe auf (mit `OnFailure`-Alarm). Ohne dieses Limit liefe während jedes Notaus eine Neustartschleife. Die Unit-Dateien liegen außerdem nicht im Repo, die Änderung wäre hier nicht testbar.
+
+**Umgesetzt.** README Abschnitt 6 („Im Notfall“), `.env.example` und hier 7.1 beschreiben den tatsächlichen Ablauf: Notaus beendet die Prozesse; Wiederanlaufen heißt erst alle Quellen bereinigen (Datei entfernen, Variable auf `false`), dann `sudo systemctl start dca-bot grid-bot trend-bot allocator` bzw. den einzelnen Service, mit `systemctl status` zur Kontrolle. Dazu die beiden Fallen: Ein Start, solange eine Quelle noch da ist, endet nach den Startprüfungen sofort wieder; und bis zum Start gibt es weder Zyklus noch Heartbeat, offene Grid-Positionen sind ohne Absicherung. Die Einträge in den Log-Abschnitten (etwa „das Wiederfreischalten per Notaus-Entfernung ist ungefährlich“ in K1/K4) bleiben stehen: Sie sprechen über die Gefahr, nicht über den Mechanismus.
+
+**Tests:** Die Doku stützt sich jetzt auf ein Verhalten, das vorher nirgends festgehalten war. Ein neuer Test in `_MainStatusFileMixin` (`tests/test_heartbeat_status_file.py`) läuft durch die echte `main()` aller vier Bots und prüft, dass ein Notaus sie regulär beendet (Rückgabe ohne Exception oder `SystemExit`), mitten im Zyklus und in der Wartezeit. Ändert sich das, etwa über einen Exit-Code ungleich 0, um einen Neustart auszulösen, schlägt er fehl, und der Docstring sagt, dass die Doku mitmuss. Gesamtstand **737, alle grün** (4 neue, einer je Bot).
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 8 Mutationen gefangen: je Bot ein `raise SystemExit(1)` im Notaus-Zweig des Zyklus (je 2 Fehler) und im Notaus-Zweig der Wartezeit (DCA und Trend je 7, Grid und Allocator je 11). Ehrlich eingeordnet: Der neue Test ist dabei nie der einzige, der anschlägt. Im Zyklus fällt auch `test_nothing_is_written_on_kill_switch` um, in der Wartezeit jeder `main()`-Test, weil sie alle über einen Notaus in der Wartezeit enden. Das Verhalten war also schon implizit festgehalten, nur nirgends als Aussage. Der neue Test macht es zur ausdrücklichen Zusicherung und verknüpft sie mit der Doku, die jetzt darauf beruht.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
@@ -1402,7 +1414,7 @@ Ein kleiner Nebenbefund noch: `100.0 * 1.1` ergibt in Fließkomma `110.000000000
 
 ### Offen aus der Liste
 
-**Stufe 3 (später oder bewusst nicht):** Punkt 16 (automatischer Stop-Loss-Reset) ist **durchgespielt und bewusst zurückgestellt** — siehe den Abschnitt direkt darüber. Die frühere Einschätzung „größter Hebel der Liste (~40 Prozentpunkte in 2023)" bleibt der Größenordnung nach richtig, ruht aber auf einem einzigen Ereignis; das war vor dem Experiment nicht sichtbar. Punkt 13 (gemeinsame Bot-Runtime) ist reiner Wartbarkeitsgewinn und fasst alle vier Einstiegspunkte gleichzeitig an — nach dem Cutover am 05.10., nicht davor. Punkt 15 (SQLite) ist bei aktuell 1–6 Ledger-Einträgen und ein paar Trades pro Tag Jahre entfernt. Punkt 17 (Dashboard) bleibt für 300 € Kapital Overkill. `.bak`-Kopien aus Punkt 2 entfallen: atomare Writes plus tägliche VM-Snapshots plus Git decken das ab.
+**Stufe 3 (später oder bewusst nicht):** Punkt 16 (automatischer Stop-Loss-Reset) ist **durchgespielt und bewusst zurückgestellt** — siehe den Abschnitt direkt darüber. Die frühere Einschätzung „größter Hebel der Liste (~40 Prozentpunkte in 2023)" bleibt der Größenordnung nach richtig, ruht aber auf einem einzigen Ereignis; das war vor dem Experiment nicht sichtbar. Punkt 13 (gemeinsame Bot-Runtime) ist reiner Wartbarkeitsgewinn und fasst alle vier Einstiegspunkte gleichzeitig an — nach dem Cutover am 05.10., nicht davor. *(Vermerk 27.09.2026: Zusammen mit Punkt 13 vorgemerkt ist die Option F2 aus W-F, ein Halte-Modus statt Prozessende beim Notaus. Sie fasst dieselben vier Einstiegspunkte an, siehe „W-F“ in 6g, zweite Runde des Systemchecks.)* Punkt 15 (SQLite) ist bei aktuell 1–6 Ledger-Einträgen und ein paar Trades pro Tag Jahre entfernt. Punkt 17 (Dashboard) bleibt für 300 € Kapital Overkill. `.bak`-Kopien aus Punkt 2 entfallen: atomare Writes plus tägliche VM-Snapshots plus Git decken das ab.
 
 *(Aktualisiert 17.09.2026: Punkt 17 ist umgesetzt — allerdings anders, als die Liste ihn gemeint hat, und deshalb bleibt die Einschätzung „Overkill" oben stehen statt gestrichen zu werden. Gemeint war ein Dashboard **in diesem** Repository, mit dem Aufwand und der Angriffsfläche der Bots selbst. Gebaut wurde stattdessen eine separate, rein lesende App in einem eigenen Repository ([crypto-bot-app](https://github.com/EliasNein/crypto-bot-app)): Sie liest nur die Ledger-Dateien und hat keinen Zugriff auf API-Keys oder Trading-Funktionen. Damit berührt sie das Trennungsprinzip nicht — dieselbe Überlegung wie bei `audit_positions.py`, das als rein lesendes Werkzeug ebenfalls mehr sehen darf als jeder einzelne Bot, ohne dass ihm jemand Handelsfähigkeit zugestehen müsste. In der README steht der Verweis darauf gleich zu Beginn.)*
 
@@ -1447,6 +1459,13 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   Anlegen der STOP-Datei. Die drei Wege sind mit ODER verknüpft, bewusst
   asymmetrisch: auslösen soll leicht sein, versehentliches Aufheben
   schwer – zum Wiederanlaufen müssen alle drei Quellen sauber sein.
+  **Der Notaus beendet den Prozess** (regulär, Exit-Code 0, für alle vier
+  Bots per Test festgehalten). `Restart=on-failure` startet ihn deshalb
+  nicht neu: Wiederanlaufen heißt, erst alle Quellen zu bereinigen und
+  dann den Service von Hand zu starten (`sudo systemctl start <service>`).
+  Steht eine Quelle beim Start noch da, beendet er sich nach den
+  Startprüfungen sofort wieder. Bis dahin läuft kein Zyklus und kommt
+  kein Heartbeat; offene Grid-Positionen sind ohne Absicherung (W14).
   Beim Grid-Bot wird der Notaus zusätzlich **zwischen jedem einzelnen
   Kauf** eines Zyklus geprüft, nicht nur einmal davor: durchquert der
   Preis in einem Intervall mehrere Stufen, kauft die Schleife mehrere
@@ -1459,7 +1478,9 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
 
   ```bash
   touch STOP_ALL     # stoppt DCA, Grid, Trend und Allocator
-  rm STOP_ALL        # gibt alle wieder frei
+  # Wiederanlaufen: erst die Datei entfernen, dann die Services starten
+  rm STOP_ALL
+  sudo systemctl start dca-bot grid-bot trend-bot allocator
   ```
 
   Vorher brauchte es vier Dateien oder vier Variablen – und im Ernstfall

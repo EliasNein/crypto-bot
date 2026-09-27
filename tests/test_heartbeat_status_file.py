@@ -270,7 +270,7 @@ class _MainStatusFileMixin:
                 stack.enter_context(patch)
             stack.enter_context(self.assertLogs(self.logger_name, level="INFO"))
 
-            module.main()
+            self.main_result = module.main()
             exists_at_end = status_file.is_file()
 
         self.assertEqual(
@@ -308,6 +308,24 @@ class _MainStatusFileMixin:
         snapshots, _, exists_at_end = self.run_cycles([HALT])
         self.assertEqual(snapshots, [])
         self.assertFalse(exists_at_end)
+
+    def test_kill_switch_ends_main_regularly(self):
+        """
+        Die Notaus-Doku (README 6, .env.example, trading-bot-projekt.md
+        7.1) beschreibt seit dem 27.09.2026 (W-F): Ein Notaus BEENDET den
+        Prozess regulaer, mit Exit-Code 0 - und `Restart=on-failure`
+        startet ihn deshalb NICHT neu, nach dem Entfernen der Notaus-Datei
+        muss der Service von Hand gestartet werden. Dieser Test haelt das
+        Verhalten fest, auf dem die Doku jetzt beruht: `main()` kehrt
+        normal zurueck, ohne Exception und ohne SystemExit, beim Notaus
+        mitten im Zyklus UND beim Notaus waehrend der Wartezeit. Aendert
+        sich das (etwa ein Exit-Code != 0, um einen Neustart auszuloesen),
+        muss die Doku mit.
+        """
+        for outcomes in ([HALT], [OK]):  # [OK]: Notaus in der Wartezeit danach
+            with self.subTest(outcomes=outcomes):
+                self.run_cycles(outcomes)
+                self.assertIsNone(self.main_result)
 
     def test_unwritable_status_file_does_not_disturb_the_loop(self):
         """

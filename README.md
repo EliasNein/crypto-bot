@@ -241,13 +241,31 @@ Bots, 7.2 Grid, 7.3 Trend, 7.4 Allocator).
 
 ```bash
 touch STOP_ALL     # stoppt DCA, Grid, Trend und Allocator
-rm STOP_ALL        # gibt alle wieder frei
 ```
+
+**Ein Notaus beendet die Prozesse.** Sie enden regulär (Exit-Code 0),
+und `Restart=on-failure` startet nur nach einem Fehler neu. Die Datei
+wieder zu entfernen, startet also **nichts**. Wiederanlaufen geht in zwei
+Schritten, in dieser Reihenfolge:
+
+```bash
+rm STOP_ALL
+sudo systemctl start dca-bot grid-bot trend-bot allocator
+systemctl status dca-bot grid-bot trend-bot allocator   # Kontrolle
+```
+
+Wird ein Service gestartet, solange die Notaus-Quelle noch da ist,
+beendet er sich nach den Startprüfungen sofort wieder. Bis zum Start
+läuft kein Zyklus und kommt kein Heartbeat. Offene Grid-Positionen haben
+in dieser Zeit keine Absicherung (der Grid-Bot hat keine Stop-Order an
+der Börse), eine Trend-Position nur ihre Stop-Order an der Börse.
 
 - Einzelnen Bot stoppen: Notaus-Datei anlegen (Defaults `STOP`,
   `STOP_GRID`, `STOP_TREND`, `STOP_ALLOCATOR`) oder `*_HALT=true` bzw.
   `STOP_ALL=true` setzen - auch nachträglich in der `.env`, ohne
-  Neustart. Zum Wiederanlaufen müssen alle Quellen sauber sein.
+  Neustart. Wiederanlaufen genauso: erst alle Quellen bereinigen (Datei
+  entfernen, Variable auf `false` oder Zeile löschen), dann den Service
+  starten, z.B. `rm STOP_GRID && sudo systemctl start grid-bot`.
 - Stop-Loss-Sperren heben sich nie von selbst auf, Reset nur manuell:
   `python -m dca_bot.reset_stop_loss`, `python -m
   dca_bot.reset_grid_stop_loss`, `python -m dca_bot.reset_trend_stop_loss`.
