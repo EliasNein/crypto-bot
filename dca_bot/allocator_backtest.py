@@ -5,7 +5,10 @@ DCA-Bot und Trend-Following-Bot je nach Trendstärke).
 Nutzt dieselbe Entscheidungslogik wie die Live-Komponenten - keine
 Doppelimplementierung:
 - `TrendSignalGenerator`, `decide_action`, `is_stop_loss_hit` aus
-  trend_signals.py für die Trend-Bot-Seite (identisch zu trend_backtest.py)
+  trend_signals.py für die Trend-Bot-Seite (identisch zu trend_backtest.py,
+  einschließlich der Stop-Loss-Sperre: nach einem Stop-Loss-Ausstieg
+  keine neuen Einstiege bis zum Periodenende, wie live bis zum manuellen
+  Reset)
 - `derive_trend_strength`, `compute_target_fraction`, `smooth_fraction`
   aus allocator_signals.py für die Allocator-Seite (identisch zu allocator.py)
 - `fetch_historical_klines` aus backtest.py für die historischen Daten
@@ -16,13 +19,21 @@ Läuft über dieselben drei Referenz-Zeiträume wie DCA- und Trend-Backtest
 (DEFAULT_PERIODS aus trend_backtest.py), damit die Ergebnisse
 vergleichbar bleiben.
 
-WICHTIG zur Glättungsperiode: Der Live-Allocator glättet über
-ALLOCATOR_SMOOTHING_PERIOD Zyklen à ALLOCATOR_INTERVAL_MINUTES (Default:
-24 Zyklen à 60 Minuten). Dieser Backtest arbeitet auf Tageskerzen - eine
-"Glättungsperiode" hier ist ein eigener, separat konfigurierbarer
-Tages-Parameter (`--smoothing-period-days`), KEINE Einheiten-Umrechnung
-der Live-Zyklen. Das ist eine bewusste Näherung (gleiches Prinzip wie
-die 1h-Kerzenauflösung im Grid-Backtest), kein exaktes Abbild.
+Zur Glättungsperiode: Seit dem W9-Fix (16.09.2026) speist der
+Live-Allocator genau einen Tagesschlusskurs pro Kalendertag ein, und
+ALLOCATOR_SMOOTHING_PERIOD zählt TAGE (Default 3). `--smoothing-period-days`
+(Default 3.0) ist damit dieselbe Größe in derselben Einheit, keine
+Näherung mehr. Bis zu W9 zählte der Live-Wert Zyklen à 60 Minuten, und
+dieser Absatz beschrieb deshalb eine Umrechnungslücke, die es nicht mehr
+gibt. Eine Näherung bleibt auf der Trend-Seite: Der Backtest entscheidet
+auf dem Tagesschlusskurs, der Trend-Bot auf dem Ticker zu seiner
+Zykluszeit (siehe trend_backtest.py).
+
+Stop-Loss-Sperre: Bis zum 27.09.2026 (Systemcheck, W-G) übergab dieser
+Backtest `stop_loss_paused=False` und setzte nach einem Stop-Loss keine
+Sperre - die kombinierten Zahlen konnten also Wiedereinstiege enthalten,
+die der Live-Bot nie gemacht hätte. Die Einordnung der korrigierten
+Zahlen steht in trading-bot-projekt.md 5a.
 
 Parameter sind unveränderte Live-Defaults, NICHT gegen die unten
 getesteten Zeiträume optimiert - gleiches Prinzip wie bei DCA-/Trend-Backtest.
@@ -64,6 +75,9 @@ class AllocatedBacktestResult:
     combined_return_pct: float
     max_drawdown: float
     buy_and_hold_return_pct: float
+    # Die Stop-Loss-Sperre der Trend-Seite war am Periodenende aktiv
+    # (wie TrendBacktestResult.stop_loss_paused_at_end).
+    trend_stop_loss_paused_at_end: bool
     trade_log: list[dict] = field(default_factory=list)
 
 
@@ -112,6 +126,11 @@ def run_allocated_backtest(
     dca_num_buys = 0
 
     trend_open: dict | None = None
+    # Der Stop-Loss-Latch des Trend-Bots (TrendStopLoss in trend_risk.py):
+    # nach einem Stop-Loss-Ausstieg keine neuen Einstiege mehr. Live hebt
+    # ihn nur ein Mensch auf, hier hält er deshalb bis zum Periodenende -
+    # genau wie der Default von run_trend_backtest.
+    trend_stop_loss_paused = False
     trend_realized_total = 0.0
     trend_total_invested = 0.0
     trade_log: list[dict] = []
@@ -156,8 +175,9 @@ def run_allocated_backtest(
                 {"entry_date": trend_open["entry_date"], "exit_date": date_str, "exit_reason": "stop_loss", "pnl": pnl}
             )
             trend_open = None
+            trend_stop_loss_paused = True
         else:
-            action = decide_action(confirmed, trend_open is not None, stop_loss_paused=False)
+            action = decide_action(confirmed, trend_open is not None, trend_stop_loss_paused)
             if action == "EXIT_SIGNAL" and trend_open is not None:
                 proceeds = trend_open["quantity"] * price * (1 - fee_pct / 100)
                 pnl = proceeds - trend_open["quote_spent"]
@@ -224,6 +244,7 @@ def run_allocated_backtest(
         combined_return_pct=combined_return_pct,
         max_drawdown=compute_max_drawdown(equity_curve),
         buy_and_hold_return_pct=buy_and_hold_return_pct,
+        trend_stop_loss_paused_at_end=trend_stop_loss_paused,
         trade_log=trade_log,
     )
 
@@ -246,6 +267,8 @@ def print_report(
           f"investiert {allocated.trend_total_invested:,.2f}, realisiert {allocated.trend_realized_pnl:+,.2f}")
     if allocated.trend_open_unrealized_pnl is not None:
         print(f"  + am Ende noch OFFENE Trend-Position, unrealisiert: {allocated.trend_open_unrealized_pnl:+,.2f}")
+    if allocated.trend_stop_loss_paused_at_end:
+        print("  Stop-Loss-Sperre am Ende aktiv: nach dem Stop-Loss keine neuen Einstiege (wie live bis zum manuellen Reset)")
     print(f"{'-' * 60}")
     print(f"KOMBINIERT (mit Allocator): investiert {allocated.combined_total_invested:,.2f}, "
           f"PnL {allocated.combined_pnl:+,.2f} ({allocated.combined_return_pct:+.2f}%)")
@@ -269,8 +292,9 @@ def print_report(
     )
     print(
         "Hinweis: Parameter sind unveränderte Live-Defaults, nicht gegen diesen\n"
-        "Zeitraum optimiert. Die Glättungsperiode ist ein eigener Tages-Parameter,\n"
-        "keine Einheiten-Umrechnung der Live-Zyklen (siehe Modul-Docstring)."
+        "Zeitraum optimiert. Die Glättungsperiode zählt Tage wie live (seit W9);\n"
+        "die Trend-Seite hält die Stop-Loss-Sperre wie run_trend_backtest\n"
+        "(siehe Modul-Docstring)."
     )
 
 
