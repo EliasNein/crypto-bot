@@ -531,7 +531,10 @@ class TradingClient:
            Pending-Orders-Datei schreiben - VOR dem Netzwerk-Call. Nur so
            überlebt die Information einen Prozess-Kill mitten im Request.
         2. Order abschicken.
-        3. Ausgang klären und den Pending-Eintrag wieder entfernen.
+        3. Ausgang klären. Bei einer Ablehnung oder einer Order ohne
+           Wirkung wird der Eintrag hier entfernt; bei einer ausgeführten
+           Order erst durch die Strategie über confirm_booked(), NACHDEM
+           sie den Trade im Ledger hat (W-A, Systemcheck vom 27.09.2026).
 
         Die drei Fehlerklassen werden dabei streng getrennt:
 
@@ -575,9 +578,32 @@ class TradingClient:
         except INCONCLUSIVE_REQUEST_ERRORS as exc:
             return self._resolve_after_network_error(pending, label, exc)
 
-        self._pending_store.remove(client_order_id)
+        # Der Pending-Eintrag bleibt bewusst STEHEN, bis die Strategie den
+        # Trade im Ledger hat und confirm_booked() aufruft (Systemcheck vom
+        # 27.09.2026, W-A). Bis dahin wurde er hier entfernt - scheiterte
+        # danach der Ledger-Eintrag (Platte voll, Absturz, eine Exception
+        # beim Auswerten der Antwort), blieb ein real ausgefuehrter Trade
+        # fuer immer unverbucht, ohne dass die Reconciliation etwas davon
+        # wusste.
         logger.info("%s erfolgreich platziert: %s", label, order)
         return order
+
+    def confirm_booked(self, client_order_id: str | None) -> None:
+        """
+        Schliesst die offene Order-Frage, NACHDEM die Strategie den Trade
+        ins Ledger geschrieben hat (W-A, siehe _place_order).
+
+        Die Reihenfolge ist der ganze Punkt: Stirbt der Prozess zwischen
+        Ledger-Eintrag und diesem Aufruf, findet die Reconciliation den
+        Eintrag im naechsten Zyklus und erkennt ueber die clientOrderId im
+        Ledger, dass nichts nachzutragen ist. Stirbt er davor, traegt sie
+        den Trade nach. Vorher war es umgekehrt, und der zweite Fall ging
+        verloren.
+
+        `None` (Dry-Run, keine Order) ist ein No-op.
+        """
+        if client_order_id and self._pending_store is not None:
+            self._pending_store.remove(client_order_id)
 
     def _resolve_after_network_error(
         self, pending: PendingOrder, label: str, exc: Exception
@@ -596,21 +622,24 @@ class TradingClient:
         genauso falsch - das sähe für die Strategie aus wie ein sauberer
         "kein Handelsbedarf"-Fall.
 
-        Drei Ausgänge:
+        Vier Ausgänge:
 
         - Order ist angekommen und hat gewirkt -> die echten Order-Daten
           zurückgeben, als wäre der ursprüngliche Call erfolgreich
           gewesen. Die Strategie schreibt daraufhin ganz normal einen
-          korrekten Ledger-Eintrag, ohne von dem Zwischenfall zu wissen.
+          korrekten Ledger-Eintrag und schliesst den Pending-Eintrag
+          danach über confirm_booked() (W-A).
         - Order ohne Wirkung beendet -> `None` wie bisher, der
           Pending-Eintrag kann weg.
         - Order unbekannt (-2013) -> `None`, der Pending-Eintrag BLEIBT
-          aber stehen, damit der naechste Start erneut fragt (siehe
+          aber stehen, damit die Reconciliation erneut fragt (siehe
           Kommentar im Code unten).
         - Unklar -> NICHT raten. Deutliche Fehlermeldung samt
           clientOrderId, Telegram, und der Pending-Eintrag BLEIBT
-          stehen, damit die Reconciliation beim nächsten Bot-Start
-          erneut fragt.
+          stehen. Seit dem Systemcheck vom 27.09.2026 fragt die
+          Reconciliation zu Beginn jedes Zyklus erneut, und solange der
+          Eintrag steht, startet die Strategie für diese Position keine
+          neue Order (K-B).
         """
         # Nur Typ, HTTP-Status und Code (siehe
         # _describe_inconclusive_error): requests-Fehlermeldungen tragen
@@ -628,7 +657,8 @@ class TradingClient:
         state, order = resolve_pending_order(self, pending)
 
         if state == ORDER_CONFIRMED and order is not None:
-            self._pending_store.remove(pending.client_order_id)
+            # Eintrag bleibt stehen bis confirm_booked() - wie im
+            # regulaeren Erfolgsfall (W-A).
             logger.warning(
                 "%s %s (clientOrderId %s) ist trotz des Verbindungs- oder "
                 "Serverfehlers an der Börse angekommen - sie wird jetzt "
@@ -663,17 +693,18 @@ class TradingClient:
             # Binance noch in Bearbeitung ist, wird erst danach sichtbar.
             # Bis dahin wurde der Eintrag hier geloescht - fuehrte Binance
             # die Order doch noch aus, fehlte sie fuer immer im Ledger (der
-            # K2-Schaden). Jetzt prueft die Reconciliation beim naechsten
-            # Start erneut: weiterhin unbekannt -> Eintrag verworfen, doch
-            # ausgefuehrt -> nachgetragen. Aus "verloren" wird "verzoegert
-            # bis zum naechsten Start". Kein Telegram: das ist der
-            # Normalfall einer Order, die Binance nie erreicht hat, und
-            # keine Aufforderung zum Eingreifen.
+            # K2-Schaden). Jetzt prueft die Reconciliation erneut - seit dem
+            # Systemcheck vom 27.09.2026 zu Beginn jedes Zyklus, und "unbekannt"
+            # gilt erst ab UNKNOWN_FINAL_AFTER_SECONDS als endgueltig:
+            # weiterhin unbekannt -> Eintrag verworfen, doch ausgefuehrt ->
+            # nachgetragen. Kein Telegram: das ist der Normalfall einer
+            # Order, die Binance nie erreicht hat, und keine Aufforderung
+            # zum Eingreifen.
             logger.warning(
                 "%s für %s (clientOrderId %s): Binance kennt die Order nach "
                 "dem Verbindungs- oder Serverfehler nicht (%s) - sie wird als "
-                "'kein Trade' behandelt. Der Eintrag bleibt in '%s' stehen und wird beim "
-                "nächsten Bot-Start erneut geprüft, falls Binance sie doch "
+                "'kein Trade' behandelt. Der Eintrag bleibt in '%s' stehen und wird im "
+                "nächsten Zyklus erneut geprüft, falls Binance sie doch "
                 "noch ausgeführt hat.",
                 label,
                 pending.symbol,
@@ -688,10 +719,9 @@ class TradingClient:
         logger.error(
             "UNKLARER ORDER-ZUSTAND: %s für %s konnte nach einem "
             "Verbindungs- oder Serverfehler nicht geklärt werden. Die "
-            "clientOrderId %s steht in '%s' und wird beim nächsten Bot-Start "
-            "erneut geprüft. "
-            "Bis dahin ist offen, ob diese Order an der Börse existiert - "
-            "bitte manuell nachsehen (python -m dca_bot.check_orders).",
+            "clientOrderId %s steht in '%s' und wird im nächsten Zyklus "
+            "erneut geprüft; bis dahin handelt der Bot für diese Position "
+            "nicht. Offen ist, ob diese Order an der Börse existiert.",
             label,
             pending.symbol,
             pending.client_order_id,
@@ -701,8 +731,8 @@ class TradingClient:
             f"[ORDER-UNKLAR] {pending.symbol}: {label} in unklarem Zustand "
             f"(clientOrderId {pending.client_order_id}). Es ist offen, ob die "
             "Order an der Börse existiert. Sie steht in der "
-            "pending-orders-Datei und wird beim nächsten Bot-Start erneut "
-            "geprüft - bitte trotzdem manuell nachsehen."
+            "pending-orders-Datei und wird im nächsten Zyklus erneut "
+            "geprüft - bis dahin keine neue Order für diese Position."
         )
         return None
 

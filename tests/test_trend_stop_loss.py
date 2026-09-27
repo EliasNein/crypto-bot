@@ -46,6 +46,8 @@ from dca_bot.trend_strategy import (
 )
 from dca_bot.trend_signals import is_stop_loss_hit
 
+from tests.fake_pending import PendingOrdersMixin
+
 
 # Handelsregeln nahe an dem, was Binance fuer BTCUSDT meldet - damit die
 # Tests dieselbe Quantisierung durchlaufen wie der Live-Betrieb.
@@ -60,7 +62,7 @@ FAKE_TRADING_RULES = SymbolTradingRules(
 )
 
 
-class FakeTradingClient:
+class FakeTradingClient(PendingOrdersMixin):
     """
     Verhält sich bewusst wie der echte TradingClient (binance_client.py):
     im Dry-Run (trading_enabled=False) platzieren place_*-Methoden keine
@@ -148,6 +150,7 @@ class FakeTradingClient:
         # der Live-Betrieb.
         self.order_contexts: list[dict | None] = []
         self._next_client_order_id = 0
+        self._init_pending("trend")
 
     def _new_order_id(self) -> str:
         self._next_order_id += 1

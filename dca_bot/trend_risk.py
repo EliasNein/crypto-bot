@@ -38,9 +38,10 @@ class TrendTrade:
     # vor dem K2-Fix. Erlaubt beim Nachtragen aus der
     # Pending-Orders-Datei die Frage "kenne ich diese Order schon?";
     # die lokale `id` oben taugt dafür nicht, die hat die Börse nie
-    # gesehen. Bewusst nur für den Einstieg: Exit-Order und
-    # Stop-Loss-Order hängen über die Trade-ID am selben Eintrag und
-    # sind über `status` bzw. `stop_loss_order_id` schon eindeutig.
+    # gesehen. Für den Ausstieg gibt es seit dem Systemcheck vom
+    # 27.09.2026 ein eigenes Feld (`exit_client_order_id`, siehe unten) -
+    # die frühere Annahme, `status` mache die Exit-Order eindeutig, war
+    # falsch: ein ZWEITER Verkauf sah damit aus wie der bereits verbuchte.
     client_order_id: str | None = None
     # ID der echten, exchange-seitigen STOP_LOSS_LIMIT-Order (siehe
     # binance_client.place_stop_loss_limit_sell) - None im Dry-Run (dort
@@ -75,6 +76,11 @@ class TrendTrade:
     exit_time: str | None = None
     exit_reason: str | None = None  # "signal" | "stop_loss"
     realized_pnl: float | None = None
+    # clientOrderId der Order, die die Position geschlossen hat (eigener
+    # Market-Sell oder die gefüllte Stop-Order) - Systemcheck vom
+    # 27.09.2026, K-B. Gleiche Rolle wie GridPosition.sell_client_order_id:
+    # macht das Nachtragen idempotent und einen Doppelverkauf erkennbar.
+    exit_client_order_id: str | None = None
 
     @staticmethod
     def new(
@@ -296,7 +302,13 @@ class TrendLedger:
         self._write(records)
 
     def record_exit(
-        self, trade_id: str, exit_price: float, exit_time: str, exit_reason: str, realized_pnl: float
+        self,
+        trade_id: str,
+        exit_price: float,
+        exit_time: str,
+        exit_reason: str,
+        realized_pnl: float,
+        exit_client_order_id: str | None = None,
     ) -> None:
         records = self._read()
         for r in records:
@@ -306,6 +318,7 @@ class TrendLedger:
                 r["exit_time"] = exit_time
                 r["exit_reason"] = exit_reason
                 r["realized_pnl"] = realized_pnl
+                r["exit_client_order_id"] = exit_client_order_id
                 break
         self._write(records)
 
