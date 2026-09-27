@@ -90,7 +90,10 @@ Auf `false` gesetzt, handeln alle vier Prozesse gegen die echte Börse mit
 echtem Geld – das meldet jeder von ihnen beim Start unübersehbar im Log
 und per Telegram, eine stille Umschaltung gibt es nicht. Im Live-Modus
 werden ausserdem Telegram-Zugangsdaten und alle Positionsgrössen zur
-Pflichtangabe (siehe Abschnitt 6). Nicht vergessen: Testnet-Keys
+Pflichtangabe (siehe Abschnitt 6), und die Testwerte aus `.env.example`
+werden abgelehnt. Ein Testwert, der nach der Kalibrierung bewusst gelten
+soll, wird mit Name und Wert bestätigt, z.B.
+`LIVE_CONFIRMED_VALUES=TREND_STOP_LIMIT_OFFSET_PCT=0.5`. Nicht vergessen: Testnet-Keys
 funktionieren an der echten Börse nicht, `BINANCE_API_KEY`/`SECRET`
 müssen mitgewechselt werden.
 
@@ -258,7 +261,8 @@ rm STOP_ALL        # gibt alle wieder frei
 - **Live-Schalter `USE_TESTNET`:** nur `true`/`false` erlaubt, ein
   Tippfehler bricht ab. Im Live-Modus unübersehbare Warnung in Log und
   Telegram; Telegram-Zugangsdaten und alle Positionsgrößen werden
-  Pflichtangaben.
+  Pflichtangaben, und die Testwerte aus `.env.example` werden abgelehnt,
+  sofern sie nicht über `LIVE_CONFIRMED_VALUES` bestätigt sind.
 - **Pflichtvariablen-Check beim Start:** leere, unsinnige oder aus
   `.env.example` kopierte Werte stoppen den Start mit klarer Meldung -
   ohne systemd-Neustartschleife.

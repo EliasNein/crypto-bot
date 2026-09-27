@@ -1135,6 +1135,27 @@ Bestehende Tests: `test_grid_sell_safety.py`, der Wiederholungstest (bisher Zeil
 
 **Bewusst nicht in dieser Runde:** Unterkonten pro Bot. Das wäre die eigentliche Lösung für das geteilte Konto, ist aber eine Konto- und Betriebsentscheidung. Ebenso offen aus dem Systemcheck: W-C (Pflichtprüfung im Live-Modus), W-D (`test_connection.py`), W-E (`check_orders.py`), W-F (Notaus-Doku), W-G (Allocator-Backtest), W14. Der Positions-Audit rechnet Staub nicht dem Trend-Bot zu, er erscheint dort als nicht zugeordneter Überschuss (kein Befund).
 
+### Systemcheck vom 27.09.2026, zweite Runde: W-C bis W-G
+
+Die fünf übrigen „wichtigen“ Funde aus dem Systemcheck, voneinander unabhängig. Der Plan wurde vorab vorgelegt, die drei offenen Entscheidungen (Bestätigungsweg bei W-C, Umbau oder Löschen bei W-D, nur Doku oder auch Verhalten bei W-F) sind vom Nutzer getroffen. Ein Commit pro Punkt, Reihenfolge W-C, W-E, W-D, W-F, W-G.
+
+#### W-C: Testwerte im Live-Modus (27.09.2026)
+
+**Befund.** `require_explicit_in_live()` prüfte nur, ob eine Variable **gesetzt** ist. `.env.example` setzt aber alle Positionsgrößen, und zwar auf Testwerte. Wer die Datei kopiert und nur `USE_TESTNET=false` setzt, ging mit unkalibrierten Werten live, und die Prüfung ließ das durch. Außerdem fehlten zwei Variablen: `GRID_SPACING_PCT` bestimmt zusammen mit der Spanne die Stufenzahl und damit die Kapitalbindung (der Docstring von `load_grid_config()` zählte ihn schon dazu, der Code nicht), und `TREND_STOP_LIMIT_OFFSET_PCT` beruht auf n = 2 simulierten Exits (6f) und wurde gar nicht geprüft.
+
+**Umgesetzt.**
+
+- `LIVE_PLACEHOLDER_VALUES` in `config_guard.py`: die acht Testwerte aus `.env.example` (DCA-Betrag und -Tageslimit, Grid-Spanne, -Abstand und -Betrag, Trend-Betrag und -Offset). Im Live-Modus gilt jetzt „gesetzt **und** nicht der Testwert“, sonst startet der Bot nicht. Die Meldung nennt Variable, Wert und den Bestätigungsweg.
+- **Verglichen wird numerisch.** `15`, `15.00` und `1.5e1` sind derselbe Testwert. Ein Textvergleich wäre mit einer zusätzlichen Nachkommastelle umgangen.
+- `GRID_SPACING_PCT` und `TREND_STOP_LIMIT_OFFSET_PCT` sind im Live-Modus Pflicht.
+- Die Liste steht fest im Code, `.env.example` wird zur Laufzeit nicht gelesen: Ein Bot darf nicht davon abhängen, dass neben ihm eine Beispieldatei liegt. Ein Test liest `.env.example` und schlägt fehl, sobald Datei und Liste auseinanderlaufen.
+- **Bestätigungsweg (Entscheidung C-a):** `LIVE_CONFIRMED_VALUES=NAME=WERT,NAME=WERT`. Ohne ihn wäre ein Testwert, den die Kalibrierung bestätigt (etwa ein Offset von 0,5 %), live nie nutzbar gewesen – der Fix hätte sich selbst blockiert. Bestätigt wird Name **und** Wert: Passt der bestätigte Wert nicht zum gesetzten, bricht der Start ab, statt die Bestätigung still für einen anderen Wert gelten zu lassen. Unbekannte oder doppelte Namen und unlesbare Werte brechen ebenfalls ab, mit eigener Meldung. Dieselbe Haltung wie beim strengen Wahrheitswert-Parsing unter W12: Ein Tippfehler im Namen soll nicht still „nichts bestätigt“ heißen.
+- Im Testnet wird weder geprüft noch die Bestätigung gelesen. Auf dem Homeserver stehen mehrere Testwerte (`GRID_UPPER_LIMIT=90000`, `DCA_QUOTE_AMOUNT=15.0` u.a.), am laufenden Betrieb ändert sich nichts.
+
+**Tests:** 13 neue in `LivePlaceholderValuesTestCase` (`tests/test_stage_c_safety.py`), Gesamtstand **706, alle grün**. Der Test-Helfer `go_live()` setzte bisher selbst drei Testwerte (15,0/50,0/15,0) als „gültige Live-Konfiguration“ und schrieb damit genau die Lücke fest. Er setzt jetzt andere Werte und zusätzlich die beiden neuen Pflichtvariablen; ein eigener Prämissen-Test belegt, dass dieser Ausgangszustand lädt, sonst wären alle Ablehnungstests auch ohne Fix grün. Geprüft werden: jeder der acht Testwerte wird live abgelehnt (mit Name und Bestätigungshinweis in der Meldung), vier Schreibweisen desselben Werts, die beiden neuen Pflichtvariablen, eine passende Bestätigung lädt (auch numerisch in anderer Schreibweise), eine Bestätigung gilt nur für ihre eigene Variable, eine Bestätigung mit anderem Wert wird abgelehnt (auch wenn der gesetzte Wert kein Testwert ist), fünf fehlerhafte Bestätigungen, und als Gegenproben: Testwerte und eine kaputte Bestätigung im Testnet laden.
+
+**Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 9 Mutationen gefangen: Testwert-Prüfung entfernt (13), Textvergleich statt Zahlenvergleich (3), `GRID_SPACING_PCT` nicht in der Pflichtliste (2), `TREND_STOP_LIMIT_OFFSET_PCT` nicht verlangt (4), Bestätigung ignoriert den Wert (2), unbekannter Name akzeptiert (1), doppelte Bestätigung akzeptiert (1), Listenwert weicht von `.env.example` ab (1), Prüfung auch im Testnet (1 Fehlschlag, 9 Fehler). Das Messskript prüft vor jeder Mutation, dass der Anker genau einmal vorkommt, und läuft mit `-B`.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
@@ -1559,11 +1580,19 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   Kanal kämen ausgerechnet `[ORDER-UNKLAR]`, `[STOP-LOSS]` und
   `[HEARTBEAT]` nirgends an) sowie alle Werte, die die Positionsgröße
   bestimmen - `DCA_QUOTE_AMOUNT`, `DCA_MAX_DAILY_SPEND`,
-  `GRID_LOWER_LIMIT`, `GRID_UPPER_LIMIT`, `GRID_AMOUNT_PER_LEVEL`,
-  `TREND_AMOUNT_PER_TRADE`. Sie müssen ausdrücklich in der `.env` stehen
+  `GRID_LOWER_LIMIT`, `GRID_UPPER_LIMIT`, `GRID_SPACING_PCT`,
+  `GRID_AMOUNT_PER_LEVEL`, `TREND_AMOUNT_PER_TRADE` - sowie
+  `TREND_STOP_LIMIT_OFFSET_PCT`. Sie müssen ausdrücklich in der `.env` stehen
   und dürfen nicht auf die Testnet-Defaults zurückfallen: Live sind genau
   sie die Stellschraube für die tatsächliche Kapitalbindung, und ein
   vergessener Eintrag sähe im Log aus wie ein bewusst gewählter Wert.
+  Seit dem 27.09.2026 (W-C) genügt „gesetzt“ nicht: Steht dort noch der
+  Testwert aus `.env.example` (`LIVE_PLACEHOLDER_VALUES` in
+  `config_guard.py`, numerisch verglichen), startet der Bot nicht. Ein
+  Testwert, der nach der Kalibrierung bewusst gelten soll, wird über
+  `LIVE_CONFIRMED_VALUES=NAME=WERT,…` bestätigt; die Bestätigung gilt nur
+  für genau diesen Wert, unbekannte oder doppelte Namen brechen ab. Im
+  Testnet wird beides nicht geprüft.
 - **Fehlkonfiguration löst keine Neustartschleife aus**: Die Prüfung
   läuft zwangsläufig vor dem Logging-Setup. Statt eines nackten
   Tracebacks mit Exit-Code 1 (den `Restart=on-failure` endlos

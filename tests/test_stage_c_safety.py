@@ -53,6 +53,8 @@ from dca_bot.balance_guard import (
 )
 from dca_bot.config import load_config
 from dca_bot.config_guard import (
+    LIVE_CONFIRMED_VALUES_VAR,
+    LIVE_PLACEHOLDER_VALUES,
     USE_TESTNET_VAR,
     ConfigError,
     announce_trading_mode,
@@ -74,7 +76,7 @@ from tests.test_trend_stop_loss import TrendStrategyTestBase
 # aus einer sauberen Umgebung, damit weder die .env des Entwicklungs-
 # rechners noch ein vorheriger Test durchschlaegt.
 _MANAGED_PREFIXES = ("DCA_", "GRID_", "TREND_", "ALLOCATOR_", "TELEGRAM_", "BINANCE_")
-_MANAGED_NAMES = (USE_TESTNET_VAR, "HEARTBEAT_INTERVAL_HOURS")
+_MANAGED_NAMES = (USE_TESTNET_VAR, "HEARTBEAT_INTERVAL_HOURS", LIVE_CONFIRMED_VALUES_VAR)
 
 
 class EnvTestCase(unittest.TestCase):
@@ -93,16 +95,24 @@ class EnvTestCase(unittest.TestCase):
         os.environ.update(self._saved)
 
     def go_live(self) -> None:
-        """Schaltet auf Live und setzt alles, was dort Pflicht ist."""
+        """
+        Schaltet auf Live und setzt alles, was dort Pflicht ist.
+
+        Bewusst KEINE Testwerte aus .env.example: bis zum 27.09.2026
+        standen hier 15.0/50.0/15.0 - genau die Werte, die seit W-C im
+        Live-Modus nicht mehr durchgehen.
+        """
         os.environ[USE_TESTNET_VAR] = "false"
         os.environ["TELEGRAM_BOT_TOKEN"] = "123456:abcdef"
         os.environ["TELEGRAM_CHAT_ID"] = "4711"
-        os.environ["DCA_QUOTE_AMOUNT"] = "15.0"
-        os.environ["DCA_MAX_DAILY_SPEND"] = "50.0"
+        os.environ["DCA_QUOTE_AMOUNT"] = "20.0"
+        os.environ["DCA_MAX_DAILY_SPEND"] = "60.0"
         os.environ["GRID_LOWER_LIMIT"] = "68000.0"
         os.environ["GRID_UPPER_LIMIT"] = "88000.0"
+        os.environ["GRID_SPACING_PCT"] = "1.6"
         os.environ["GRID_AMOUNT_PER_LEVEL"] = "8.82"
-        os.environ["TREND_AMOUNT_PER_TRADE"] = "15.0"
+        os.environ["TREND_AMOUNT_PER_TRADE"] = "12.0"
+        os.environ["TREND_STOP_LIMIT_OFFSET_PCT"] = "0.7"
 
 
 # --------------------------------------------------------------------------
@@ -175,6 +185,7 @@ class UseTestnetSwitchTestCase(EnvTestCase):
         os.environ["TELEGRAM_CHAT_ID"] = "4711"
         os.environ["GRID_LOWER_LIMIT"] = "68000.0"
         os.environ["GRID_UPPER_LIMIT"] = "88000.0"
+        os.environ["GRID_SPACING_PCT"] = "1.6"
         os.environ["GRID_AMOUNT_PER_LEVEL"] = "8.82"
         self.assertFalse(load_grid_config().use_testnet)
 
@@ -434,6 +445,187 @@ class LiveModeRequirementsTestCase(EnvTestCase):
         """Gegenprobe: im Testnet bleiben die Defaults zulaessig - sonst
         waere kein bestehendes Deployment mehr startfaehig."""
         self.assertEqual(load_grid_config().amount_per_level, 15.0)
+
+
+# --------------------------------------------------------------------------
+# W-C (Systemcheck vom 27.09.2026) - Testwerte im Live-Modus
+# --------------------------------------------------------------------------
+
+# Welcher Loader welche der Variablen prueft.
+_LOADER_FOR = {
+    "DCA_QUOTE_AMOUNT": load_config,
+    "DCA_MAX_DAILY_SPEND": load_config,
+    "GRID_LOWER_LIMIT": load_grid_config,
+    "GRID_UPPER_LIMIT": load_grid_config,
+    "GRID_SPACING_PCT": load_grid_config,
+    "GRID_AMOUNT_PER_LEVEL": load_grid_config,
+    "TREND_AMOUNT_PER_TRADE": load_trend_config,
+    "TREND_STOP_LIMIT_OFFSET_PCT": load_trend_config,
+}
+
+_ENV_EXAMPLE = Path(__file__).resolve().parent.parent / ".env.example"
+
+
+def _env_example_values() -> dict[str, str]:
+    """Die nicht auskommentierten NAME=WERT-Zeilen aus .env.example."""
+    values = {}
+    for line in _ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        values[name.strip()] = value.strip()
+    return values
+
+
+class LivePlaceholderValuesTestCase(EnvTestCase):
+    """
+    W-C: Im Live-Modus reichte "die Variable ist gesetzt". Wer
+    .env.example kopiert und nur USE_TESTNET=false setzt, hat aber alle
+    Positionsgroessen gesetzt - mit den Testwerten. Seitdem gilt: gesetzt
+    UND nicht der Testwert, ausser er ist ueber LIVE_CONFIRMED_VALUES
+    bewusst bestaetigt.
+    """
+
+    def test_list_matches_env_example(self):
+        """
+        Die Liste steht fest im Code. Aendert jemand .env.example, ohne sie
+        nachzuziehen, liefe die Pruefung still gegen alte Werte.
+        """
+        example = _env_example_values()
+        for name, placeholder in LIVE_PLACEHOLDER_VALUES.items():
+            with self.subTest(name=name):
+                self.assertIn(name, example)
+                self.assertEqual(float(example[name]), float(placeholder))
+
+    def test_list_covers_the_documented_variables(self):
+        """Genau die acht Variablen aus dem Befund, keine fehlt."""
+        self.assertEqual(set(LIVE_PLACEHOLDER_VALUES), set(_LOADER_FOR))
+
+    def test_premise_go_live_values_load(self):
+        """Praemisse fuer alle folgenden Tests: der Ausgangszustand laedt."""
+        self.go_live()
+        for loader in (load_config, load_grid_config, load_trend_config):
+            with self.subTest(loader=loader.__name__):
+                self.assertFalse(loader().use_testnet)
+
+    def test_placeholder_value_refused_in_live_mode(self):
+        for name, placeholder in LIVE_PLACEHOLDER_VALUES.items():
+            with self.subTest(name=name):
+                self.go_live()
+                os.environ[name] = placeholder
+                if name == "DCA_QUOTE_AMOUNT":
+                    # Sonst griffe vorher die Tageslimit-Plausibilitaet.
+                    os.environ["DCA_MAX_DAILY_SPEND"] = "100.0"
+                with self.assertRaises(ConfigError) as ctx:
+                    _LOADER_FOR[name]()
+                message = str(ctx.exception)
+                self.assertIn(name, message)
+                self.assertIn("Testwert", message)
+                self.assertIn(LIVE_CONFIRMED_VALUES_VAR, message)
+
+    def test_placeholder_compared_numerically(self):
+        """'15', '15.00' und ' 15.0 ' sind derselbe Testwert."""
+        for spelling in ("15", "15.00", " 15.0 ", "1.5e1"):
+            with self.subTest(spelling=spelling):
+                self.go_live()
+                os.environ["TREND_AMOUNT_PER_TRADE"] = spelling
+                with self.assertRaises(ConfigError):
+                    load_trend_config()
+
+    def test_placeholder_allowed_on_testnet(self):
+        """
+        Gegenprobe: im Testnet bleiben die Testwerte zulaessig - auf dem
+        Homeserver stehen mehrere davon, und das soll so bleiben.
+        """
+        for name, placeholder in LIVE_PLACEHOLDER_VALUES.items():
+            os.environ[name] = placeholder
+        self.assertTrue(load_config().use_testnet)
+        self.assertTrue(load_grid_config().use_testnet)
+        self.assertTrue(load_trend_config().use_testnet)
+
+    def test_new_variables_must_be_explicit_in_live_mode(self):
+        """GRID_SPACING_PCT und TREND_STOP_LIMIT_OFFSET_PCT waren nie Pflicht."""
+        for name, loader in (
+            ("GRID_SPACING_PCT", load_grid_config),
+            ("TREND_STOP_LIMIT_OFFSET_PCT", load_trend_config),
+        ):
+            with self.subTest(name=name):
+                self.go_live()
+                del os.environ[name]
+                with self.assertRaises(ConfigError) as ctx:
+                    loader()
+                self.assertIn(name, str(ctx.exception))
+                self.assertIn("ausdruecklich", str(ctx.exception))
+
+    def test_confirmed_placeholder_loads(self):
+        """Der Fall aus dem Plan: 0,5 % sind nach der Kalibrierung bestaetigt."""
+        self.go_live()
+        os.environ["TREND_STOP_LIMIT_OFFSET_PCT"] = "0.5"
+        os.environ[LIVE_CONFIRMED_VALUES_VAR] = "TREND_STOP_LIMIT_OFFSET_PCT=0.5"
+        self.assertEqual(load_trend_config().stop_limit_offset_pct, 0.5)
+
+    def test_confirmation_compared_numerically(self):
+        self.go_live()
+        os.environ["DCA_QUOTE_AMOUNT"] = "15"
+        os.environ[LIVE_CONFIRMED_VALUES_VAR] = " DCA_QUOTE_AMOUNT = 15.00 , "
+        self.assertEqual(load_config().quote_amount, 15.0)
+
+    def test_confirmation_covers_only_its_own_variable(self):
+        """
+        Eine Bestaetigung fuer den Offset ist keine fuer den Trade-Betrag,
+        auch wenn beide im selben Loader stehen.
+        """
+        self.go_live()
+        os.environ["TREND_STOP_LIMIT_OFFSET_PCT"] = "0.5"
+        os.environ["TREND_AMOUNT_PER_TRADE"] = "15.0"
+        os.environ[LIVE_CONFIRMED_VALUES_VAR] = "TREND_STOP_LIMIT_OFFSET_PCT=0.5"
+        with self.assertRaises(ConfigError) as ctx:
+            load_trend_config()
+        self.assertIn("TREND_AMOUNT_PER_TRADE", str(ctx.exception))
+
+    def test_confirmation_with_other_value_refused(self):
+        """
+        Bestaetigt ist Name UND Wert. Steht dort inzwischen etwas anderes,
+        ist die Bestaetigung veraltet - auch wenn der neue Wert kein
+        Testwert ist.
+        """
+        for value in ("0.5", "0.7"):
+            with self.subTest(value=value):
+                self.go_live()
+                os.environ["TREND_STOP_LIMIT_OFFSET_PCT"] = value
+                os.environ[LIVE_CONFIRMED_VALUES_VAR] = "TREND_STOP_LIMIT_OFFSET_PCT=0.6"
+                with self.assertRaises(ConfigError) as ctx:
+                    load_trend_config()
+                self.assertIn(LIVE_CONFIRMED_VALUES_VAR, str(ctx.exception))
+                self.assertIn("0.6", str(ctx.exception))
+
+    def test_malformed_confirmations_refused(self):
+        for raw, expected in (
+            ("TREND_STOP_LIMT_OFFSET_PCT=0.5", "TREND_STOP_LIMT_OFFSET_PCT"),
+            ("TREND_STOP_LIMIT_OFFSET_PCT", "Format"),
+            ("=0.5", "Format"),
+            ("TREND_STOP_LIMIT_OFFSET_PCT=abc", "keine Zahl"),
+            (
+                "TREND_STOP_LIMIT_OFFSET_PCT=0.5,TREND_STOP_LIMIT_OFFSET_PCT=0.5",
+                "mehrfach",
+            ),
+        ):
+            with self.subTest(raw=raw):
+                self.go_live()
+                os.environ["TREND_STOP_LIMIT_OFFSET_PCT"] = "0.5"
+                os.environ[LIVE_CONFIRMED_VALUES_VAR] = raw
+                with self.assertRaises(ConfigError) as ctx:
+                    load_trend_config()
+                self.assertIn(expected, str(ctx.exception))
+
+    def test_confirmation_ignored_on_testnet(self):
+        """
+        Im Testnet wird nichts geprueft - auch eine kaputte Bestaetigung
+        darf dort kein bestehendes Deployment am Start hindern.
+        """
+        os.environ[LIVE_CONFIRMED_VALUES_VAR] = "UNSINN"
+        self.assertTrue(load_trend_config().use_testnet)
 
 
 # --------------------------------------------------------------------------

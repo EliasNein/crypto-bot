@@ -66,6 +66,34 @@ GLOBAL_KILL_SWITCH_NAME = "STOP_ALL"
 _PLACEHOLDER_PREFIXES = ("dein_", "deine_", "your_")
 _PLACEHOLDER_SUBSTRINGS = ("dein_testnet",)
 
+# Die Testwerte, die `.env.example` fuer die sicherheitsrelevanten Groessen
+# vorgibt (Systemcheck vom 27.09.2026, W-C). Im Live-Modus reicht es nicht,
+# dass eine dieser Variablen GESETZT ist: Wer `.env.example` kopiert und nur
+# USE_TESTNET umlegt, hat sie alle gesetzt - mit Werten aus der
+# Testnet-Phase, die nie gegen echtes Kapital kalibriert wurden.
+#
+# Bewusst hier fest eingetragen statt zur Laufzeit aus `.env.example`
+# gelesen: Ein Bot darf nicht davon abhaengen, dass neben ihm eine
+# Beispieldatei liegt. Dass beide nicht auseinanderlaufen, prueft ein Test
+# (test_stage_c_safety.py, LivePlaceholderValuesTestCase).
+LIVE_PLACEHOLDER_VALUES: dict[str, str] = {
+    "DCA_QUOTE_AMOUNT": "15.0",
+    "DCA_MAX_DAILY_SPEND": "50.0",
+    "GRID_LOWER_LIMIT": "70000.0",
+    "GRID_UPPER_LIMIT": "90000.0",
+    "GRID_SPACING_PCT": "1.5",
+    "GRID_AMOUNT_PER_LEVEL": "15.0",
+    "TREND_AMOUNT_PER_TRADE": "15.0",
+    "TREND_STOP_LIMIT_OFFSET_PCT": "0.5",
+}
+
+# Der Weg, einen Testwert im Live-Modus BEWUSST zu verwenden - etwa ein
+# TREND_STOP_LIMIT_OFFSET_PCT=0.5, den die Kalibrierung bestaetigt hat.
+# Format: `NAME=WERT,NAME=WERT`. Bestaetigt wird Name UND Wert: eine
+# Bestaetigung, deren Wert nicht zum gesetzten passt, bricht den Start ab,
+# statt still fuer irgendeinen Wert zu gelten.
+LIVE_CONFIRMED_VALUES_VAR = "LIVE_CONFIRMED_VALUES"
+
 _BANNER_WIDTH = 66
 
 
@@ -345,15 +373,107 @@ def require_explicit_in_live(name: str, *, use_testnet: bool, hint: str) -> None
     und ein vergessener Eintrag saehe im Log exakt aus wie ein bewusst
     gewaehlter Wert (siehe W16: Stufenzahl x Betrag/Stufe ist beim
     Grid-Bot die EINZIGE Obergrenze, ein Tageslimit gibt es dort nicht).
+
+    Seit dem Systemcheck vom 27.09.2026 (W-C) genuegt "gesetzt" nicht
+    mehr: Steht dort noch der Testwert aus `.env.example` (siehe
+    LIVE_PLACEHOLDER_VALUES), startet der Bot ebenfalls nicht - es sei
+    denn, der Wert ist ueber LIVE_CONFIRMED_VALUES ausdruecklich
+    bestaetigt. Verglichen wird numerisch, `15`, `15.0` und `15.00` sind
+    derselbe Testwert; ein Textvergleich waere mit einer Nachkommastelle
+    umgangen.
     """
     if use_testnet:
         return
-    if os.getenv(name) is None:
+    raw = os.getenv(name)
+    if raw is None:
         raise ConfigError(
             f"{name} muss im Live-Modus ({USE_TESTNET_VAR}=false) "
             "ausdruecklich in der .env stehen - der Default aus dem Code "
             f"gilt hier nicht. {hint}"
         )
+
+    value = _as_number(raw)
+    if value is None:
+        # Keine lesbare Zahl: die Meldung dazu kommt aus env_float/env_int,
+        # die die Variable gleich danach lesen - mit dem genaueren Text.
+        return
+
+    confirmations = _load_live_confirmations()
+    if name in confirmations:
+        confirmed = confirmations[name]
+        if value != confirmed:
+            raise ConfigError(
+                f"{LIVE_CONFIRMED_VALUES_VAR} bestaetigt {name}={confirmed:g}, "
+                f"gesetzt ist aber {name}={raw.strip()}. Eine Bestaetigung "
+                "gilt nur fuer genau den Wert, der bestaetigt wurde - bitte "
+                "den Eintrag anpassen oder entfernen."
+            )
+        return
+
+    placeholder = LIVE_PLACEHOLDER_VALUES.get(name)
+    if placeholder is not None and value == float(placeholder):
+        raise ConfigError(
+            f"{name}={raw.strip()} ist noch der Testwert aus .env.example. "
+            f"Im Live-Modus ({USE_TESTNET_VAR}=false) muss hier ein fuer "
+            f"echtes Kapital kalibrierter Wert stehen. {hint} Ist genau "
+            "dieser Wert bewusst gewaehlt (z.B. nach der Kalibrierung "
+            f"bestaetigt), in der .env eintragen: "
+            f"{LIVE_CONFIRMED_VALUES_VAR}={name}={raw.strip()}"
+        )
+
+
+def _as_number(text: str) -> float | None:
+    """Endliche Zahl aus einem Rohwert, sonst None."""
+    try:
+        value = float(str(text).strip())
+    except ValueError:
+        return None
+    if math.isnan(value) or math.isinf(value):
+        return None
+    return value
+
+
+def _load_live_confirmations() -> dict[str, float]:
+    """
+    Liest LIVE_CONFIRMED_VALUES (`NAME=WERT,NAME=WERT`).
+
+    Streng wie parse_bool_strict: Ein Tippfehler im Namen soll nicht
+    still bedeuten "nichts bestaetigt" - dann liefe der Start zwar auf
+    einen Fehler, aber mit einer Meldung, die auf die falsche Stelle
+    zeigt. Unbekannte Namen, doppelte Namen und unlesbare Werte brechen
+    deshalb mit eigener Meldung ab.
+    """
+    raw = os.getenv(LIVE_CONFIRMED_VALUES_VAR, "")
+    confirmations: dict[str, float] = {}
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        name, sep, value_text = entry.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            raise ConfigError(
+                f"{LIVE_CONFIRMED_VALUES_VAR}: Eintrag {entry!r} hat nicht "
+                "das Format NAME=WERT (mehrere durch Komma getrennt)."
+            )
+        if name not in LIVE_PLACEHOLDER_VALUES:
+            raise ConfigError(
+                f"{LIVE_CONFIRMED_VALUES_VAR}: {name!r} ist keine Variable, "
+                "fuer die es einen Testwert gibt. Bestaetigt werden koennen "
+                f"nur: {', '.join(LIVE_PLACEHOLDER_VALUES)}."
+            )
+        if name in confirmations:
+            raise ConfigError(
+                f"{LIVE_CONFIRMED_VALUES_VAR}: {name} ist mehrfach bestaetigt."
+            )
+        value = _as_number(value_text)
+        if value is None:
+            raise ConfigError(
+                f"{LIVE_CONFIRMED_VALUES_VAR}: {name}={value_text.strip()!r} "
+                "ist keine Zahl."
+            )
+        confirmations[name] = value
+    return confirmations
 
 
 # --- Live-Modus sichtbar machen -------------------------------------------
