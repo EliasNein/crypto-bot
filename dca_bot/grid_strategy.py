@@ -185,6 +185,19 @@ class GridTradingStrategy:
                 )
                 order = None
             else:
+                # Sperre (Systemcheck vom 27.09.2026, K-B): Steht fuer diese
+                # Position noch ein Verkauf mit ungeklaertem Ausgang in der
+                # Pending-Datei, wird NICHT erneut verkauft. Bis dahin
+                # verkaufte der naechste Zyklus mit neuer clientOrderId ein
+                # zweites Mal - war der erste Verkauf durchgegangen, kam die
+                # Menge aus dem Bestand eines anderen Bots, und die
+                # Deckungspruefung unten konnte das nicht erkennen (sie
+                # sieht nur `free`, nicht, wem es gehoert). Die
+                # Reconciliation zu Beginn jedes Zyklus klaert den Eintrag,
+                # sobald Binance wieder antwortet.
+                if self._sell_is_pending(record):
+                    continue
+
                 # Deckungsprüfung unmittelbar vor der Order (W11): reicht
                 # das freie Guthaben für genau diesen Verkauf? Wenn nicht,
                 # würde die Börse ablehnen - und der Fehlschlag sähe im
@@ -212,7 +225,10 @@ class GridTradingStrategy:
                     # Kein erfundener Erlös, kein record_sell(): die
                     # Position bleibt OFFEN und wird im nächsten Zyklus
                     # erneut versucht (das Sell-Target ist ja weiterhin
-                    # erreicht).
+                    # erreicht) - aber nur nach einer eindeutigen
+                    # Ablehnung. War der Ausgang unklar, steht der
+                    # Pending-Eintrag noch, und _sell_is_pending() sperrt
+                    # den nächsten Versuch, bis er geklärt ist (K-B).
                     self._report_failed_sell(record, price)
                     continue
 
@@ -256,6 +272,29 @@ class GridTradingStrategy:
                 f"{self._config.symbol} @ {sell_price:.2f} verkauft "
                 f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}"
             )
+
+    def _sell_is_pending(self, record: dict) -> bool:
+        """
+        Ob fuer diese Position noch ein Verkauf mit ungeklaertem Ausgang in
+        der Pending-Datei steht (K-B, siehe _process_sells). Nur ins Log -
+        die Telegram-Meldung dazu kam bereits als [ORDER-UNKLAR] bzw. ueber
+        die Reconciliation.
+        """
+        pending = self._client.pending_orders.entries_for(
+            side="SELL", position_id=record["id"]
+        )
+        if not pending:
+            return False
+        logger.warning(
+            "[GRID-VERKAUF-UNGEKLAERT] Stufe %s: fuer Position %s ist der "
+            "Verkauf %s noch ungeklaert - es wird NICHT erneut verkauft, bis "
+            "Binance den Ausgang bestaetigt (Reconciliation zu Beginn jedes "
+            "Zyklus).",
+            record.get("level_index", "?"),
+            record["id"],
+            ", ".join(p.client_order_id for p in pending),
+        )
+        return True
 
     def _account_snapshot(self, rules) -> BalanceSnapshot | None:
         """
@@ -445,15 +484,28 @@ class GridTradingStrategy:
         benachrichtigen. Ins Log geht dagegen jeder einzelne Fehlschlag.
         Der Zustand lebt nur im Prozessspeicher (wie _last_seen_price) -
         nach einem Neustart wird einmalig erneut gemeldet.
+
+        Seit dem Systemcheck vom 27.09.2026 (K-B) unterscheidet der Text,
+        ob der nächste Zyklus es wirklich erneut versucht: nach einer
+        eindeutigen Ablehnung ja, bei unklarem Ausgang (Pending-Eintrag
+        steht noch) erst, wenn die Reconciliation ihn geklärt hat.
         """
+        unclear = bool(
+            self._client.pending_orders.entries_for(side="SELL", position_id=record["id"])
+        )
+        follow_up = (
+            "Ausgang UNKLAR - kein neuer Versuch, bis Binance ihn bestätigt."
+            if unclear
+            else "Der nächste Zyklus versucht es erneut."
+        )
         logger.warning(
             "[GRID-VERKAUF-FEHLGESCHLAGEN] Echter Verkauf für Stufe %d "
             "fehlgeschlagen (Position %s, Preis ~%.2f) - Position bleibt "
-            "OFFEN im Ledger, kein Erlös verbucht. Der nächste Zyklus "
-            "versucht es erneut.",
+            "OFFEN im Ledger, kein Erlös verbucht. %s",
             record["level_index"],
             record["id"],
             price,
+            follow_up,
         )
 
         if record["id"] in self._failed_sell_notified:
@@ -474,6 +526,15 @@ class GridTradingStrategy:
         occupied_levels = {
             r["level_index"] for r in self._ledger.open_positions()
         }
+        # Eine Stufe mit einem Kauf, dessen Ausgang noch ungeklaert ist, gilt
+        # ebenfalls als belegt (Systemcheck vom 27.09.2026, Gegenstueck zu
+        # K-B): war der Kauf durchgegangen, wuerde ein erneutes Durchqueren
+        # sonst ein zweites Mal kaufen. Die Reconciliation traegt ihn nach
+        # oder verwirft den Eintrag - danach ist die Stufe wieder regulaer.
+        for pending in self._client.pending_orders.entries_for(side="BUY"):
+            level = pending.context.get("level_index")
+            if isinstance(level, int):
+                occupied_levels.add(level)
         triggered_levels = find_triggered_buy_levels(
             self._levels, self._last_seen_price, price, occupied_levels
         )
