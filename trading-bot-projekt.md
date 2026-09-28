@@ -164,6 +164,8 @@ Bei absolutem Gewinn zeigt sich dadurch ein gemischtes Bild: In 2021 und 2022 ü
 
 *(Aktualisiert 17.09.2026: Für den **Grid-Bot** trifft dieser Satz nicht mehr zu — `GRID_AMOUNT_PER_LEVEL` ist auf dem Homeserver auf 9,38 € gesetzt, siehe „W16 umgesetzt" in 6g. Das ist ausdrücklich keine Kurs-Kalibrierung, sondern das Einhalten der 150-€-Obergrenze aus diesem Abschnitt, die ohnehin feststand: Der Grid-Bot hat bewusst kein Tageslimit, Stufenzahl × Betrag ist dort die einzige Bremse, und sie lag mit 240 € um 60 % daneben. Preisspanne und `GRID_SPACING_PCT` bleiben unverändert offen — sie hängen am Kursniveau und verschieben, anders als der Betrag, auch das Strategieprofil. Für `DCA_QUOTE_AMOUNT` und `TREND_AMOUNT_PER_TRADE` gilt der Satz vollständig weiter.)*
 
+*(Vermerk 28.09.2026: **Die „€“-Beträge dieses Abschnitts sind im Testnet USDT.** Auf BTCUSDT ist jeder Betrag, den ein Bot ausgibt, ein USDT-Betrag. Die 9,38 € pro Grid-Stufe sind auf dem Homeserver also 9,38 USDT, und die Töpfe von 150 € / 150 € wirken im Testnet als Obergrenzen von je 150 USDT. Das war als Näherung gemeint und bleibt es bis zum Paarwechsel. Erst mit BTCEUR (Entscheidung vom 28.09.2026, 6g „Symbolbindung“ und 6h) sind die Beträge wirklich Euro. Die Beträge sind dann neu in Euro festzulegen, die Grid-Spanne ohnehin, weil sie in der Quote-Währung des Paars angegeben wird.)*
+
 *(Aktualisiert 25.09.2026: Der „noch bevorstehende monatelange Paper-Trade-Test“ ist überholt. Er **läuft seit dem 16.09.2026** auf dem Homeserver, mit aktivem Allocator-Opt-in für DCA und Trend (6h). Er begann damit nicht erst nach Abschluss der übrigen Live-Gang-Vorbereitungen aus 6d, sondern parallel zu ihnen (Stand der Liste: Vermerke in 6d). Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026 (Kopfbereich). Die Abhängigkeit selbst gilt unverändert, siehe den Vermerk vom 17.09. direkt darüber.)*
 
 ---
@@ -694,6 +696,8 @@ Die Formel steckt bereits im Code (`grid_strategy.py`, Log-Zeile beim Start): `(
 Datenherkunft, damit klar ist was gemessen und was abgeleitet ist: Die VPS-Zeile ist direkt belegt — dieselbe Konfiguration lief am 10.09. lokal, und `logs/grid_bot.log` enthält wörtlich `Grid initialisiert: 18 Stufen von 68000.00 bis 87585.38 (Abstand 1.50%, max. Kapitalbindung ca. 255.00)`. Die Homeserver-Zeile war zum Zeitpunkt dieser Rechnung **abgeleitet**: 6e protokolliert nur „Grid mit 17 Stufen initialisiert", und 17 Stufen ergeben sich exakt aus den `.env.example`-Werten (70.000–90.000 @ 1,5 %) — plausibel, weil der Homeserver frisch aus dem Repo aufgesetzt wurde. Gegenzuprüfen mit `grep -E 'GRID_(LOWER|UPPER|SPACING|AMOUNT)' .env` bzw. `grep "Grid initialisiert" logs/grid_bot.log`.
 
 *(Aktualisiert 17.09.2026: Die Homeserver-Zeile ist **inzwischen direkt belegt**, der Vorbehalt „abgeleitet" ist damit erledigt. Der Neustart nach der Betragsänderung (siehe „W16 umgesetzt" unten) hat wörtlich geloggt: `Grid initialisiert: 17 Stufen von 70000.00 bis 88828.99 (Abstand 1.50%, max. Kapitalbindung ca. 150.08)`. Bestätigt sind damit die Struktur — 17 Stufen, also 16 Kaufstufen — und die Spanne, deren Obergrenze mit 88.828,99 genau dort liegt, wo die Tabelle sie ausweist. Die 240,00 € der Tabelle waren der Stand mit 15,00 € pro Stufe und sind seit der Änderung historisch; die Rechnung als solche stimmt, nur der Faktor ist ein anderer. Dass die Prüfung überhaupt nötig war, ist der Punkt: Die 9,38 € stehen auf genau dieser Stufenzahl — wären es 18 Stufen gewesen, läge die Bindung bei 17 × 9,38 = 159,46 € und der Topf wäre weiterhin überschritten.)*
+
+*(Vermerk 28.09.2026: **Die „€“-Beträge dieser Rechnung sind im Testnet USDT.** Der Grid-Bot handelt BTCUSDT, `GRID_AMOUNT_PER_LEVEL` ist ein Betrag in der Quote-Währung, also USDT; Punkt 1 unten sagt das bereits für die 15. Die Rechnung selbst (Kaufstufen × Betrag) ist davon unabhängig und gilt für jedes Paar. Beim Paarwechsel auf BTCEUR (6g „Symbolbindung“, 6h) werden aus denselben Zahlen echte Euro. Die Spanne 70.000 bis 88.829 ist dagegen eine USDT-Spanne und muss für BTCEUR neu festgelegt werden, sie lässt sich nicht übernehmen.)*
 
 Drei Punkte, die an dieser Rechnung wichtig sind:
 
@@ -1257,6 +1261,56 @@ Die Bot-Zuordnung überlebte im ersten Lauf. Die Zusicherung lautete `"grid" in 
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 6 Mutationen gefangen: Nenner zurück auf einen Trade-Betrag (2), unrealisierten Anteil weglassen (2), der komplette alte Code (`main()` übergibt wieder `total_pnl_pct`, 2), offene Position nicht im Einsatz (2), DCA-Zeile ohne PnL (1), Bewertungsregel nicht im Report (1).
 
+### Symbolbindung: ein neues Paar trifft auf alten Bestand (28.09.2026)
+
+**Anlass.** Binance hat für Kunden im EWR die USDT-Spot-Paare entfernt. Mit echtem Geld kann das Projekt also nicht auf BTCUSDT laufen, auf dem es seit dem ersten Tag im Testnet läuft. Ein Audit am selben Tag (nur lesend, ohne Code-Änderung) ergab: Für einen frischen Start mit leeren Ledgern reicht es, `*_SYMBOL` umzustellen. Gefährlich ist der Versehens-Fall **„neues Symbol auf altem Ledger“**, und dagegen gab es keinerlei Schutz. Grid- und Trend-Ledger, der Allocator-Zustand und die Stop-Loss-Sperren wussten nicht, zu welchem Paar sie gehören. Ein Bot hätte alte BTCUSDT-Positionen still als Positionen des neuen Paars weitergeführt, mit Einstandspreisen in USDT gegen Kurse in Euro. Beim DCA-Bot, dessen Einträge schon immer ein Symbol trugen, war es umgekehrt: Käufe eines anderen Paars wurden still ignoriert (`risk.py`, Filter in Tageslimit, Stop-Loss-Kostenbasis und Bestand). Sie fielen damit aus allen drei Rechnungen heraus.
+
+**Entscheidung vom 28.09.2026: Für echtes Geld wird BTCEUR verwendet.** Begründung:
+
+- USDT-Spot-Paare sind im EWR nicht handelbar.
+- BTCUSDC hat in den Tageskerzen eine Lücke vom 30.09.2022 bis 11.03.2023. Genau darüber liegen die Backtest-Zeiträume 2022 und 2023 (5a, 6).
+- BTCEUR ist lückenlos (Tageskerzen seit 03.01.2020).
+- Die Gebühren sind bei beiden Paaren gleich: laut Kontoanzeige am 28.09.2026 (BTC/EUR und BTC/USDC identisch: Taker 0,095 % / Maker 0,1 %, mit BNB-Rabatt 0,07125 % / 0,075 %). Promo-Sätze können sich ändern.
+- Beträge und Steuer laufen direkt in Euro.
+
+Die Liquidität von BTCEUR (24h-Volumen etwa 100 BTC, rund 2 % von BTCUSDC) reicht für Orders von 9 bis 15 €. Bei deutlich größeren Beträgen ist die Orderbuch-Tiefe neu zu prüfen. Zur Einordnung der Backtests: Im Audit korrelierten die Tagesschlusskurse von BTCEUR und BTCUSDT je Zeitraum mit 0,98 bis 0,996, der Trend-Backtest ergab dieselbe Zahl an Trades. Die Renditen weichen durch den EUR/USD-Kurs um bis zu rund 7 Prozentpunkte ab. Die Zahlen in 5a und 6 bleiben in USDT gerechnet und gültig, für BTCEUR sind sie eine Näherung.
+
+**Weitere Vorbedingung vor dem Live-Gang: Der Schalter „Gebühren mit BNB bezahlen“ muss ausgeschaltet sein.** Die Gebührenkorrektur (`order_utils.py`, `sum_commission()`) zählt nur Gebühren im gehandelten Asset und überspringt Gebühren in einer anderen Währung. Die **Mengen** bleiben dabei korrekt, denn mit BNB-Rabatt wird kein BTC abgezogen. Falsch werden zwei andere Dinge: `realized_pnl` und der Einsatz enthalten die Gebühr nicht und sind um sie zu optimistisch. Und das BNB-Guthaben wird still verbraucht, ohne dass ein Ledger davon weiß.
+
+**Nicht Teil dieser Runde:** der eigentliche Symbolwechsel, die Grid-Spanne in Euro, das Dashboard, der Pilot und W14. Nicht verifiziert ist, ob Binance mit −2013 antwortet, wenn eine Order unter dem falschen Symbol abgefragt wird. Der `FakeExchange` bildet das so ab, und `check_orders` ist so gebaut, dass es auf die Antwort nicht ankommt (siehe unten). Das lässt sich erst im Pilot prüfen.
+
+**Die Entscheidungen im Einzelnen:**
+
+- **E1, Altbestand ohne Feld `symbol` (Option c):** Ein fehlendes Feld gilt als `LEGACY_SYMBOL` = BTCUSDT (`symbol_guard.py`). Das ist keine Annahme, sondern die Projektgeschichte: Jedes vorhandene Ledger stammt aus BTCUSDT-Läufen (6a bis 6h), auch die offene Dry-Run-Trend-Position vom 15.09.2026. Alte Einträge werden **nicht** gestempelt, die Regel gilt beim Lesen, die Dateien bleiben unverändert. Verworfen wurde: (a) „fehlendes Feld gilt als das konfigurierte Symbol und wird gestempelt“. Stünde beim ersten Start schon das neue Paar in der `.env`, würde genau der Irrtum festgeschrieben, gegen den die Prüfung gebaut ist. (b) Ein Migrationsskript als Voraussetzung hätte dem Deploy eine zwingende Reihenfolge gegeben; ein Neustart vor dem Skript ließe die Bots still aus. Ein optionales Stempelskript (d) ist bewusst **nicht** gebaut worden.
+- **E2, unlesbare Sperrdatei:** Warnung statt Abbruch, im Log und einmal pro Start per Telegram (`[SYMBOL-WARNUNG]`). Die Sperrdatei wird bewusst nicht atomar geschrieben, ihr Inhalt ist informativ, und eine Sperre verhindert ohnehin nur Käufe. Eine **lesbare** Sperre mit fremdem Paar verweigert den Start.
+- **E3, Laufzeit-Abweichung beim Allocator:** Passt das Paar der Zuteilung nicht zum Paar des Bots, gilt 0,0 wie bei einer veralteten Zuteilung (100 % DCA, kein Trend-Einstieg), mit Warnung und ohne Prozessabbruch.
+- **E4, Konfiguration:** Der Allocator prüft `ALLOCATOR_SYMBOL` immer gegen `DCA_SYMBOL` und `TREND_SYMBOL`. DCA und Trend prüfen gegen `ALLOCATOR_SYMBOL` nur mit gesetztem Opt-in (`*_ALLOCATOR_STATE_FILE`). Ein Widerspruch ist ein Konfigurationsfehler (`ConfigError`, Exit-Code 0).
+- **E5, gemischtes DCA-Ledger:** Ein DCA-Ledger mit Käufen eines fremden Paars verweigert den Start, statt sie weiter still zu ignorieren.
+- **E6, Backtest-Defaults:** siehe unten.
+- **E7, Kerzenlücken:** siehe unten. Die Meldung zu −2010 (fehlendes Quote-Guthaben) ist bewusst nicht Teil dieser Runde. Eine Quote-Guthaben-Prüfung vor Käufen ist nicht gebaut: −2010 wird schon heute sauber als Ablehnung behandelt, eine Sperre brächte keinen Sicherheitsgewinn.
+
+**Umgesetzt, in dieser Reihenfolge und je Schritt mit eigenem Commit** (Branch `symbol-bindung`):
+
+1. **Bindung ans Paar** (`e2a37bd`). `GridPosition` und `TrendTrade` haben ein Feld `symbol` (Default `None`, alte Dateien bleiben lesbar), gesetzt bei jedem neuen Eintrag, auch beim Nachtragen aus der Pending-Datei. Der Allocator schreibt sein Paar in den Zustand. `PendingOrderStore.entries_for()` filtert nach Symbol, alle Aufrufstellen in Grid und Trend übergeben es. `read_allocation_fraction()` prüft das Paar (E3).
+2. **Altbestand** (`a9d1f78`, Schritt 3 des Plans): `effective_symbol()` und `LEGACY_SYMBOL` nach E1. Dazu der Rückweg-Test (unten).
+3. **Startprüfung und Bericht** (`26cdea7`). Jeder der vier Prozesse prüft beim Start, **vor** der Reconciliation: das eigene Ledger (alle Einträge, offene und geschlossene), die Pending-Datei, die Stop-Loss-Sperre und bei aktivem Opt-in den Allocator-Zustand, der Allocator seinen eigenen. Gehört etwas zu einem anderen Paar, startet der Bot nicht. Er schreibt eine ERROR-Zeile mit der Liste, was wo steht, schickt `[SYMBOL-KONFLIKT]` samt Lösungsweg per Telegram und endet mit Exit-Code 0 (keine systemd-Neustartschleife). Ein unlesbares Ledger blockiert ebenfalls, wie schon bisher über `verify_state_readable()`.
+4. **Auswertungen über Paare hinweg** (`99d6918`). Das Positions-Audit bildet einen Anspruch je Paar im Ledger und gleicht nach **Base-Asset** ab statt nach Symbol (Details in 7.5). `check_orders` sucht zuerst unter dem Paar aus der eigenen Buchhaltung, dann unter allen konfigurierten, und sagt „nie angenommen“ nur noch, wenn unter dem maßgeblichen Paar gesucht wurde (7.5).
+5. **Kleinigkeiten** (`9ef7d60`). Die Staub-Meldung des Trend-Bots nennt Base- und Quote-Asset aus `exchangeInfo` statt fest „USDT“. Die Backtests nehmen ihre Standardwerte aus der Konfiguration (E6), `fetch_historical_klines()` warnt bei Kerzenlücken (E7).
+
+**Der Bericht vor dem Neustart:** `python -m dca_bot.symbol_guard --report`. Ein Startabbruch lässt den Dienst still aus: ohne Heartbeat, und offene Grid-Positionen sind dann ungeschützt. Deshalb lässt sich dieselbe Prüfung **vor** einem Neustart gegen die echten Dateien ausführen. Der Bericht liest nur, braucht kein Lock und keine Zugangsdaten und legt keine Datei an. Er listet je Bot und Datei, ob das Feld vorhanden ist, ob das Paar passt (Altbestand ausdrücklich als „ohne Feld, gilt als BTCUSDT“) und was der Start tun würde: „würde starten“, „würde starten, mit Warnung“ oder „würde NICHT starten“ mit Grund. Exit-Code 0, wenn jeder Bot starten würde, sonst 1. Bericht und Start nutzen dieselben Prüffunktionen; ein Test stellt sicher, dass beide zum selben Ergebnis kommen.
+
+**E6, Backtest-Defaults.** Ohne `--symbol` rechnet jeder Backtest mit dem Paar seines Bots (`DCA_`, `GRID_`, `TREND_` bzw. `ALLOCATOR_SYMBOL`, aus der Umgebung oder der `.env`). Der Grid-Backtest nimmt zusätzlich `GRID_LOWER_LIMIT`, `GRID_UPPER_LIMIT`, `GRID_SPACING_PCT` und `GRID_AMOUNT_PER_LEVEL`, nicht aber `GRID_STOP_LOSS_PCT`. Vorrang: Kommandozeile, Variable, Standard. Der Standard sind die bisher fest im Code stehenden Werte (BTCUSDT, 70.000 bis 90.000, 1,5 %, 15), bewusst über eine eigene Konstante `DOCUMENTED_SYMBOL` und nicht über den Default der Bots. Jeder Report beginnt mit „Verwendete Werte“, je Wert mit Herkunft („aus GRID_LOWER_LIMIT“, „Standard, GRID_LOWER_LIMIT nicht gesetzt“ oder „Kommandozeile“). **Ohne gesetzte Variablen rechnen die Backtests exakt wie bisher:** Tests fangen die Simulationsfunktionen ab und prüfen, dass dort genau die alten Werte ankommen. Die Simulationsfunktionen selbst sind unverändert. Gleiche Eingaben ergeben damit dieselben Zahlen wie in 5a und 6; ein erneuter Abruf der Kursdaten war dafür nicht nötig und wurde nicht gemacht. **Achtung:** Wer auf einem Rechner mit `.env` rechnet, in der Grid-Werte gesetzt sind, bekommt diese Werte. Das ist gewollt, der Report nennt es.
+
+**E7, Kerzenlücken.** `fetch_historical_klines()` warnt mit `[KERZEN-LUECKE]`, wenn zwischen zwei Kerzen welche fehlen (Anzahl, Zahl der Lücken, die größte mit Datum) oder wenn die Daten erst nach dem angefragten Beginn einsetzen (Paar später gelistet). Das ist nur eine Warnung über `logging`, die Kerzen werden unverändert zurückgegeben. Die Prüfung steckt in einem `try`, das jeden Fehler abfängt: Dieselbe Funktion versorgt den Live-Vorlauf von Trend-Bot und Allocator, und der darf daran nie scheitern.
+
+**Rückweg auf den alten Code, wie geprüft.** Der einzige Rückweg nach einem missglückten Deploy ist der alte Code auf den neuen Dateien. `tests/test_rollback_compat.py` schreibt deshalb mit dem **neuen** Code einen vollständigen Datenstand: DCA-Ledger, Grid-Ledger (offen und geschlossen), Trend-Ledger (geschlossen und offen mit Stop-Order), Allocator-Zustand aus einem echten Allocator-Zyklus, alle drei Sperren und eine Pending-Datei, alle mit dem Feld `symbol`. Dann holt er den **alten** Code per `git archive` aus dem Repository, für **10ce096** (läuft auf beiden Servern) und **46ca7a7** (Stand vor dieser Runde), und startet ihn in einem eigenen Python-Prozess ohne `DCA_`/`GRID_`/`TREND_`/`ALLOCATOR_`/`TELEGRAM_`/`BINANCE_`-Variablen. Der alte Code muss alles lesen, das Audit und den Bericht des Korrekturskripts laufen lassen und dann arbeiten: Der alte Grid-Bot verkauft, der alte Trend-Bot gleicht ab und steigt per Stop-Loss aus (storniert dabei die Stop-Order), der alte DCA-Bot kauft im Dry-Run, der alte Allocator rechnet einen Zyklus, eine Sperre wird zurückgesetzt. Zum Schluss wird geprüft, dass das Feld `symbol` die Schreibzugriffe des alten Codes überlebt. Fehlt `git` oder der Commit, wird der Test übersprungen statt grün gemeldet. Zwei absichtlich formatbrechende Mutationen hat genau dieser Test gefangen.
+
+**Ersetzter Test:** `test_not_found` in `tests/test_check_orders.py` hielt das alte Verhalten fest („nicht gefunden“ ohne bekanntes Paar heißt „nie angenommen“). Er ist bewusst ersetzt durch drei Tests: ohne bekanntes Paar keine Aussage, unter dem bekannten Paar endgültig, unter `--symbol` endgültig.
+
+**Tests:** Neu sind `tests/test_symbol_binding.py` (Feld und Filter, Altbestand), `tests/test_symbol_guard.py` (Startprüfung je Bot und Zustand, Verdrahtung in allen vier `main*.py`, Konfigurationsprüfung, Laufzeit-Rückfall, Bericht inklusive einer Wache, die jeden Schreibzugriff abfängt), `tests/test_rollback_compat.py` und `tests/test_backtest_defaults.py`. Der `FakeExchange` in `tests/test_shared_account.py` kennt jetzt mehrere Paare: BTCUSDT und BTCEUR mit demselben Base-Asset sowie ETHUSDT, ein gemeinsames Guthaben je Asset, Orders nur unter ihrem eigenen Paar auffindbar und stornierbar. Gesamtstand **879 Tests, alle grün.**
+
+**Wirksamkeit gemessen**, je Schritt eine Mutationsprobe mit voller Suite: Schritt 1 11 von 11 gefangen, Altbestand 5 von 5, Startprüfung 26 von 26, Auswertungen 17 von 18, Kleinigkeiten 18 von 18. In Schritt 4 überlebte eine Mutation: Der Paarfilter in `grid_claim()` war ungetestet. Ein Test dafür (Grid und Trend) kam dazu. Nachgemessen wurden diese Mutation und eine zweite für denselben Filter in `trend_claim()`, beide gefangen. Diese Nachmessung lief nur gegen `tests/test_audit_positions.py` (60 Tests), nicht gegen die volle Suite. Die Probe für die Kleinigkeiten lief nach der letzten Bereinigung ein zweites Mal auf dem Stand, der committet wurde, wieder 18 von 18.
+
 ## 6h. Allocator-Opt-in aktiviert - vollständiges System live (16.09.2026)
 
 Nach Abschluss des kompletten Sicherheitsreviews (K1-K5, alle 18 W-Punkte, Infrastruktur-Härtung) wurde das Allocator-Opt-in für DCA und Trend auf dem Homeserver aktiviert (DCA_ALLOCATOR_STATE_FILE, TREND_ALLOCATOR_STATE_FILE gesetzt). Damit läuft erstmals das vollständige, integrierte Vier-Bausteine-System im Testnet-Live-Betrieb: DCA und Trend lesen jetzt die Allocator-Zuteilung vor jeder neuen Order, statt unabhängig voneinander zu handeln.
@@ -1287,6 +1341,11 @@ Beide Ereignisarten sind selten, beim Trend-Bot mit Tageskerzen liegen Wochen da
 - ein abschließender Sicherheitsreview mit Claude Opus 5 kurz vor dem tatsächlichen Live-Gang (siehe 6d).
 
 Die längere Laufzeit im Testnet ist ausdrücklich dafür da, diese Vorbedingungen mit besserer Datenbasis zu erfüllen, nicht um sie zu umgehen oder abzukürzen.
+
+*(Ergänzt 28.09.2026: Zwei weitere Vorbedingungen für echtes Kapital, Begründung in 6g, „Symbolbindung“.)*
+
+- **Paarwechsel auf BTCEUR.** Entscheidung vom 28.09.2026: Für echtes Geld wird BTCEUR verwendet. Begründung: USDT-Spot-Paare sind im EWR nicht handelbar; BTCUSDC hat in den Tageskerzen eine Lücke vom 30.09.2022 bis 11.03.2023; BTCEUR ist lückenlos, die Gebühren sind laut Kontoanzeige am 28.09.2026 bei beiden Paaren gleich (BTC/EUR und BTC/USDC identisch: Taker 0,095 % / Maker 0,1 %, mit BNB-Rabatt 0,07125 % / 0,075 %; Promo-Sätze können sich ändern), Beträge und Steuer laufen direkt in Euro. Die Liquidität von BTCEUR (24h-Volumen etwa 100 BTC, rund 2 % von BTCUSDC) reicht für Orders von 9 bis 15 €, bei deutlich größeren Beträgen ist die Orderbuch-Tiefe neu zu prüfen. Der Wechsel selbst (alle vier `*_SYMBOL`, Grid-Spanne in Euro, frische Ledger oder bewusst weitergeführter Altbestand) ist noch nicht geplant. Die Absicherung dafür steht: Ein Bot startet nicht, solange seine Dateien zu einem anderen Paar gehören, und `python -m dca_bot.symbol_guard --report` zeigt das vor jedem Neustart.
+- **Der Schalter „Gebühren mit BNB bezahlen“ ist ausgeschaltet.** Die Gebührenkorrektur zählt nur Gebühren im gehandelten Asset (`order_utils.py`, `sum_commission()`). Mit BNB-Rabatt bleiben die Mengen korrekt, aber `realized_pnl` und der Einsatz sind um die Gebühr zu optimistisch, und das BNB-Guthaben wird still verbraucht, ohne dass ein Ledger davon weiß.
 
 ### Umstellung auf echte Orders auf dem Homeserver: aus den Ledgern rekonstruiert (25.09.2026)
 
@@ -1711,6 +1770,36 @@ Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   wiederholen würde, ohne je erfolgreich zu sein) gibt es eine klare
   Meldung auf stderr, nach Möglichkeit eine Telegram-Nachricht, und ein
   sauberes Ende. Gleiches Muster wie bei einem bereits laufenden Bot.
+- **Kein Start auf den Dateien eines anderen Paars**
+  (`dca_bot/symbol_guard.py`, seit 28.09.2026, Hintergrund in 6g
+  „Symbolbindung“): Jeder der vier Prozesse prüft beim Start, noch vor der
+  Reconciliation, ob seine Dateien zu dem Paar aus `*_SYMBOL` gehören. Der
+  Bot prüft sein Ledger (alle Einträge, offene und geschlossene), seine
+  Pending-Datei, seine Stop-Loss-Sperre und bei aktivem Opt-in den
+  Allocator-Zustand. Der Allocator prüft seinen eigenen Zustand. Einträge
+  ohne Feld `symbol` stammen aus der Zeit davor und gelten als BTCUSDT
+  (`LEGACY_SYMBOL`). Die Regel gilt beim Lesen, die Dateien werden dafür
+  nicht umgeschrieben. Gehört etwas zu einem anderen Paar, startet der
+  Bot nicht. Er schreibt eine `ERROR`-Zeile mit der Liste, was wo steht,
+  schickt `[SYMBOL-KONFLIKT]` samt Lösungsweg per Telegram und endet mit
+  Exit-Code 0 wie bei einer Fehlkonfiguration. Einzige Ausnahme ist eine
+  Sperrdatei mit unlesbarem Inhalt: Sie ergibt eine Warnung im Log und
+  einmal pro Start per Telegram (`[SYMBOL-WARNUNG]`), keinen Abbruch, und
+  die Sperre wirkt weiter. Dazu prüft `config_guard.py` die Paare
+  untereinander: Der Allocator verlangt, dass `DCA_SYMBOL` und
+  `TREND_SYMBOL` seinem `ALLOCATOR_SYMBOL` entsprechen. DCA und Trend
+  prüfen das nur bei gesetztem Opt-in (`*_ALLOCATOR_STATE_FILE`). Zur
+  Laufzeit gilt eine Zuteilung, die für ein anderes Paar gerechnet ist,
+  wie eine veraltete: 0,0, also 100 % DCA und kein Trend-Einstieg.
+
+  **Vor jedem Neustart:** `python -m dca_bot.symbol_guard --report` zeigt,
+  was der Start tun würde. Ein Startabbruch lässt den Dienst still aus:
+  kein Heartbeat, und offene Grid-Positionen sind dann ungeschützt. Der
+  Bericht listet je Bot und Datei, ob das Feld vorhanden ist und ob das
+  Paar passt, und sagt „würde starten“, „würde starten, mit Warnung“ oder
+  „würde NICHT starten“ mit Grund. Exit-Code 0 nur, wenn jeder Bot starten
+  würde, sonst 1. Er liest nur, braucht weder Lock noch Zugangsdaten, legt
+  keine Datei an und nutzt dieselben Prüffunktionen wie der Start.
 - **Konsistenz-Check vor jedem Verkauf** (`dca_bot/balance_guard.py`):
   DCA, Grid und Trend teilen sich ein Konto und handeln dasselbe Symbol,
   aber jeder führt sein eigenes Ledger - die Zuordnung "dieses BTC gehört
@@ -1912,13 +2001,39 @@ Bärenmarkt, 2023 Erholung, 2021 Seitwärts/Konsolidierung), auf
 Stundenkerzen (Kompromiss - der Live-Bot prüft alle paar Minuten, aber
 Tageskerzen würden die meisten Grid-Durchquerungen unsichtbar machen).
 
+**Parameter** (seit 28.09.2026, E6 in 6g „Symbolbindung“): Paar, Spanne,
+Abstand und Betrag kommen aus denselben Variablen wie beim Bot, also
+`GRID_SYMBOL`, `GRID_LOWER_LIMIT`, `GRID_UPPER_LIMIT`, `GRID_SPACING_PCT`
+und `GRID_AMOUNT_PER_LEVEL` aus der Umgebung oder der `.env`.
+`GRID_STOP_LOSS_PCT` wird bewusst nicht gelesen, dafür gilt weiter
+`--stop-loss-pct` (Default 15). Vorrang: Kommandozeile, Variable,
+Standard. Eine leere Variable gilt als nicht gesetzt. Der Standard sind
+die Werte, mit denen Abschnitt 6 gerechnet ist (BTCUSDT, 70.000 bis
+90.000, 1,5 %, 15). Er steht bewusst in einer eigenen Konstante
+(`DOCUMENTED_SYMBOL`) und hängt nicht am Default der Bots. Der Report
+beginnt mit „Verwendete Werte“ und nennt je Wert die Herkunft („aus
+GRID_LOWER_LIMIT“, „Standard, GRID_LOWER_LIMIT nicht gesetzt“ oder
+„Kommandozeile“). **Achtung:** Auf einem Rechner mit `.env`, in der
+Grid-Werte stehen, rechnet der Backtest mit diesen Werten. Wer die Zahlen
+aus Abschnitt 6 nachrechnen will, gibt die Werte auf der Kommandozeile
+an. Die anderen drei Backtests nehmen auf dieselbe Weise nur das Paar
+ihres Bots (`DCA_SYMBOL`, `TREND_SYMBOL`, `ALLOCATOR_SYMBOL`).
+
+Fehlen in den abgerufenen Kerzen welche, oder setzen die Daten erst nach
+dem angefragten Beginn ein (Paar später gelistet), warnt
+`fetch_historical_klines()` mit `[KERZEN-LUECKE]` (E7). Das ist nur eine
+Warnung, die Rechnung läuft über die Lücke hinweg, als hätte es den
+Zeitraum nicht gegeben. Dieselbe Funktion versorgt den Live-Vorlauf von
+Trend-Bot und Allocator, dort kann die Warnung also auch im Betrieb
+auftauchen.
+
 **Wichtiger Unterschied zu DCA/Trend:** `GRID_LOWER_LIMIT`/`GRID_UPPER_LIMIT`
 sind kein skaleninvarianter Wert, sondern ein absoluter Preisbereich,
 gekoppelt an das heutige Kursniveau. Gegen die historischen Testzeiträume
 (BTC damals deutlich niedriger) getestet, läge die unveränderte Live-Spanne
 sofort außerhalb des Kurses -> 0 Trades, sofortiger Trendbruch-Stop-Loss.
 Der Backtest zeigt deshalb standardmäßig zwei Ergebnisse pro Zeitraum: das
-literale (mit den unveränderten Live-Werten) und einen klar als "ANALYSE,
+literale (mit den verwendeten Werten, siehe oben) und einen klar als "ANALYSE,
 NICHT Live-Verhalten" gekennzeichneten zweiten Lauf, bei dem die Spanne
 symmetrisch um den tatsächlichen Startpreis der jeweiligen Periode skaliert
 wird (gleiches Breiten-Verhältnis/Abstand wie live). Siehe
@@ -2056,7 +2171,9 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   geschlossen hat, entscheidet die Menge (Toleranz eine `stepSize`),
   nicht der Status `FILLED`. Liegt der Rest unter dem Mindestvolumen,
   wird die Position geschlossen und der Rest als `dust_qty` gemeldet
-  (`[TREND-STAUB]`, Telegram). Bis zum 27.09.2026 verkaufte der Ausstieg
+  (`[TREND-STAUB]`, Telegram; Menge im Base-, Wert und Ergebnis im
+  Quote-Asset des Paars aus `exchangeInfo`, bis zum 28.09.2026 stand
+  dort fest „USDT“). Bis zum 27.09.2026 verkaufte der Ausstieg
   hier die volle Menge, auf dem geteilten Konto aus fremdem Bestand, und
   eine beendete Order mit Teilfüllung schloss die ganze Position mit dem
   Teilerlös.
@@ -2275,21 +2392,32 @@ Pfade kommen aus `DCA_BOT_STATE_FILE`/`GRID_STATE_FILE`/
 `TREND_STATE_FILE` bzw. den üblichen Defaults, alternativ über
 `--dca-file` / `--grid-file` / `--trend-file`.
 
+Je Ledger nennt das Skript die Paare, die darin vorkommen, etwa
+`Paare im Ledger: BTCUSDT: 12 (davon 12 ohne Feld, gelten als BTCUSDT)`.
+Einträge ohne Feld `symbol` stammen aus der Zeit vor der Symbolbindung
+und gelten als BTCUSDT (7.1). Führt ein Ledger ein anderes Paar als das
+konfigurierte, steht darunter ein `ACHTUNG` mit dem Hinweis auf
+`python -m dca_bot.symbol_guard --report`, denn der Bot startet so nicht.
+
 #### Bot-übergreifender Kontoabgleich
 
 Sind Binance-Zugangsdaten vorhanden, hängt das Skript einen zweiten
 Teil an: Es fragt den **tatsächlichen** Kontostand und die offenen
 Orders ab und stellt ihnen die **Summe** dessen gegenüber, was alle drei
-Ledger als offen führen.
+Ledger als offen führen, je Base-Asset und über alle Paare hinweg.
 
 ```
-Bot          laut Ledger offen  Hinweis
-------------------------------------------------------------------
-dca                 0.00780000
-grid                0.00116000  2 Dry-Run (zählt nicht)
-trend               0.00019505
-------------------------------------------------------------------
-SUMME               0.00915505
+==============================================================================
+KONTOABGLEICH BTC (BTCUSDT: dca, grid, trend) - alle Bots gegen den Bestand
+==============================================================================
+
+Bot      Paar          laut Ledger offen  Hinweis
+------------------------------------------------------------------------------
+dca      BTCUSDT              0.00780000
+grid     BTCUSDT              0.00116000  2 Dry-Run (zählt nicht)
+trend    BTCUSDT              0.00019505
+------------------------------------------------------------------------------
+SUMME                         0.00915505
 ```
 
 Das ist bewusst **kein** Feature eines Bots, sondern nur dieses
@@ -2318,9 +2446,22 @@ Weitere Eigenschaften:
   zusätzlich nach Verursacher aufgeschlüsselt (über das
   clientOrderId-Präfix aus dem K2-Fix), inklusive eines eigenen Eintrags
   für fremde bzw. manuell über die Börsen-Oberfläche platzierte Orders.
-- **Gruppiert nach Symbol**, falls die drei Bots unterschiedliche Paare
-  handeln - eine Gesamtsumme über verschiedene Assets wäre sinnlos. Im
-  Normalfall (alle drei BTCUSDT) ist das genau eine Gruppe.
+- **Gruppiert nach Base-Asset, nicht nach Symbol** (seit 28.09.2026,
+  Symbolbindung in 6g). Jedes Ledger ergibt einen Anspruch je Paar, das
+  darin offen vorkommt; welches Paar ein Eintrag hat, steht in ihm selbst.
+  Die Ansprüche werden dann nach dem Base-Asset ihres Paars aus
+  `exchangeInfo` zusammengefasst. Grund: BTCUSDT und BTCEUR handeln
+  dasselbe BTC auf demselben Konto. Nach Symbol getrennt hätten DCA auf
+  BTCUSDT (0,3 BTC) und Grid auf BTCEUR (0,2 BTC) bei 0,4 BTC auf dem
+  Konto jeweils gedeckt ausgesehen, der Fehlbetrag von 0,1 BTC wäre
+  unsichtbar geblieben. Das Guthaben wird einmal je Base-Asset abgefragt,
+  die offenen Orders aus allen Paaren der Gruppe. Verschiedene
+  Base-Assets bleiben getrennt, eine Summe über sie wäre sinnlos. Im
+  Normalfall (alle drei auf demselben Paar) gibt es genau eine Gruppe.
+- **Ein unvollständiger Abgleich sagt das.** Sind die Handelsregeln eines
+  Paars nicht abrufbar, fehlen dessen Ansprüche in der Summe. Das steht
+  dann als `ACHTUNG: … er ist UNVOLLSTÄNDIG` über dem Abgleich, damit ein
+  „In Ordnung“ nicht auf einer zu kleinen Summe beruht.
 - **Ein Überschuss ist kein Befund.** Hält das Konto mehr, als die
   Ledger beanspruchen, kann das manueller Bestand oder eine Altlast
   sein. Nur die andere Richtung wird als Problem gemeldet - und dann mit
@@ -2333,13 +2474,28 @@ Weitere Eigenschaften:
 #### Orders nachschlagen (`check_orders.py`, seit 27.09.2026)
 
 Das Gegenstück zum Audit für eine einzelne Order: `python -m
-dca_bot.check_orders --client-order-id <id>` (README 8.4). Das Symbol
-folgt aus dem Präfix der clientOrderId, bei unbekanntem Präfix wird unter
-allen Symbolen der drei Bots gesucht. Nachgeschlagen wird mit
-`get_order_by_client_id()` und bewertet mit `order_lifecycle_state()`,
-also mit denselben Regeln, nach denen der Bot selbst entscheidet. „Nicht
-gefunden“ gilt nur, wenn **jede** Abfrage −2013 ergab; ist eine
-gescheitert, lautet das Ergebnis „keine Aussage“. Dazu der Abgleich mit
+dca_bot.check_orders --client-order-id <id>` (README 8.4). Binance findet
+eine Order nur unter dem Symbol, unter dem sie platziert wurde; unter
+jedem anderen antwortet es mit −2013, als gäbe es sie nicht. Gesucht wird
+deshalb in dieser Reihenfolge (seit 28.09.2026, Symbolbindung in 6g):
+zuerst unter dem Paar, unter dem die eigene Buchhaltung des Bots die
+Order führt (Pending-Eintrag oder Ledger-Eintrag, Altbestand ohne Feld
+als BTCUSDT), dann unter dem konfigurierten Paar des Bots, den das
+Präfix der clientOrderId verrät, dann unter allen übrigen konfigurierten
+Paaren. Mit `--symbol <paar>` wird nur unter diesem gesucht. Bis zum
+28.09.2026 wurde bei bekanntem Präfix nur unter dem aktuellen Paar des
+Bots gesucht, eine Order aus der Zeit vor einem Paarwechsel galt damit
+als „nie angenommen“.
+
+Nachgeschlagen wird mit `get_order_by_client_id()` und bewertet mit
+`order_lifecycle_state()`, also mit denselben Regeln, nach denen der Bot
+selbst entscheidet. Ein Treffer entscheidet. Ist eine der Abfragen
+gescheitert, lautet das Ergebnis „keine Aussage“. „Nie angenommen“ sagt
+das Skript nur, wenn jede Abfrage −2013 ergab **und** darunter das
+maßgebliche Paar war, also das aus `--symbol` oder aus der eigenen
+Buchhaltung. Ohne ein solches Paar heißt −2013 nur „unter diesen Paaren
+nicht gefunden“, mit dem Hinweis, gegebenenfalls mit `--symbol` erneut zu
+suchen. Dazu der Abgleich mit
 der eigenen Buchhaltung: Steht die ID in der Pending-Datei des Bots, steht
 sie im Ledger (`client_order_id`, `sell_client_order_id`,
 `exit_client_order_id`, bei der Trend-Stop-Order `stop_loss_order_id` über
