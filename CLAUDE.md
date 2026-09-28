@@ -17,7 +17,12 @@ Details, Historie und offene Punkte: siehe trading-bot-projekt.md.
 - Ein Zyklusfehler beendet nie den ganzen Bot
 
 ## Aktueller Stand
-- Homeserver: alle vier Bots live (Testnet), Code-Stand siehe git log
+- Homeserver: alle vier Bots live (Testnet). Code-Stand auf master siehe
+  git log. ACHTUNG: Das ist nicht automatisch der Stand auf den Servern -
+  deren tatsächlicher Commit-Hash steht in trading-bot-projekt.md,
+  Abschnitt 6g, im jüngsten Vermerk dazu (Stand 28.09.2026: 10ce096 auf
+  beiden Servern, genannt unter „Symbolbindung“, „Rückweg auf den alten
+  Code“)
 - VPS: nur DCA live, endet 12.10.2026
 - Für echtes Geld: BTCEUR (nicht USDT, im EWR nicht handelbar)
 - Kapital geplant: 150€ Grid / 150€ Allocator-Topf (DCA+Trend)
