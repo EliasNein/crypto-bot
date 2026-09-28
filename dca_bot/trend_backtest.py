@@ -40,7 +40,14 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from .backtest import fetch_historical_klines
+from .backtest import (
+    DOCUMENTED_SYMBOL,
+    EnvDefault,
+    apply_env_defaults,
+    fetch_historical_klines,
+    load_backtest_environment,
+    print_used_settings,
+)
 from .trend_signals import TrendSignalGenerator, decide_action, is_stop_loss_hit
 
 DEFAULT_PERIODS = [
@@ -616,9 +623,12 @@ def print_report(result: TrendBacktestResult, label: str) -> None:
     )
 
 
-def main() -> None:
+ENV_DEFAULTS = [EnvDefault("symbol", "TREND_SYMBOL", DOCUMENTED_SYMBOL, "Symbol")]
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Trend-Following-Strategie-Backtest")
-    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--symbol", default=None, help=f"Standard: TREND_SYMBOL, sonst {DOCUMENTED_SYMBOL}")
     parser.add_argument("--start", default=None, help="Format: YYYY-MM-DD (überschreibt die 3 Standard-Zeiträume)")
     parser.add_argument("--end", default=None, help="Format: YYYY-MM-DD")
     parser.add_argument("--ema-fast", type=int, default=20)
@@ -680,7 +690,9 @@ def main() -> None:
             "Stop-Loss-Exit für --analyze-auto-reset."
         ),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    load_backtest_environment()
+    print_used_settings(apply_env_defaults(args, ENV_DEFAULTS))
 
     if args.analyze_auto_reset and args.simulate_reset_after_days is not None:
         parser.error(

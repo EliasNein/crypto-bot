@@ -28,9 +28,10 @@ Rendite. Dieser Backtest prüft genau das: Funktioniert die Strategie in
 einem Seitwärtsmarkt wie erwartet, und wie stark schadet ein Trendbruch
 (Bärenmarkt) trotz Stop-Loss?
 
-Parameter sind unveränderte Live-Defaults (grid_config.py), NICHT gegen
-die unten getesteten Zeiträume optimiert - gleiches Prinzip wie beim
-Trend-Backtest.
+Parameter kommen aus den GRID_*-Variablen des Bots (Umgebung oder .env),
+sonst sind es die Live-Defaults aus grid_config.py - der Report nennt sie
+unter "Verwendete Werte". NICHT gegen die unten getesteten Zeiträume
+optimiert - gleiches Prinzip wie beim Trend-Backtest.
 
 WICHTIGER UNTERSCHIED zu DCA/Trend: Deren Parameter (Kaufbetrag in USD,
 EMA-Perioden, Prozent-Abstände) sind skaleninvariant - sie sind bei jedem
@@ -63,7 +64,14 @@ import argparse
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .backtest import fetch_historical_klines
+from .backtest import (
+    DOCUMENTED_SYMBOL,
+    EnvDefault,
+    apply_env_defaults,
+    fetch_historical_klines,
+    load_backtest_environment,
+    print_used_settings,
+)
 from .grid_signals import (
     compute_grid_levels,
     find_triggered_buy_levels,
@@ -258,22 +266,41 @@ def print_report(result: GridBacktestResult, label: str, scaled: bool = False) -
         )
     else:
         print(
-            "Hinweis: Parameter sind unveränderte Live-Defaults (grid_config.py),\n"
-            "nicht gegen diesen Zeitraum optimiert. Kerzenauflösung: 1h (siehe\n"
+            "Hinweis: Parameter siehe 'Verwendete Werte' oben (GRID_*-Variablen\n"
+            "oder die Live-Defaults aus grid_config.py), nicht gegen diesen\n"
+            "Zeitraum optimiert. Kerzenauflösung: 1h (siehe\n"
             "Modul-Docstring) - gröber als die Live-Prüfung alle paar Minuten,\n"
             "das Ergebnis ist eine Näherung."
         )
 
 
-def main() -> None:
+# Symbolbindung vom 28.09.2026 (E6): Standard aus den GRID_*-Variablen des
+# Bots, sonst die Werte, mit denen 5a/6 gerechnet sind (= grid_config.py).
+# GRID_STOP_LOSS_PCT bewusst nicht: E6 umfasst Paar, Spanne, Abstand und
+# Betrag.
+ENV_DEFAULTS = [
+    EnvDefault("symbol", "GRID_SYMBOL", DOCUMENTED_SYMBOL, "Symbol"),
+    EnvDefault("lower_limit", "GRID_LOWER_LIMIT", 70000.0, "Untere Grenze"),
+    EnvDefault("upper_limit", "GRID_UPPER_LIMIT", 90000.0, "Obere Grenze"),
+    EnvDefault("spacing_pct", "GRID_SPACING_PCT", 1.5, "Stufenabstand %"),
+    EnvDefault("amount", "GRID_AMOUNT_PER_LEVEL", 15.0, "Betrag je Stufe"),
+]
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Grid-Trading-Strategie-Backtest")
-    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--symbol", default=None, help=f"Standard: GRID_SYMBOL, sonst {DOCUMENTED_SYMBOL}")
     parser.add_argument("--start", default=None, help="Format: YYYY-MM-DD (überschreibt die 3 Standard-Zeiträume)")
     parser.add_argument("--end", default=None, help="Format: YYYY-MM-DD")
-    parser.add_argument("--lower-limit", type=float, default=70000.0)
-    parser.add_argument("--upper-limit", type=float, default=90000.0)
-    parser.add_argument("--spacing-pct", type=float, default=1.5)
-    parser.add_argument("--amount", type=float, default=15.0, help="Betrag pro Grid-Stufe (Quote-Währung)")
+    parser.add_argument("--lower-limit", type=float, default=None, help="Standard: GRID_LOWER_LIMIT, sonst 70000")
+    parser.add_argument("--upper-limit", type=float, default=None, help="Standard: GRID_UPPER_LIMIT, sonst 90000")
+    parser.add_argument("--spacing-pct", type=float, default=None, help="Standard: GRID_SPACING_PCT, sonst 1.5")
+    parser.add_argument(
+        "--amount",
+        type=float,
+        default=None,
+        help="Betrag pro Grid-Stufe (Quote-Währung). Standard: GRID_AMOUNT_PER_LEVEL, sonst 15",
+    )
     parser.add_argument("--stop-loss-pct", type=float, default=15.0)
     parser.add_argument("--fee-pct", type=float, default=0.1, help="Gebühr pro Seite (Kauf/Verkauf) in %%")
     parser.add_argument(
@@ -285,7 +312,9 @@ def main() -> None:
             "Ergebnis mit den unveränderten Live-Parametern anzeigen."
         ),
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    load_backtest_environment()
+    print_used_settings(apply_env_defaults(args, ENV_DEFAULTS))
 
     if args.start and args.end:
         periods = [(f"{args.start} bis {args.end}", args.start, args.end)]

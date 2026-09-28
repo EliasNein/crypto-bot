@@ -53,7 +53,16 @@ from .allocator_signals import (
     derive_trend_strength,
     smooth_fraction,
 )
-from .backtest import BacktestResult, fetch_historical_klines, run_dca_backtest
+from .backtest import (
+    DOCUMENTED_SYMBOL,
+    BacktestResult,
+    EnvDefault,
+    apply_env_defaults,
+    fetch_historical_klines,
+    load_backtest_environment,
+    print_used_settings,
+    run_dca_backtest,
+)
 from .trend_backtest import (
     DEFAULT_PERIODS,
     TrendBacktestResult,
@@ -351,9 +360,12 @@ def print_report(
     )
 
 
-def main() -> None:
+ENV_DEFAULTS = [EnvDefault("symbol", "ALLOCATOR_SYMBOL", DOCUMENTED_SYMBOL, "Symbol")]
+
+
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Kapital-Allocator-Backtest (DCA <-> Trend-Following)")
-    parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--symbol", default=None, help=f"Standard: ALLOCATOR_SYMBOL, sonst {DOCUMENTED_SYMBOL}")
     parser.add_argument("--start", default=None, help="Format: YYYY-MM-DD (überschreibt die 3 Standard-Zeiträume)")
     parser.add_argument("--end", default=None, help="Format: YYYY-MM-DD")
     parser.add_argument("--ema-fast", type=int, default=20)
@@ -366,7 +378,9 @@ def main() -> None:
     parser.add_argument("--trend-min-gap-pct", type=float, default=1.0)
     parser.add_argument("--trend-stop-loss-pct", type=float, default=10.0)
     parser.add_argument("--fee-pct", type=float, default=0.1, help="Gebühr pro Seite (Kauf/Verkauf) in %%")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    load_backtest_environment()
+    print_used_settings(apply_env_defaults(args, ENV_DEFAULTS))
 
     if args.start and args.end:
         periods = [(f"{args.start} bis {args.end}", args.start, args.end)]
