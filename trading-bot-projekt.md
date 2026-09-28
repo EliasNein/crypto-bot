@@ -1263,6 +1263,8 @@ Die Bot-Zuordnung überlebte im ersten Lauf. Die Zusicherung lautete `"grid" in 
 
 **Wirksamkeit gemessen.** Kontrolllauf 0 Fehlschläge, alle 6 Mutationen gefangen: Nenner zurück auf einen Trade-Betrag (2), unrealisierten Anteil weglassen (2), der komplette alte Code (`main()` übergibt wieder `total_pnl_pct`, 2), offene Position nicht im Einsatz (2), DCA-Zeile ohne PnL (1), Bewertungsregel nicht im Report (1).
 
+*(Vermerk 29.09.2026: Künftige Deploys werden hier mit 'Deployed: <hash> auf Homeserver/VPS am <Datum>' vermerkt, damit CLAUDE.md und die Checkliste eine feste, verlässliche Stelle zum Verweisen haben.)*
+
 ### Symbolbindung: ein neues Paar trifft auf alten Bestand (28.09.2026)
 
 **Anlass.** Binance hat für Kunden im EWR die USDT-Spot-Paare entfernt. Mit echtem Geld kann das Projekt also nicht auf BTCUSDT laufen, auf dem es seit dem ersten Tag im Testnet läuft. Ein Audit am selben Tag (nur lesend, ohne Code-Änderung) ergab: Für einen frischen Start mit leeren Ledgern reicht es, `*_SYMBOL` umzustellen. Gefährlich ist der Versehens-Fall **„neues Symbol auf altem Ledger“**, und dagegen gab es keinerlei Schutz. Grid- und Trend-Ledger, der Allocator-Zustand und die Stop-Loss-Sperren wussten nicht, zu welchem Paar sie gehören. Ein Bot hätte alte BTCUSDT-Positionen still als Positionen des neuen Paars weitergeführt, mit Einstandspreisen in USDT gegen Kurse in Euro. Beim DCA-Bot, dessen Einträge schon immer ein Symbol trugen, war es umgekehrt: Käufe eines anderen Paars wurden still ignoriert (`risk.py`, Filter in Tageslimit, Stop-Loss-Kostenbasis und Bestand). Sie fielen damit aus allen drei Rechnungen heraus.
