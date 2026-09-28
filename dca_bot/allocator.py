@@ -427,6 +427,11 @@ class Allocator:
                 "last_fed_day": (
                     self._last_fed_day.isoformat() if self._last_fed_day else None
                 ),
+                # Fuer welches Paar die Zuteilung gerechnet ist
+                # (Symbolbindung vom 28.09.2026). DCA und Trend pruefen es
+                # beim Start und vor jeder neuen Order - eine auf BTCUSDT
+                # gerechnete Trendstaerke soll keine BTCEUR-Order skalieren.
+                "symbol": self._config.symbol,
             }
         )
 

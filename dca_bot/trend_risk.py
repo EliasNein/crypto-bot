@@ -102,6 +102,14 @@ class TrendTrade:
     # verkaufbar war und beim Schliessen als Staub auf dem Konto blieb
     # (K-A, Entscheidung 3). 0.0 im Normalfall.
     dust_qty: float = 0.0
+    # Das Handelspaar dieses Trades (Symbolbindung vom 28.09.2026) - siehe
+    # GridPosition.symbol. Beim Trend-Bot waere der Versehens-Fall
+    # besonders teuer gewesen: Der interne Stop-Loss vergleicht den
+    # EUR-Kurs mit einem USDT-Einstiegspreis und loest bei EUR/USD ueber
+    # rund 1,11 im ersten Zyklus aus, die Stop-Order liegt aber unter dem
+    # alten Symbol und laesst sich nicht stornieren. Fehlt das Feld
+    # (Altbestand), gilt symbol_guard.LEGACY_SYMBOL.
+    symbol: str | None = None
 
     @staticmethod
     def new(
@@ -110,6 +118,7 @@ class TrendTrade:
         quote_spent: float,
         dry_run: bool,
         client_order_id: str | None = None,
+        symbol: str | None = None,
     ) -> "TrendTrade":
         return TrendTrade(
             id=str(uuid.uuid4()),
@@ -119,6 +128,7 @@ class TrendTrade:
             quote_spent=quote_spent,
             dry_run=dry_run,
             client_order_id=client_order_id,
+            symbol=symbol,
         )
 
 
@@ -255,6 +265,10 @@ class TrendLedger:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, self._path)
+
+    def records(self) -> list[dict]:
+        """Alle Eintraege, offen und geschlossen (fuer die Symbolpruefung beim Start)."""
+        return self._read()
 
     def open_position(self) -> dict | None:
         for r in self._read():

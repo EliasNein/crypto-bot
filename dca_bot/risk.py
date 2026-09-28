@@ -384,6 +384,10 @@ class TradeLedger:
             os.fsync(f.fileno())
         os.replace(tmp_path, self._path)
 
+    def records(self) -> list[dict]:
+        """Alle Eintraege (fuer die Symbolpruefung beim Start)."""
+        return self._read()
+
     def record(self, trade: TradeRecord) -> None:
         records = self._read()
         records.append(asdict(trade))

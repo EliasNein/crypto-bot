@@ -56,6 +56,14 @@ class GridPosition:
     # sie waren beide Faelle gleich - und ein Doppelverkauf ging als
     # "bereits verbucht" durch. None im Dry-Run und bei Altbestand.
     sell_client_order_id: str | None = None
+    # Das Handelspaar dieser Position (Symbolbindung vom 28.09.2026). Bis
+    # dahin trug kein Grid-Eintrag ein Symbol - das Paar war eine
+    # Eigenschaft der Konfiguration, und ein Bot mit geaendertem
+    # GRID_SYMBOL haette alte Positionen still als Positionen des neuen
+    # Paars weitergefuehrt: Verkaufsziel in USDT gegen einen EUR-Kurs,
+    # Verkauf gegen EUR, PnL aus EUR-Erloes minus USDT-Einsatz. Fehlt das
+    # Feld (Altbestand), gilt symbol_guard.LEGACY_SYMBOL.
+    symbol: str | None = None
 
     @staticmethod
     def new(
@@ -66,6 +74,7 @@ class GridPosition:
         quote_spent: float,
         dry_run: bool,
         client_order_id: str | None = None,
+        symbol: str | None = None,
     ) -> "GridPosition":
         return GridPosition(
             id=str(uuid.uuid4()),
@@ -77,6 +86,7 @@ class GridPosition:
             bought_at=datetime.now(timezone.utc).isoformat(),
             dry_run=dry_run,
             client_order_id=client_order_id,
+            symbol=symbol,
         )
 
 
@@ -199,6 +209,10 @@ class GridLedger:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, self._path)
+
+    def records(self) -> list[dict]:
+        """Alle Eintraege, offen und geschlossen (fuer die Symbolpruefung beim Start)."""
+        return self._read()
 
     def open_positions(self) -> list[dict]:
         return [r for r in self._read() if r["status"] == "open"]
