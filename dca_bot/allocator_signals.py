@@ -22,6 +22,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from .symbol_guard import effective_symbol
+
 logger = logging.getLogger("dca_bot")
 
 # Wie viele Allocator-Zyklen eine Zuteilung alt sein darf, bevor sie als
@@ -102,7 +104,7 @@ def smooth_fraction(previous_smoothed: float | None, raw_target: float, period: 
     return previous_smoothed + (raw_target - previous_smoothed) * multiplier
 
 
-def read_allocation_fraction(path: str) -> float | None:
+def read_allocation_fraction(path: str, expected_symbol: str | None = None) -> float | None:
     """
     Liest die aktuelle geglättete Trend-Following-Zuteilung (0.0-1.0) aus
     der vom Allocator geschriebenen State-Datei.
@@ -130,6 +132,15 @@ def read_allocation_fraction(path: str) -> float | None:
     `_allocation_is_stale`); für die kaputte Datei war sie schlicht nie
     nachgezogen worden. `0.0` lässt den DCA-Bot regulär kaufen und den
     Trend-Einstieg entfallen - die konservative Richtung.
+
+    `expected_symbol` (Symbolbindung vom 28.09.2026, Entscheidung E3): Ist
+    die Zuteilung fuer ein anderes Paar gerechnet, gilt sie als
+    unbrauchbar - derselbe Rueckfall wie oben, mit Warnung. Beim Start
+    verweigern DCA und Trend in diesem Fall bereits den Start
+    (symbol_guard.py); diese Pruefung faengt den Fall ab, dass der
+    Allocator zur Laufzeit mit einem anderen Paar neu gestartet wurde.
+    Ein Zustand ohne Feld `symbol` stammt aus der Zeit davor und gilt als
+    symbol_guard.LEGACY_SYMBOL.
 
     Die Reihenfolge der `except`-Zweige ist wichtig: `FileNotFoundError`
     ist eine Unterklasse von `OSError`. Würde der generische Zweig zuerst
@@ -187,6 +198,21 @@ def read_allocation_fraction(path: str) -> float | None:
             (1 - STALE_ALLOCATION_FALLBACK) * 100,
         )
         return STALE_ALLOCATION_FALLBACK
+
+    if expected_symbol is not None:
+        allocated_for = effective_symbol(data)
+        if allocated_for != expected_symbol:
+            logger.warning(
+                "Allocator-Zuteilung in '%s' ist fuer %s gerechnet, dieser Bot handelt %s - "
+                "es wird auf %.0f%% Trend / %.0f%% DCA zurueckgefallen. Laeuft der "
+                "Allocator mit einem anderen ALLOCATOR_SYMBOL?",
+                path,
+                allocated_for,
+                expected_symbol,
+                STALE_ALLOCATION_FALLBACK * 100,
+                (1 - STALE_ALLOCATION_FALLBACK) * 100,
+            )
+            return STALE_ALLOCATION_FALLBACK
 
     if _allocation_is_stale(data, path):
         return STALE_ALLOCATION_FALLBACK

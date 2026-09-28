@@ -61,6 +61,7 @@ import os
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from . import symbol_guard
 from .allocator_config import AllocatorConfig
 from .allocator_signals import compute_target_fraction, derive_trend_strength, smooth_fraction
 from .backtest import fetch_historical_klines
@@ -105,6 +106,30 @@ class Allocator:
         self._last_fed_day: date | None = None
         self._state_path = Path(config.state_file)
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def verify_symbol_binding(self) -> None:
+        """
+        Prueft beim Start, ob der eigene Zustand zu ALLOCATOR_SYMBOL gehoert
+        (Symbolbindung vom 28.09.2026, siehe symbol_guard.py). Wirft
+        `SymbolMismatch`. Ein Zustand ohne Feld `symbol` stammt aus der Zeit
+        davor und gilt als symbol_guard.LEGACY_SYMBOL; gestempelt wird er
+        mit dem naechsten regulaeren Schreibvorgang (_write_state).
+        """
+        symbol_guard.enforce(
+            [
+                symbol_guard.check_allocator_file(
+                    "Allocator-Zustand",
+                    str(self._state_path),
+                    self._config.symbol,
+                    symbol_guard.ALLOCATOR_OWN_HINT,
+                )
+            ],
+            bot_label="Kapital-Allocator",
+            symbol_var="ALLOCATOR_SYMBOL",
+            expected=self._config.symbol,
+            logger=logger,
+            notify=send_notification,
+        )
 
     def _seed_with_history(self) -> None:
         """Wie TrendFollowingStrategy._seed_with_history() - lädt echte

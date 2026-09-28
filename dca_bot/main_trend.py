@@ -23,6 +23,7 @@ from .notifier import init as init_notifier
 from .notifier import send_notification
 from .pending_orders import safe_startup_reconciliation
 from .process_lock import BotAlreadyRunning, ProcessLock
+from .symbol_guard import SymbolMismatch
 from .risk import BotHalted, KillSwitch, LedgerUnreadable
 from .config_guard import (
     ConfigError,
@@ -139,6 +140,19 @@ def main() -> None:
             f"[TREND-FEHLER] Bot startet NICHT: {exc} "
             "Bitte die Datei pruefen oder aus einem Backup wiederherstellen."
         )
+        return
+
+    # Symbolbindung (28.09.2026): Gehoert eine Zustandsdatei zu einem
+    # anderen Paar als TREND_SYMBOL, startet der Bot nicht - VOR der
+    # Reconciliation, die sonst Order-Fragen des alten Paars in dieses
+    # Ledger nachtragen wuerde. Exit-Code 0 wie bei Konfigurationsfehlern,
+    # also keine Neustartschleife. Vor einem Neustart pruefbar mit
+    # python -m dca_bot.symbol_guard --report.
+    try:
+        strategy.verify_symbol_binding()
+    except SymbolMismatch as exc:
+        logger.error("%s", exc)
+        send_notification(f"[SYMBOL-KONFLIKT] {exc}")
         return
 
     # Zwei Reconciliation-Schritte, und die Reihenfolge ist bewusst so:

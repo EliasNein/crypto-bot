@@ -21,6 +21,7 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
+from . import symbol_guard
 from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
 from .backtest import fetch_historical_klines
 from .balance_guard import (
@@ -147,7 +148,9 @@ class TrendFollowingStrategy:
         # aktiv, wenn TREND_ALLOCATOR_STATE_FILE explizit gesetzt ist -
         # sonst read_allocation_fraction() -> None und amount bleibt
         # unverändert (exakt das Verhalten ohne Allocator).
-        trend_fraction = read_allocation_fraction(self._config.allocator_state_file)
+        trend_fraction = read_allocation_fraction(
+            self._config.allocator_state_file, self._config.symbol
+        )
         if trend_fraction is not None:
             amount = self._config.amount_per_trade * trend_fraction
             logger.info(
@@ -1670,6 +1673,40 @@ class TrendFollowingStrategy:
         herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
         """
         self._ledger.verify_readable()
+
+    def verify_symbol_binding(self) -> None:
+        """
+        Prueft beim Bot-Start, ob Ledger, Pending-Datei, Stop-Loss-Sperre und
+        - bei aktivem Opt-in - der Allocator-Zustand zu TREND_SYMBOL gehoeren
+        (Symbolbindung vom 28.09.2026, siehe symbol_guard.py). Wirft
+        `SymbolMismatch`.
+
+        Beim Trend-Bot waere der Versehens-Fall am teuersten gewesen: Der
+        interne Stop-Loss vergleicht den neuen Kurs mit dem Einstiegspreis
+        im alten Paar (EUR gegen USDT loest bei EUR/USD ueber rund 1,11 im
+        ersten Zyklus aus), die Stop-Order liegt unter dem alten Symbol und
+        laesst sich nicht stornieren, und eine Dry-Run-Position - wie die
+        vom 15.09.2026 - wuerde mit einem Scheinverlust geschlossen und die
+        Sperre gesetzt.
+        """
+        symbol_guard.enforce(
+            symbol_guard.bot_findings(
+                symbol_var="TREND_SYMBOL",
+                expected=self._config.symbol,
+                ledger_label="Trend-Ledger",
+                ledger_path=self._config.state_file,
+                ledger_records=self._ledger.records(),
+                pending_store=self._client.pending_orders,
+                latch_path=self._config.stop_loss_state_file,
+                latch_reset="python -m dca_bot.reset_trend_stop_loss",
+                allocator_path=self._config.allocator_state_file,
+            ),
+            bot_label="Trend-Following-Bot",
+            symbol_var="TREND_SYMBOL",
+            expected=self._config.symbol,
+            logger=logger,
+            notify=send_notification,
+        )
 
     def check_balance_on_startup(self) -> None:
         """
