@@ -235,9 +235,32 @@ class SymbolSelectionTestCase(CheckOrdersTestBase):
 class LookupOutcomeTestCase(CheckOrdersTestBase):
     """Dieselben drei Ausgaenge wie im Bot - nur -2013 heisst 'gibt es nicht'."""
 
-    def test_not_found(self):
+    def test_not_found_without_a_known_symbol_is_no_statement(self):
+        """
+        Ersetzt den frueheren Test `test_not_found`, der "nie angenommen"
+        auch ohne massgebliches Symbol festschrieb (Symbolbindung vom
+        28.09.2026): Unter einem anderen Paar antwortet Binance ebenfalls
+        mit -2013. Ohne --symbol und ohne Eintrag in der eigenen
+        Buchhaltung sagt "nicht gefunden" deshalb nichts ueber die Order.
+        """
         result = look_up(self.client, GRID_ID)
         self.assertEqual(result.lookup, LOOKUP_NOT_FOUND)
+        self.assertEqual(result.searched, ("ETHBTC", "BTCUSDT"))
+        text = verdict(result, None)
+        self.assertNotIn("nie angenommen", text)
+        self.assertIn("--symbol", text)
+
+    def test_not_found_under_the_known_symbol_is_final(self):
+        """Steht die Order in der Pending-Datei, ist deren Symbol massgeblich."""
+        self.add_pending("grid", GRID_ID, symbol="ETHBTC")
+        result = look_up(self.client, GRID_ID, None, check_orders.known_symbol("grid", GRID_ID))
+        self.assertEqual(result.authoritative_symbol, "ETHBTC")
+        self.assertIn("nie angenommen", verdict(result, None))
+        self.assertIn("ETHBTC", verdict(result, None))
+
+    def test_not_found_under_an_explicit_symbol_is_final(self):
+        result = look_up(self.client, GRID_ID, "SOLUSDT")
+        self.assertEqual(result.searched, ("SOLUSDT",))
         self.assertIn("nie angenommen", verdict(result, None))
 
     def test_failed_query_is_no_statement(self):
@@ -419,6 +442,96 @@ class MainTestCase(CheckOrdersTestBase):
             with self.assertRaises(ValueError):
                 self.client.place_market_sell("BTCUSDT", 0.001)
         self.assertEqual(self.raw.write_calls, [])
+
+
+class PairSwitchTestCase(CheckOrdersTestBase):
+    """
+    check_orders ueber mehrere Paare (Symbolbindung vom 28.09.2026): Nach
+    einem Paarwechsel liegen alte Orders unter dem alten Symbol. Gesucht
+    wird zuerst unter dem Symbol aus der eigenen Buchhaltung, dann unter
+    allen konfigurierten.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        os.environ["GRID_SYMBOL"] = "BTCEUR"
+
+    def test_legacy_ledger_entry_points_to_the_old_pair(self):
+        """
+        Das Grid-Ledger fuehrt die Order als Altbestand ohne Feld - sie
+        gilt als BTCUSDT und wird dort zuerst gesucht, obwohl GRID_SYMBOL
+        inzwischen BTCEUR ist.
+        """
+        self.write_ledger("grid", [{"id": "p1", "client_order_id": GRID_ID}])
+        self.raw.orders[("BTCUSDT", GRID_ID)] = order(GRID_ID)
+
+        known = check_orders.known_symbol("grid", GRID_ID)
+        result = look_up(self.client, GRID_ID, None, known)
+
+        self.assertEqual(known, "BTCUSDT")
+        self.assertEqual(result.lookup, LOOKUP_FOUND)
+        self.assertEqual(result.symbol, "BTCUSDT")
+        self.assertEqual(result.searched, ("BTCUSDT",))
+
+    def test_without_bookkeeping_all_configured_pairs_are_searched(self):
+        """Nichts in der eigenen Buchhaltung: erst das Paar des Bots, dann die uebrigen."""
+        self.raw.orders[("BTCUSDT", GRID_ID)] = order(GRID_ID)
+        result = look_up(self.client, GRID_ID)
+        self.assertEqual(result.searched, ("BTCEUR", "BTCUSDT"))
+        self.assertEqual(result.symbol, "BTCUSDT")
+
+    def test_a_pair_that_is_nowhere_configured_is_not_claimed_as_never_accepted(self):
+        """
+        Die Order liegt unter einem Paar, das keine Konfiguration mehr
+        nennt. "Nicht gefunden" darf dann nicht als "nie angenommen"
+        erscheinen - genau die Falschaussage aus dem Audit.
+        """
+        self.raw.orders[("SOLUSDT", GRID_ID)] = order(GRID_ID)
+        code, out = self.run_main(["--client-order-id", GRID_ID])
+        self.assertEqual(code, EXIT_OK)
+        self.assertNotIn("nie angenommen", out)
+        self.assertIn("--symbol", out)
+
+        code, out = self.run_main(["--client-order-id", GRID_ID, "--symbol", "SOLUSDT"])
+        self.assertIn("GEFUNDEN unter SOLUSDT", out)
+
+    def test_main_uses_the_pending_entry_symbol(self):
+        self.add_pending("grid", GRID_ID, symbol="BTCUSDT")
+        self.raw.orders[("BTCUSDT", GRID_ID)] = order(GRID_ID)
+        code, out = self.run_main(["--client-order-id", GRID_ID])
+        self.assertIn("GEFUNDEN unter BTCUSDT", out)
+        self.assertEqual(self.raw.get_order_calls[0]["symbol"], "BTCUSDT")
+
+
+class FakeExchangeLookupTestCase(unittest.TestCase):
+    """
+    Dasselbe gegen den symbolbewussten FakeExchange (tests/test_shared_account.py):
+    Eine Order, die ueber BTCUSDT lief, ist unter BTCEUR unbekannt (-2013) -
+    so wie bei Binance. Genau darauf beruht die Regel in verdict().
+    """
+
+    def test_an_order_is_only_known_under_its_own_pair(self):
+        from tests.test_shared_account import FakeExchange
+
+        exchange = FakeExchange(50_000.0)
+        exchange.order_market_buy("BTCUSDT", 100.0, "grid-alt-paar")
+        with mock.patch("dca_bot.binance_client.Client"):
+            client = TradingClient(
+                _ReadOnlyClientConfig(api_key="k", api_secret="s", use_testnet=True)
+            )
+        client._client = exchange
+
+        with self.assertLogs("dca_bot", level="INFO"):
+            self.assertEqual(
+                client.get_order_by_client_id("BTCEUR", "grid-alt-paar")[0], LOOKUP_NOT_FOUND
+            )
+        with mock.patch.dict(os.environ, {"GRID_SYMBOL": "BTCEUR", "DCA_SYMBOL": "BTCEUR",
+                                          "TREND_SYMBOL": "BTCEUR"}):
+            result = look_up(client, "grid-alt-paar")
+            self.assertEqual(result.lookup, LOOKUP_NOT_FOUND)
+            self.assertNotIn("nie angenommen", verdict(result, None))
+            found = look_up(client, "grid-alt-paar", "BTCUSDT")
+        self.assertEqual(found.lookup, LOOKUP_FOUND)
 
 
 class OrderUnclearHintTestCase(TradingClientTestBase):

@@ -61,7 +61,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from .balance_guard import FOREIGN_ORDERS, split_locked_by_bot, tolerance_for
-from .config_guard import ConfigError, load_api_credentials, load_use_testnet
+from .config_guard import DEFAULT_SYMBOL, ConfigError, load_api_credentials, load_use_testnet
+from .symbol_guard import LEGACY_SYMBOL, REPORT_COMMAND, effective_symbol, is_legacy
 
 load_dotenv()
 
@@ -128,6 +129,35 @@ def _print_counts(records: list[dict], open_records: list[dict]) -> None:
         f"{len(records)} Einträge insgesamt, davon {len(open_records)} offen "
         f"({len(records) - len(open_records)} geschlossen)."
     )
+
+
+def symbol_lines(records: list[dict], configured_symbol: str | None) -> list[str]:
+    """
+    Welche Paare ein Ledger führt (Symbolbindung vom 28.09.2026) - und ein
+    deutlicher Hinweis, wenn eines davon nicht das konfigurierte ist. Der
+    Bot startet in diesem Fall nicht (symbol_guard.py); das Audit sagt,
+    warum, statt die fremden Einträge still mitzuzählen oder wegzulassen.
+    """
+    if not records:
+        return []
+    counts: dict[str, int] = {}
+    for record in records:
+        symbol = effective_symbol(record)
+        counts[symbol] = counts.get(symbol, 0) + 1
+    legacy = sum(1 for r in records if is_legacy(r))
+    parts = []
+    for symbol, count in sorted(counts.items()):
+        text = f"{symbol}: {count}"
+        if symbol == LEGACY_SYMBOL and legacy:
+            text += f" (davon {legacy} ohne Feld, gelten als {LEGACY_SYMBOL})"
+        parts.append(text)
+    lines = [f"Paare im Ledger: {', '.join(parts)}"]
+    if configured_symbol is not None and any(s != configured_symbol for s in counts):
+        lines.append(
+            f"ACHTUNG: Das Ledger führt Einträge eines anderen Paars als konfiguriert "
+            f"({configured_symbol}) - der Bot startet so nicht. Details: {REPORT_COMMAND}"
+        )
+    return lines
 
 
 def _summarize_dry_run(open_records: list[dict]) -> None:
@@ -322,23 +352,59 @@ def dca_claim(path: Path, symbol: str) -> LedgerClaim:
     damit dauerhaft Bestand, und die Summe aller echten Käufe ist das,
     was er beansprucht.
 
-    Anders als Grid und Trend tragen seine Einträge ein `symbol`-Feld -
-    es wird gefiltert, weil ein Bestand in einem anderen Paar nichts über
-    dieses Base-Asset aussagt.
+    Gezählt werden nur Einträge dieses Paars. Einträge anderer Paare
+    verschwinden damit aber nicht aus dem Abgleich: `ledger_claims()`
+    bildet für sie eigene Ansprüche (Symbolbindung vom 28.09.2026).
     """
     records, error = _load_records(path)
-    matching = [r for r in records if r.get("symbol") == symbol]
+    matching = [r for r in records if effective_symbol(r) == symbol]
     return _claim_from_open_records("dca", symbol, matching, error)
 
 
 def grid_claim(path: Path, symbol: str) -> LedgerClaim:
+    """
+    Offene Grid-Positionen dieses Paars. Einträge ohne Feld `symbol`
+    stammen aus der Zeit vor der Symbolbindung und gelten als
+    symbol_guard.LEGACY_SYMBOL.
+    """
     records, error = _load_records(path)
-    return _claim_from_open_records("grid", symbol, _open_records(records), error)
+    matching = [r for r in _open_records(records) if effective_symbol(r) == symbol]
+    return _claim_from_open_records("grid", symbol, matching, error)
 
 
 def trend_claim(path: Path, symbol: str) -> LedgerClaim:
+    """Wie grid_claim, für die (höchstens eine) offene Trend-Position."""
     records, error = _load_records(path)
-    return _claim_from_open_records("trend", symbol, _open_records(records), error)
+    matching = [r for r in _open_records(records) if effective_symbol(r) == symbol]
+    return _claim_from_open_records("trend", symbol, matching, error)
+
+
+def ledger_claims(bot: str, path: Path, configured_symbol: str) -> list[LedgerClaim]:
+    """
+    Alle Ansprüche eines Ledgers - einer je Paar, das darin offen
+    vorkommt (Symbolbindung vom 28.09.2026).
+
+    Bis dahin bekam jedes Grid- und Trend-Ledger pauschal das konfigurierte
+    Symbol, und DCA-Käufe eines anderen Paars fielen still heraus. Nach
+    einem Paarwechsel hätte der Abgleich damit alten BTCUSDT-Bestand
+    entweder falsch zugeordnet oder gar nicht gesehen. Welches Paar ein
+    Eintrag hat, steht jetzt in ihm selbst (Altbestand: LEGACY_SYMBOL).
+    Führt ein Ledger gar nichts Offenes, bleibt ein leerer Anspruch unter
+    dem konfigurierten Symbol, damit der Bot in der Tabelle erscheint.
+    """
+    records, error = _load_records(path)
+    if error:
+        return [LedgerClaim(bot=bot, symbol=configured_symbol, error=error)]
+    relevant = records if bot == "dca" else _open_records(records)
+    by_symbol: dict[str, list[dict]] = {}
+    for record in relevant:
+        by_symbol.setdefault(effective_symbol(record), []).append(record)
+    if not by_symbol:
+        by_symbol[configured_symbol] = []
+    return [
+        _claim_from_open_records(bot, symbol, entries, None)
+        for symbol, entries in sorted(by_symbol.items())
+    ]
 
 
 @dataclass(frozen=True)
@@ -438,7 +504,7 @@ def audit_dca(path: Path, symbol: str) -> None:
         print(error)
         return
 
-    matching = [r for r in records if r.get("symbol") == symbol]
+    matching = [r for r in records if effective_symbol(r) == symbol]
     claim = _claim_from_open_records("dca", symbol, matching, None)
     other_symbols = len(records) - len(matching)
 
@@ -446,6 +512,8 @@ def audit_dca(path: Path, symbol: str) -> None:
         f"{len(records)} Einträge insgesamt, davon {len(matching)} für {symbol}"
         + (f" ({other_symbols} für andere Symbole)." if other_symbols else ".")
     )
+    for line in symbol_lines(records, symbol):
+        print(line)
     if not matching:
         return
 
@@ -512,7 +580,7 @@ def _print_negative_pnl_findings(findings: list[NegativePnlFinding]) -> None:
     )
 
 
-def audit_grid(path: Path) -> None:
+def audit_grid(path: Path, symbol: str | None = None) -> None:
     _print_header("GRID-BOT - offene Positionen", path)
     records, error = _load_records(path)
     if error:
@@ -521,6 +589,8 @@ def audit_grid(path: Path) -> None:
 
     open_records = _open_records(records)
     _print_counts(records, open_records)
+    for line in symbol_lines(records, symbol):
+        print(line)
 
     # Bewusst VOR dem Abbruch bei "nichts offen": Der Check gilt
     # geschlossenen Positionen, und ein Ledger ohne eine einzige offene
@@ -551,7 +621,7 @@ def audit_grid(path: Path) -> None:
     _summarize_dry_run(open_records)
 
 
-def audit_trend(path: Path) -> None:
+def audit_trend(path: Path, symbol: str | None = None) -> None:
     _print_header("TREND-BOT - offene Position", path)
     records, error = _load_records(path)
     if error:
@@ -560,6 +630,8 @@ def audit_trend(path: Path) -> None:
 
     open_records = _open_records(records)
     _print_counts(records, open_records)
+    for line in symbol_lines(records, symbol):
+        print(line)
     if not open_records:
         return
 
@@ -666,65 +738,143 @@ def _build_read_only_client():
     return client, None
 
 
-def audit_account(client, claims_by_symbol: dict[str, list[LedgerClaim]]) -> None:
+@dataclass(frozen=True)
+class BaseAssetGroup:
+    """Alle Ansprüche auf EIN Base-Asset - über alle Paare hinweg."""
+
+    base_asset: str
+    symbols: tuple[str, ...]
+    claims: list[LedgerClaim]
+    step_size: float
+
+
+def group_claims_by_base_asset(
+    client, claims: list[LedgerClaim]
+) -> tuple[list[BaseAssetGroup], list[str]]:
+    """
+    Gruppiert die Ansprüche nach dem Base-Asset ihres Paars (aus
+    exchangeInfo) und gibt die Gruppen plus eine Liste von Problemen
+    zurück.
+
+    **Warum nach Base-Asset und nicht nach Symbol** (Symbolbindung vom
+    28.09.2026): BTCUSDT und BTCEUR handeln dasselbe BTC auf demselben
+    Konto. Bis dahin wurde nach Symbol gruppiert - mit DCA auf BTCUSDT
+    (0,3 BTC) und Grid auf BTCEUR (0,2 BTC) hätte jede Gruppe für sich
+    gegen die 0,4 BTC des Kontos gedeckt ausgesehen, und der Fehlbetrag von
+    0,1 BTC wäre unsichtbar geblieben. Die Summe über Paare mit
+    verschiedenen Base-Assets bleibt dagegen weiterhin getrennt - sie
+    addierte verschiedene Assets.
+
+    Ist für ein Paar keine Handelsregel abrufbar, fehlen seine Ansprüche in
+    ihrer Gruppe - das steht dann als Problem in der Liste, damit ein
+    "In Ordnung" nicht auf einer unvollständigen Summe beruht.
+    """
+    rules_by_symbol = {}
+    problems: list[str] = []
+    for symbol in sorted({c.symbol for c in claims}):
+        try:
+            rules_by_symbol[symbol] = client.get_symbol_trading_rules(symbol)
+        except Exception as exc:
+            affected = ", ".join(sorted(c.bot for c in claims if c.symbol == symbol))
+            problems.append(
+                f"Handelsregeln für {symbol} nicht abrufbar ({type(exc).__name__}) - die "
+                f"Ansprüche in {symbol} ({affected}) fehlen im Abgleich, er ist UNVOLLSTÄNDIG."
+            )
+
+    grouped: dict[str, dict] = {}
+    for claim in claims:
+        rules = rules_by_symbol.get(claim.symbol)
+        if rules is None:
+            continue
+        group = grouped.setdefault(rules.base_asset, {"symbols": set(), "claims": [], "step": 0.0})
+        group["symbols"].add(claim.symbol)
+        group["claims"].append(claim)
+        group["step"] = max(group["step"], rules.step_size)
+
+    groups = [
+        BaseAssetGroup(base, tuple(sorted(g["symbols"])), g["claims"], g["step"])
+        for base, g in sorted(grouped.items())
+    ]
+    return groups, problems
+
+
+def compare_group(client, group: BaseAssetGroup) -> AccountComparison | None:
+    """
+    Der Abgleich für eine Gruppe: Guthaben EINMAL je Base-Asset, offene
+    Orders aus ALLEN Paaren der Gruppe (Binance liefert sie nur je Symbol,
+    gebunden wird aber dasselbe Asset). `None`, wenn das Guthaben nicht
+    abrufbar ist - kein Befund. Scheitert der Abruf der Orders für eines
+    der Paare, bleibt die Zuordnung der gebundenen Menge unbekannt; das
+    Urteil über die Deckung kommt trotzdem zustande.
+    """
+    balance = client.get_asset_balance(group.base_asset)
+    if balance is None:
+        return None
+    open_orders: list[dict] | None = []
+    for symbol in group.symbols:
+        orders = client.get_open_orders(symbol)
+        if orders is None:
+            open_orders = None
+            break
+        open_orders.extend(orders)
+    return compare_with_account(
+        symbol=" + ".join(group.symbols),
+        base_asset=group.base_asset,
+        claims=group.claims,
+        balance=balance,
+        open_orders=open_orders,
+        step_size=group.step_size,
+    )
+
+
+def audit_account(client, claims: list[LedgerClaim]) -> None:
     """
     Der bot-übergreifende Gesamtabgleich - das, was kein einzelner Bot
-    leisten kann (siehe Modul-Docstring).
-
-    Gruppiert nach SYMBOL, nicht einfach über alles summiert: Handeln die
-    drei Bots unterschiedliche Paare, wäre eine Gesamtsumme schlicht
-    falsch - sie addierte Mengen verschiedener Assets. Im Normalfall
-    (alle drei auf BTCUSDT) ist das genau eine Gruppe.
+    leisten kann (siehe Modul-Docstring). Gruppiert nach Base-Asset, siehe
+    group_claims_by_base_asset().
     """
-    for symbol, claims in sorted(claims_by_symbol.items()):
+    groups, problems = group_claims_by_base_asset(client, claims)
+    for problem in problems:
+        print()
+        print(f"ACHTUNG: {problem}")
+
+    for group in groups:
         print()
         print("=" * 78)
-        print(f"KONTOABGLEICH {symbol} - alle Bots gegen den tatsächlichen Bestand")
+        pairs = "; ".join(
+            f"{symbol}: {', '.join(c.bot for c in group.claims if c.symbol == symbol)}"
+            for symbol in group.symbols
+        )
+        print(f"KONTOABGLEICH {group.base_asset} ({pairs}) - alle Bots gegen den Bestand")
         print("=" * 78)
 
-        try:
-            rules = client.get_symbol_trading_rules(symbol)
-        except Exception as exc:
-            print(f"Handelsregeln für {symbol} nicht abrufbar ({type(exc).__name__}: {exc}).")
-            print("Abgleich für dieses Symbol übersprungen.")
-            continue
-
-        balance = client.get_asset_balance(rules.base_asset)
-        if balance is None:
+        comparison = compare_group(client, group)
+        if comparison is None:
             print(
-                f"Guthaben für {rules.base_asset} nicht abrufbar - Abgleich "
+                f"Guthaben für {group.base_asset} nicht abrufbar - Abgleich "
                 "übersprungen. (Ein gescheiterter Abruf ist keine Aussage "
                 "über das Konto.)"
             )
             continue
-
-        comparison = compare_with_account(
-            symbol=symbol,
-            base_asset=rules.base_asset,
-            claims=claims,
-            balance=balance,
-            open_orders=client.get_open_orders(symbol),
-            step_size=rules.step_size,
-        )
         _print_comparison(comparison)
 
 
 def _print_comparison(c: AccountComparison) -> None:
     print()
-    print(f"{'Bot':<8} {'laut Ledger offen':>20}  Hinweis")
+    print(f"{'Bot':<8} {'Paar':<10} {'laut Ledger offen':>20}  Hinweis")
     print("-" * 78)
     for claim in c.claims:
         if claim.error:
-            print(f"{claim.bot:<8} {'?':>20}  {claim.error}")
+            print(f"{claim.bot:<8} {claim.symbol:<10} {'?':>20}  {claim.error}")
             continue
         notes = []
         if claim.dry_run_entries:
             notes.append(f"{claim.dry_run_entries} Dry-Run (zählt nicht)")
         if claim.unknown_entries:
             notes.append(f"{claim.unknown_entries} ohne dry_run-Feld (zählt nicht)")
-        print(f"{claim.bot:<8} {claim.quantity:>20.8f}  {', '.join(notes)}")
+        print(f"{claim.bot:<8} {claim.symbol:<10} {claim.quantity:>20.8f}  {', '.join(notes)}")
     print("-" * 78)
-    print(f"{'SUMME':<8} {c.total_claimed:>20.8f}")
+    print(f"{'SUMME':<8} {'':<10} {c.total_claimed:>20.8f}")
 
     print()
     print(f"Tatsächlich auf dem Konto ({c.base_asset}):")
@@ -810,24 +960,23 @@ def main() -> None:
     # Configs. Grid- und Trend-Ledger tragen selbst KEIN Symbol-Feld
     # (siehe GridPosition/TrendTrade) - ihr Symbol ist eine Eigenschaft
     # der Konfiguration, nicht des Eintrags.
-    dca_symbol = os.getenv("DCA_SYMBOL", "BTCUSDT")
-    grid_symbol = os.getenv("GRID_SYMBOL", "BTCUSDT")
-    trend_symbol = os.getenv("TREND_SYMBOL", "BTCUSDT")
+    dca_symbol = os.getenv("DCA_SYMBOL", DEFAULT_SYMBOL).strip()
+    grid_symbol = os.getenv("GRID_SYMBOL", DEFAULT_SYMBOL).strip()
+    trend_symbol = os.getenv("TREND_SYMBOL", DEFAULT_SYMBOL).strip()
 
     print("Positions-Audit (nur lesend, es wird nichts verändert)")
 
     audit_dca(Path(args.dca_file), dca_symbol)
-    audit_grid(Path(args.grid_file))
-    audit_trend(Path(args.trend_file))
+    audit_grid(Path(args.grid_file), grid_symbol)
+    audit_trend(Path(args.trend_file), trend_symbol)
 
-    claims = [
-        dca_claim(Path(args.dca_file), dca_symbol),
-        grid_claim(Path(args.grid_file), grid_symbol),
-        trend_claim(Path(args.trend_file), trend_symbol),
-    ]
-    claims_by_symbol: dict[str, list[LedgerClaim]] = {}
-    for claim in claims:
-        claims_by_symbol.setdefault(claim.symbol, []).append(claim)
+    # Seit der Symbolbindung (28.09.2026) je Paar, das im Ledger offen
+    # vorkommt - nicht mehr pauschal das konfigurierte Symbol.
+    claims = (
+        ledger_claims("dca", Path(args.dca_file), dca_symbol)
+        + ledger_claims("grid", Path(args.grid_file), grid_symbol)
+        + ledger_claims("trend", Path(args.trend_file), trend_symbol)
+    )
 
     if args.offline:
         print()
@@ -850,7 +999,7 @@ def main() -> None:
                 "BINANCE_API_SECRET in der .env setzen."
             )
         else:
-            audit_account(client, claims_by_symbol)
+            audit_account(client, claims)
 
     print()
     print("=" * 78)
