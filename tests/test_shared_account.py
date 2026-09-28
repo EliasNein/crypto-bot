@@ -63,6 +63,11 @@ from dca_bot.trend_config import TrendConfig
 from dca_bot.trend_strategy import TrendFollowingStrategy
 
 SYMBOL = "BTCUSDT"
+# Die Paare, die FakeExchange kennt (Symbolbindung vom 28.09.2026): zwei mit
+# demselben Base-Asset - BTCUSDT (Testnet) und BTCEUR (echtes Geld) - und
+# eins mit einem anderen. Alle teilen EIN Konto: BTC, das ueber BTCUSDT
+# gekauft wurde, laesst sich ueber BTCEUR verkaufen, genau wie bei Binance.
+MARKETS = {"BTCUSDT": ("BTC", "USDT"), "BTCEUR": ("BTC", "EUR"), "ETHUSDT": ("ETH", "USDT")}
 STEP_SIZE = 0.00001
 TICK_SIZE = 0.01
 MIN_NOTIONAL = 5.0
@@ -106,10 +111,14 @@ class FakeExchange:
     nicht an Fliesskomma-Rauschen scheitern.
     """
 
-    def __init__(self, price: float, usdt: float = 100_000.0):
-        self.price = price
-        self.free = {"BTC": 0.0, "USDT": usdt}
-        self.locked = {"BTC": 0.0, "USDT": 0.0}
+    def __init__(self, price: float, usdt: float = 100_000.0, eur: float = 100_000.0,
+                 prices: dict[str, float] | None = None):
+        # Kurs je Paar. `price` (siehe Property unten) ist der von BTCUSDT -
+        # so bleiben alle Szenarien, die nur ein Paar kennen, unveraendert.
+        self.prices = {"BTCUSDT": price, "BTCEUR": round(price / 1.16, 2), "ETHUSDT": 2_500.0}
+        self.prices.update(prices or {})
+        self.free = {"BTC": 0.0, "ETH": 0.0, "USDT": usdt, "EUR": eur}
+        self.locked = {asset: 0.0 for asset in self.free}
         self.fee_rate = 0.0
         self.orders: dict[int, dict] = {}
         self.by_client_id: dict[str, int] = {}
@@ -118,6 +127,20 @@ class FakeExchange:
         self._faults: dict[str, list[str]] = {}
         self.lookup_down = False
         self._next_order_id = 1000
+
+    @property
+    def price(self) -> float:
+        return self.prices[SYMBOL]
+
+    @price.setter
+    def price(self, value: float) -> None:
+        self.prices[SYMBOL] = value
+
+    @staticmethod
+    def _assets(symbol: str) -> tuple[str, str]:
+        if symbol not in MARKETS:
+            raise _api_error(-1121, "Invalid symbol.")
+        return MARKETS[symbol]
 
     # -- Fehler einspielen ----------------------------------------------------
 
@@ -142,11 +165,11 @@ class FakeExchange:
     def _q(value: float) -> float:
         return quantize_quantity(value, STEP_SIZE, round_down=True)
 
-    def _new_order(self, client_order_id: str, side: str, order_type: str, orig_qty: float,
-                   **extra) -> dict:
+    def _new_order(self, symbol: str, client_order_id: str, side: str, order_type: str,
+                   orig_qty: float, **extra) -> dict:
         self._next_order_id += 1
         order = {
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "orderId": self._next_order_id,
             "clientOrderId": client_order_id,
             "side": side,
@@ -163,19 +186,21 @@ class FakeExchange:
 
     def _execute(self, order: dict, qty: float, price: float) -> dict:
         """Fuehrt `qty` einer Order aus und bucht das Konto."""
+        base, quote_asset = self._assets(order["symbol"])
         quote = qty * price
         if order["side"] == "BUY":
             commission = self._q(qty * self.fee_rate) if self.fee_rate else 0.0
-            self.free["USDT"] -= quote
-            self.free["BTC"] += qty - commission
-            commission_asset = "BTC"
+            self.free[quote_asset] -= quote
+            self.free[base] += qty - commission
+            commission_asset = base
         else:
             commission = quote * self.fee_rate
-            self.free["USDT"] += quote - commission
-            commission_asset = "USDT"
+            self.free[quote_asset] += quote - commission
+            commission_asset = quote_asset
         order["executedQty"] = self._q(float(order["executedQty"]) + qty)
         order["cummulativeQuoteQty"] = float(order["cummulativeQuoteQty"]) + quote
         fill = {
+            "symbol": order["symbol"],
             "orderId": order["orderId"],
             "clientOrderId": order["clientOrderId"],
             "side": order["side"],
@@ -219,9 +244,12 @@ class FakeExchange:
     # -- python-binance-Schnittstelle ------------------------------------------
 
     def get_symbol_info(self, symbol):
+        if symbol not in MARKETS:
+            return None  # wie python-binance bei einem unbekannten Symbol
+        base, quote = MARKETS[symbol]
         return {
-            "baseAsset": "BTC",
-            "quoteAsset": "USDT",
+            "baseAsset": base,
+            "quoteAsset": quote,
             "quoteAssetPrecision": 8,
             "filters": [
                 {"filterType": "PRICE_FILTER", "tickSize": str(TICK_SIZE)},
@@ -231,7 +259,8 @@ class FakeExchange:
         }
 
     def get_symbol_ticker(self, symbol):
-        return {"symbol": symbol, "price": f"{self.price:.2f}"}
+        self._assets(symbol)
+        return {"symbol": symbol, "price": f"{self.prices[symbol]:.2f}"}
 
     def get_asset_balance(self, asset):
         return {
@@ -241,10 +270,12 @@ class FakeExchange:
         }
 
     def get_open_orders(self, symbol):
+        # Wie Binance: nur die Orders DIESES Paars - auch wenn eine Order
+        # eines anderen Paars dasselbe Base-Asset bindet.
         return [
             self._public(o)
             for o in self.orders.values()
-            if o["status"] in ("NEW", "PARTIALLY_FILLED")
+            if o["status"] in ("NEW", "PARTIALLY_FILLED") and o["symbol"] == symbol
         ]
 
     def get_order(self, symbol, orderId=None, origClientOrderId=None):
@@ -255,7 +286,11 @@ class FakeExchange:
         else:
             order_id = int(orderId)
         order = self.orders.get(order_id)
-        if order is None:
+        # Wie Binance: Eine Order ist nur unter ihrem eigenen Symbol
+        # auffindbar. Unter einem anderen Paar heisst es -2013, obwohl sie
+        # existiert - genau der Fall, in dem check_orders nicht "nie
+        # angenommen" behaupten darf.
+        if order is None or order["symbol"] != symbol:
             raise _api_error(-2013, "Order does not exist.")
         return self._public(order)
 
@@ -268,19 +303,21 @@ class FakeExchange:
                 "commissionAsset": f["commissionAsset"],
             }
             for f in self.fills
-            if f["orderId"] == int(orderId)
+            if f["orderId"] == int(orderId) and f["symbol"] == symbol
         ]
 
     def order_market_buy(self, symbol, quoteOrderQty, newClientOrderId):
         def action():
+            _, quote_asset = self._assets(symbol)
+            price = self.prices[symbol]
             quote = float(quoteOrderQty)
-            if quote > self.free["USDT"] + TOLERANCE:
+            if quote > self.free[quote_asset] + TOLERANCE:
                 raise _api_error(-2010, "Account has insufficient balance.")
-            qty = self._q(quote / self.price)
-            if qty * self.price < MIN_NOTIONAL:
+            qty = self._q(quote / price)
+            if qty * price < MIN_NOTIONAL:
                 raise _api_error(-1013, "Filter failure: NOTIONAL")
-            order = self._new_order(newClientOrderId, "BUY", "MARKET", qty)
-            fill = self._execute(order, qty, self.price)
+            order = self._new_order(symbol, newClientOrderId, "BUY", "MARKET", qty)
+            fill = self._execute(order, qty, price)
             order["status"] = "FILLED"
             return self._public(order, [fill])
 
@@ -288,14 +325,16 @@ class FakeExchange:
 
     def order_market_sell(self, symbol, quantity, newClientOrderId):
         def action():
+            base, _ = self._assets(symbol)
+            price = self.prices[symbol]
             qty = self._q(float(quantity))
-            if qty * self.price < MIN_NOTIONAL:
+            if qty * price < MIN_NOTIONAL:
                 raise _api_error(-1013, "Filter failure: NOTIONAL")
-            if qty > self.free["BTC"] + TOLERANCE:
+            if qty > self.free[base] + TOLERANCE:
                 raise _api_error(-2010, "Account has insufficient balance.")
-            self.free["BTC"] -= qty
-            order = self._new_order(newClientOrderId, "SELL", "MARKET", qty)
-            fill = self._execute(order, qty, self.price)
+            self.free[base] -= qty
+            order = self._new_order(symbol, newClientOrderId, "SELL", "MARKET", qty)
+            fill = self._execute(order, qty, price)
             order["status"] = "FILLED"
             return self._public(order, [fill])
 
@@ -304,13 +343,14 @@ class FakeExchange:
     def create_order(self, symbol, side, type, timeInForce, quantity, stopPrice, price,
                      newClientOrderId):
         def action():
+            base, _ = self._assets(symbol)
             qty = self._q(float(quantity))
-            if qty > self.free["BTC"] + TOLERANCE:
+            if qty > self.free[base] + TOLERANCE:
                 raise _api_error(-2010, "Account has insufficient balance.")
-            self.free["BTC"] -= qty
-            self.locked["BTC"] += qty
+            self.free[base] -= qty
+            self.locked[base] += qty
             order = self._new_order(
-                newClientOrderId, "SELL", "STOP_LOSS_LIMIT", qty,
+                symbol, newClientOrderId, "SELL", "STOP_LOSS_LIMIT", qty,
                 stopPrice=float(stopPrice), price=float(price),
             )
             return self._public(order)
@@ -319,8 +359,10 @@ class FakeExchange:
 
     def cancel_order(self, symbol, orderId):
         order = self.orders.get(int(orderId))
-        # Wie Binance: auch eine teilgefuellte Order ist stornierbar.
-        if order is None or order["status"] not in ("NEW", "PARTIALLY_FILLED"):
+        # Wie Binance: auch eine teilgefuellte Order ist stornierbar - aber
+        # nur unter ihrem eigenen Symbol.
+        if (order is None or order["symbol"] != symbol
+                or order["status"] not in ("NEW", "PARTIALLY_FILLED")):
             raise _api_error(-2011, "Unknown order sent.")
         self._release(order)
         order["status"] = "CANCELED"
@@ -332,16 +374,17 @@ class FakeExchange:
         return self._q(float(order["origQty"]) - float(order["executedQty"]))
 
     def _release(self, order: dict) -> None:
+        base, _ = self._assets(order["symbol"])
         remaining = self._remaining(order)
-        self.locked["BTC"] -= remaining
-        self.free["BTC"] += remaining
+        self.locked[base] -= remaining
+        self.free[base] += remaining
 
     def fill_stop(self, order_id, qty: float, price: float | None = None) -> None:
         """Die Stop-Order hat ausgeloest und fuellt `qty` zum Limit-Preis."""
         order = self.orders[int(order_id)]
         qty = self._q(qty)
         assert qty <= self._remaining(order) + TOLERANCE, "Testaufbau: mehr als offen"
-        self.locked["BTC"] -= qty
+        self.locked[self._assets(order["symbol"])[0]] -= qty
         self._execute(order, qty, order["price"] if price is None else price)
         order["status"] = "FILLED" if self._remaining(order) <= TOLERANCE else "PARTIALLY_FILLED"
 
@@ -361,6 +404,8 @@ class FakeExchange:
         for order in list(self.orders.values()):
             if order["type"] != "STOP_LOSS_LIMIT" or order["status"] not in ("NEW", "PARTIALLY_FILLED"):
                 continue
+            if order["symbol"] != SYMBOL:
+                continue
             if price > order["stopPrice"]:
                 continue
             fraction = rng.choice((0.0, 0.3, 0.5, 1.0))
@@ -376,22 +421,24 @@ class FakeExchange:
             if bot_of(f["clientOrderId"]) == bot and (side is None or f["side"] == side)
         ]
 
-    def net_base(self, bot: str) -> float:
-        """Was dieser Bot laut Boerse netto an BTC besitzt."""
+    def net_base(self, bot: str, base: str = "BTC") -> float:
+        """Was dieser Bot laut Boerse netto an `base` besitzt - ueber alle Paare."""
         total = 0.0
         for f in self.fills_of(bot):
+            if MARKETS[f["symbol"]][0] != base:
+                continue
             if f["side"] == "BUY":
-                base_fee = f["commission"] if f["commissionAsset"] == "BTC" else 0.0
+                base_fee = f["commission"] if f["commissionAsset"] == base else 0.0
                 total += f["qty"] - base_fee
             else:
                 total -= f["qty"]
         return total
 
-    def locked_by(self, bot: str) -> float:
+    def locked_by(self, bot: str, base: str = "BTC") -> float:
         return sum(
             self._remaining(o)
             for o in self.orders.values()
-            if o["side"] == "SELL"
+            if o["side"] == "SELL" and MARKETS[o["symbol"]][0] == base
             and o["status"] in ("NEW", "PARTIALLY_FILLED")
             and bot_of(o["clientOrderId"]) == bot
         )
@@ -913,6 +960,78 @@ class LedgerWindowTestCase(SharedAccountTestBase):
         self.assertFalse(any("DOPPELVERKAUF" in m for m in self.messages), self.messages)
         self.assertEqual(trend._client.pending_orders.entries_for(side="SELL"), [])
         self.assertEqual(len(self.exchange.fills_of("trend", "SELL")), 1)
+        self.assert_ownership()
+
+
+# ---------------------------------------------------------------------------
+# Zwei Paare, ein Base-Asset (Symbolbindung vom 28.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class FakeExchangeSymbolTestCase(SharedAccountTestBase):
+    """Der Fake selbst: Orders gehoeren zu ihrem Paar, das Konto ist gemeinsam."""
+
+    def test_an_order_is_unknown_under_another_pair(self):
+        self.exchange.order_market_buy("BTCUSDT", 100.0, "dca-x")
+        self.exchange.get_order("BTCUSDT", origClientOrderId="dca-x")
+        with self.assertRaises(BinanceAPIException) as ctx:
+            self.exchange.get_order("BTCEUR", origClientOrderId="dca-x")
+        self.assertEqual(ctx.exception.code, -2013)
+
+    def test_open_orders_and_cancel_are_per_pair(self):
+        self.exchange.order_market_buy("BTCUSDT", 1_000.0, "dca-x")
+        stop = self.exchange.create_order("BTCUSDT", "SELL", "STOP_LOSS_LIMIT", "GTC", 0.01,
+                                          45_000.0, 44_800.0, "trend-stop")
+        self.assertEqual(self.exchange.get_open_orders("BTCEUR"), [])
+        self.assertEqual(len(self.exchange.get_open_orders("BTCUSDT")), 1)
+        with self.assertRaises(BinanceAPIException):
+            self.exchange.cancel_order("BTCEUR", stop["orderId"])
+
+    def test_btc_bought_via_usdt_can_be_sold_via_eur(self):
+        """Das gemeinsame Konto: dasselbe BTC, zwei Quote-Waehrungen."""
+        self.exchange.order_market_buy("BTCUSDT", 1_000.0, "dca-x")
+        eur_before = self.exchange.free["EUR"]
+        self.exchange.order_market_sell("BTCEUR", 0.01, "grid-y")
+        self.assertAlmostEqual(self.exchange.free["BTC"], 0.01, places=9)
+        self.assertGreater(self.exchange.free["EUR"], eur_before)
+
+
+class TwoPairsSharedAccountTestCase(SharedAccountTestBase):
+    """
+    DCA auf BTCUSDT (Altbestand der Testphase), Trend auf BTCEUR - EIN Konto,
+    EIN BTC. Die Bestandspruefungen beider Bots duerfen dabei nicht
+    anschlagen: Jeder findet seine eigene Order unter seinem eigenen Paar.
+    """
+
+    def test_startup_checks_of_both_pairs_raise_no_false_alarm(self):
+        dca = self.seed_dca_holdings()
+        trend = self.start_trend(symbol="BTCEUR")
+        trend._open_position(self.exchange.prices["BTCEUR"])
+        trade = trend._ledger.open_position()
+        self.assertEqual(trade["symbol"], "BTCEUR")
+        self.assertIsNotNone(trade["stop_loss_order_id"])
+        self.assertGreater(self.exchange.locked["BTC"], 0.0, "Praemisse: Stop-Order bindet BTC")
+
+        with self.assertLogs("dca_bot", level="INFO"), self.assertLogs("trend_bot", level="INFO"):
+            dca.check_balance_on_startup()
+            trend.check_balance_on_startup()
+
+        self.assertFalse(any("DISKREPANZ" in m for m in self.messages), self.messages)
+        self.assert_ownership()
+
+    def test_the_trend_exit_on_btceur_sells_only_its_own_btc(self):
+        """Der Ausstieg ueber BTCEUR storniert die eigene Stop-Order und verkauft nur die eigene Menge."""
+        self.seed_dca_holdings()
+        trend = self.start_trend(symbol="BTCEUR")
+        trend._open_position(self.exchange.prices["BTCEUR"])
+        self.exchange.prices["BTCEUR"] = self.exchange.prices["BTCEUR"] * 0.85
+
+        trend.execute_once()
+
+        closed = trend._ledger._read()[0]
+        self.assertEqual(closed["status"], "closed")
+        sells = self.exchange.fills_of("trend", "SELL")
+        self.assertEqual({f["symbol"] for f in sells}, {"BTCEUR"})
         self.assert_ownership()
 
 

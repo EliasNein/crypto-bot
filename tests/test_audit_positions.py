@@ -25,6 +25,8 @@ Ausfuehren mit:  python -m unittest tests.test_audit_positions -v
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -37,12 +39,18 @@ from dca_bot.audit_positions import (
     LedgerClaim,
     _ReadOnlyClientConfig,
     _build_read_only_client,
+    audit_account,
+    compare_group,
     compare_with_account,
     dca_claim,
     grid_claim,
+    group_claims_by_base_asset,
+    ledger_claims,
     negative_dry_run_pnl,
+    symbol_lines,
     trend_claim,
 )
+from dca_bot.binance_client import TradingClient
 from dca_bot.balance_guard import FOREIGN_ORDERS, split_locked_by_bot
 
 STEP_SIZE = 0.00001
@@ -196,6 +204,20 @@ class GridAndTrendClaimTestCase(LedgerFileTestBase):
         claim = grid_claim(path, "BTCUSDT")
         self.assertAlmostEqual(claim.quantity, 0.2, places=9)
         self.assertEqual(claim.dry_run_entries, 1)
+
+    def test_grid_and_trend_count_only_their_pair(self):
+        """
+        Symbolbindung (28.09.2026): Positionen eines anderen Paars gehoeren
+        nicht zum Anspruch dieses Paars (ledger_claims bildet fuer sie einen
+        eigenen). Ohne Feld gilt ein Eintrag als BTCUSDT.
+        """
+        eur = dict(self._position(0.3, False), symbol="BTCEUR")
+        legacy = self._position(0.2, False)
+        for claim_of, name in ((grid_claim, "grid.json"), (trend_claim, "trend.json")):
+            with self.subTest(claim_of.__name__):
+                path = self._write(name, [legacy, eur])
+                self.assertAlmostEqual(claim_of(path, "BTCUSDT").quantity, 0.2, places=9)
+                self.assertAlmostEqual(claim_of(path, "BTCEUR").quantity, 0.3, places=9)
 
     def test_trend_reads_its_single_open_position(self):
         path = self._write(
@@ -438,6 +460,160 @@ class SymbolGroupingTestCase(unittest.TestCase):
         self.assertEqual(
             sum(c.quantity for c in grouped["BTCUSDT"]), 0.2
         )
+
+
+class LedgerClaimsPerSymbolTestCase(LedgerFileTestBase):
+    """
+    `ledger_claims()` (Symbolbindung vom 28.09.2026): ein Anspruch je Paar,
+    das im Ledger offen vorkommt - statt pauschal des konfigurierten Symbols.
+    """
+
+    def test_a_grid_ledger_with_two_pairs_yields_two_claims(self):
+        legacy = self._position(0.2, False)             # ohne Feld: BTCUSDT
+        new = dict(self._position(0.1, False), symbol="BTCEUR")
+        path = self._write("grid.json", [legacy, new])
+        claims = {c.symbol: c.quantity for c in ledger_claims("grid", path, "BTCEUR")}
+        self.assertEqual(set(claims), {"BTCUSDT", "BTCEUR"})
+        self.assertAlmostEqual(claims["BTCUSDT"], 0.2, places=9)
+        self.assertAlmostEqual(claims["BTCEUR"], 0.1, places=9)
+
+    def test_dca_buys_of_another_pair_are_no_longer_dropped(self):
+        """
+        Bisher fielen DCA-Kaeufe eines anderen Paars still aus dem Abgleich
+        - nach einem Paarwechsel waere der alte BTCUSDT-Bestand unsichtbar
+        gewesen, obwohl er dasselbe BTC ist.
+        """
+        path = self._write(
+            "dca.json",
+            [self._dca_record(0.2, False), self._dca_record(0.3, False, symbol="BTCEUR")],
+        )
+        claims = {c.symbol: c.quantity for c in ledger_claims("dca", path, "BTCEUR")}
+        self.assertAlmostEqual(claims["BTCUSDT"], 0.2, places=9)
+        self.assertAlmostEqual(claims["BTCEUR"], 0.3, places=9)
+
+    def test_an_empty_ledger_still_shows_the_bot_under_its_configured_pair(self):
+        path = self._write("trend.json", [self._position(0.3, False, status="closed")])
+        (claim,) = ledger_claims("trend", path, "BTCEUR")
+        self.assertEqual((claim.symbol, claim.quantity), ("BTCEUR", 0.0))
+
+    def test_a_broken_ledger_keeps_its_error(self):
+        path = self.tmp_path / "kaputt.json"
+        path.write_text("[kaputt", encoding="utf-8")
+        (claim,) = ledger_claims("grid", path, "BTCEUR")
+        self.assertIsNotNone(claim.error)
+
+    def test_the_symbol_note_flags_a_foreign_pair(self):
+        records = [self._position(0.2, False)]
+        lines = symbol_lines(records, "BTCEUR")
+        self.assertIn("gelten als BTCUSDT", lines[0])
+        self.assertTrue(any("ACHTUNG" in line and "symbol_guard" in line for line in lines))
+        self.assertFalse(any("ACHTUNG" in line for line in symbol_lines(records, "BTCUSDT")))
+
+
+class BaseAssetAccountTestCase(unittest.TestCase):
+    """
+    Der Abgleich nach Base-Asset - gegen den ECHTEN TradingClient ueber dem
+    symbolbewussten FakeExchange (ein Konto, mehrere Paare).
+    """
+
+    def setUp(self) -> None:
+        from tests.test_shared_account import FakeExchange
+
+        self.exchange = FakeExchange(50_000.0)
+        with mock.patch("dca_bot.binance_client.Client"):
+            self.client = TradingClient(
+                _ReadOnlyClientConfig(api_key="k", api_secret="s", use_testnet=True)
+            )
+        self.client._client = self.exchange
+        # Die Info-Zeilen des Clients (Handelsregeln geladen) gehoeren nicht
+        # in die Testausgabe.
+        patcher = mock.patch("dca_bot.binance_client.logger")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _claims(self) -> list[LedgerClaim]:
+        return [
+            LedgerClaim(bot="dca", symbol="BTCUSDT", quantity=0.3),
+            LedgerClaim(bot="grid", symbol="BTCEUR", quantity=0.2),
+        ]
+
+    def _compare(self, claims):
+        groups, problems = group_claims_by_base_asset(self.client, claims)
+        self.assertEqual(problems, [])
+        return {g.base_asset: compare_group(self.client, g) for g in groups}
+
+    def test_two_pairs_of_the_same_base_asset_are_one_group(self):
+        groups, _ = group_claims_by_base_asset(self.client, self._claims())
+        self.assertEqual([(g.base_asset, g.symbols) for g in groups],
+                         [("BTC", ("BTCEUR", "BTCUSDT"))])
+
+    def test_the_hidden_shortfall_across_two_pairs_is_found(self):
+        """
+        Der Fall aus dem Audit: 0,3 + 0,2 BTC beansprucht, 0,4 BTC auf dem
+        Konto. Pro Symbol gruppiert sah jede Haelfte gedeckt aus.
+        """
+        self.exchange.free["BTC"] = 0.4
+        comparison = self._compare(self._claims())["BTC"]
+        self.assertTrue(comparison.discrepancy)
+        self.assertAlmostEqual(comparison.total_claimed, 0.5, places=9)
+
+    def test_premise_each_pair_alone_would_look_covered(self):
+        """
+        Praemisse des vorigen Tests: einzeln verglichen deckt das Konto
+        jeden der beiden Ansprueche. Der Befund kommt also erst aus der
+        Summe ueber beide Paare.
+        """
+        for claim in self._claims():
+            with self.subTest(paar=claim.symbol):
+                comparison = compare_with_account(
+                    symbol=claim.symbol, base_asset="BTC", claims=[claim],
+                    balance=(0.4, 0.0), open_orders=[], step_size=STEP_SIZE,
+                )
+                self.assertFalse(comparison.discrepancy)
+
+    def test_a_covered_account_is_no_finding(self):
+        self.exchange.free["BTC"] = 0.5
+        self.assertFalse(self._compare(self._claims())["BTC"].discrepancy)
+
+    def test_a_different_base_asset_stays_its_own_group(self):
+        self.exchange.free["BTC"] = 0.5
+        claims = self._claims() + [LedgerClaim(bot="trend", symbol="ETHUSDT", quantity=9.0)]
+        result = self._compare(claims)
+        self.assertEqual(set(result), {"BTC", "ETH"})
+        self.assertFalse(result["BTC"].discrepancy)
+        self.assertTrue(result["ETH"].discrepancy)
+
+    def test_locked_quantities_from_both_pairs_are_attributed(self):
+        """
+        Binance liefert offene Orders nur je Symbol. Eine Trend-Stop-Order
+        auf BTCEUR und ein Grid-Verkauf auf BTCUSDT binden dasselbe BTC -
+        beide muessen im Abgleich ihrem Bot zugeordnet werden.
+        """
+        self.exchange.free["BTC"] = 0.5
+        self.exchange.create_order("BTCEUR", "SELL", "STOP_LOSS_LIMIT", "GTC", 0.1,
+                                   40_000.0, 39_800.0, "trend-stop")
+        self.exchange.create_order("BTCUSDT", "SELL", "STOP_LOSS_LIMIT", "GTC", 0.05,
+                                   45_000.0, 44_800.0, "grid-stop")
+        comparison = self._compare(self._claims())["BTC"]
+        self.assertAlmostEqual(comparison.locked_by_bot["trend"], 0.1, places=9)
+        self.assertAlmostEqual(comparison.locked_by_bot["grid"], 0.05, places=9)
+        self.assertAlmostEqual(comparison.locked, 0.15, places=9)
+
+    def test_an_unknown_pair_is_reported_as_incomplete(self):
+        claims = self._claims() + [LedgerClaim(bot="trend", symbol="GIBTSNICHT", quantity=1.0)]
+        groups, problems = group_claims_by_base_asset(self.client, claims)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("UNVOLLSTÄNDIG", problems[0])
+        self.assertIn("trend", problems[0])
+
+    def test_the_printed_audit_names_both_pairs(self):
+        self.exchange.free["BTC"] = 0.4
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            audit_account(self.client, self._claims())
+        text = out.getvalue()
+        self.assertIn("KONTOABGLEICH BTC (BTCEUR: grid; BTCUSDT: dca)", text)
+        self.assertIn("BEFUND", text)
 
 
 class ReadOnlyClientTestCase(unittest.TestCase):

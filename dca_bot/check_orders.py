@@ -50,6 +50,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .audit_positions import BOT_NAMES, _build_read_only_client
+from .config_guard import DEFAULT_SYMBOL
+from .symbol_guard import effective_symbol
 from .pending_orders import (
     LOOKUP_FAILED,
     LOOKUP_FOUND,
@@ -76,7 +78,7 @@ class BotFiles:
     ledger_default: str
 
     def symbol(self) -> str:
-        return os.getenv(self.symbol_var, "BTCUSDT").strip() or "BTCUSDT"
+        return os.getenv(self.symbol_var, DEFAULT_SYMBOL).strip() or DEFAULT_SYMBOL
 
     def pending_file(self) -> Path:
         return Path(os.getenv(self.pending_var, self.pending_default))
@@ -131,20 +133,66 @@ def all_symbols() -> list[str]:
     return symbols
 
 
-def symbols_to_search(client_order_id: str, symbol_override: str | None) -> list[str]:
+def symbols_to_search(
+    client_order_id: str, symbol_override: str | None, known: str | None = None
+) -> list[str]:
     """
-    Unter welchen Symbolen gesucht wird. Binance braucht zum Nachschlagen
-    immer das Symbol, die clientOrderId allein reicht nicht.
+    Unter welchen Symbolen gesucht wird, in dieser Reihenfolge. Binance
+    braucht zum Nachschlagen immer das Symbol, die clientOrderId allein
+    reicht nicht - und unter einem anderen Symbol antwortet Binance mit
+    -2013, als gaebe es die Order nicht.
 
-    Vorrang hat `--symbol`. Sonst verrät das Präfix den Bot und damit sein
-    Symbol. Passt kein Präfix, wird unter allen drei Symbolen gesucht.
+    Vorrang hat `--symbol`: dann nur dieses. Sonst zuerst das Symbol, unter
+    dem die eigene Buchhaltung des Bots die Order fuehrt (`known`, siehe
+    known_symbol()), danach das konfigurierte Symbol des Bots, den das
+    Praefix verraet, danach alle uebrigen konfigurierten Symbole
+    (Symbolbindung vom 28.09.2026 - bis dahin wurde bei bekanntem Praefix
+    NUR unter dem aktuellen Symbol des Bots gesucht, und eine Order aus der
+    Zeit vor einem Paarwechsel galt als "nie angenommen").
     """
     if symbol_override:
         return [symbol_override]
+    ordered = []
+    if known:
+        ordered.append(known)
     bot = bot_for_client_order_id(client_order_id, BOT_NAMES)
     if bot is not None:
-        return [BOT_FILES[bot].symbol()]
-    return all_symbols()
+        ordered.append(BOT_FILES[bot].symbol())
+    ordered.extend(all_symbols())
+    return list(dict.fromkeys(ordered))
+
+
+def known_symbol(bot: str | None, client_order_id: str) -> str | None:
+    """
+    Unter welchem Paar die eigene Buchhaltung des Bots diese Order fuehrt:
+    Pending-Eintrag (Feld `symbol`) oder Ledger-Eintrag (Kauf-, Verkaufs-
+    oder Ausstiegs-ID; Altbestand ohne Feld gilt als LEGACY_SYMBOL). Nur
+    lesend. None, wenn nichts dazu gefunden wird oder die Dateien
+    unlesbar sind - dann gibt es kein massgebliches Symbol.
+    """
+    if bot is None:
+        return None
+    files = BOT_FILES[bot]
+    try:
+        payload = json.loads(files.pending_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = None
+    orders = payload.get("orders") if isinstance(payload, dict) else None
+    for entry in orders if isinstance(orders, list) else []:
+        if isinstance(entry, dict) and entry.get("client_order_id") == client_order_id:
+            symbol = entry.get("symbol")
+            if isinstance(symbol, str) and symbol.strip():
+                return symbol.strip()
+    try:
+        records = json.loads(files.ledger_file().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for record in records if isinstance(records, list) else []:
+        if isinstance(record, dict) and any(
+            record.get(field) == client_order_id for field in LEDGER_CLIENT_ID_FIELDS
+        ):
+            return effective_symbol(record)
+    return None
 
 
 @dataclass(frozen=True)
@@ -152,33 +200,47 @@ class OrderLookup:
     client_order_id: str
     bot: str | None
     symbol: str | None  # das Symbol, unter dem sie gefunden wurde
-    searched: tuple[str, ...]
+    searched: tuple[str, ...]  # die tatsaechlich abgefragten Symbole
     lookup: str  # LOOKUP_FOUND / LOOKUP_NOT_FOUND / LOOKUP_FAILED
     order: dict | None
+    # Das Symbol, unter dem die Order laut --symbol oder laut eigener
+    # Buchhaltung platziert wurde. Nur wenn darunter gesucht wurde, ist ein
+    # -2013 eine Aussage ueber die Order selbst.
+    authoritative_symbol: str | None = None
 
     @property
     def lifecycle(self) -> str | None:
         return order_lifecycle_state(self.order) if self.lookup == LOOKUP_FOUND else None
 
 
-def look_up(client, client_order_id: str, symbol_override: str | None = None) -> OrderLookup:
+def look_up(
+    client,
+    client_order_id: str,
+    symbol_override: str | None = None,
+    known: str | None = None,
+) -> OrderLookup:
     """
     Schlägt eine clientOrderId unter allen in Frage kommenden Symbolen
-    nach.
+    nach (siehe symbols_to_search).
 
     Über mehrere Symbole gilt: ein Treffer entscheidet. "Nicht gefunden"
     darf dagegen nur gemeldet werden, wenn JEDE Abfrage "nicht gefunden"
     ergab - ist eine davon gescheitert, kann die Order genau dort liegen,
     und das Ergebnis ist LOOKUP_FAILED. Dieselbe Regel wie im Bot: nur
-    -2013 heißt "gibt es nicht".
+    -2013 heißt "gibt es nicht" - und auch das nur unter dem Symbol, unter
+    dem die Order platziert wurde (authoritative_symbol, siehe verdict).
     """
     bot = bot_for_client_order_id(client_order_id, BOT_NAMES)
-    searched = symbols_to_search(client_order_id, symbol_override)
+    candidates = symbols_to_search(client_order_id, symbol_override, known)
+    authoritative = symbol_override or known
+    searched: list[str] = []
     any_failed = False
-    for symbol in searched:
+    for symbol in candidates:
+        searched.append(symbol)
         result, order = client.get_order_by_client_id(symbol, client_order_id)
         if result == LOOKUP_FOUND:
-            return OrderLookup(client_order_id, bot, symbol, tuple(searched), LOOKUP_FOUND, order)
+            return OrderLookup(client_order_id, bot, symbol, tuple(searched), LOOKUP_FOUND,
+                               order, authoritative)
         if result != LOOKUP_NOT_FOUND:
             any_failed = True
     return OrderLookup(
@@ -188,6 +250,7 @@ def look_up(client, client_order_id: str, symbol_override: str | None = None) ->
         tuple(searched),
         LOOKUP_FAILED if any_failed else LOOKUP_NOT_FOUND,
         None,
+        authoritative,
     )
 
 
@@ -257,11 +320,21 @@ def verdict(lookup: OrderLookup, local: LocalBookkeeping | None) -> str:
             "Später erneut versuchen."
         )
     if lookup.lookup == LOOKUP_NOT_FOUND:
+        if lookup.authoritative_symbol and lookup.authoritative_symbol in lookup.searched:
+            return (
+                f"Binance kennt diese clientOrderId unter {lookup.authoritative_symbol} "
+                "nicht (-2013): die Order wurde nie angenommen. Bis etwa "
+                f"{int(UNKNOWN_FINAL_AFTER_SECONDS)} s nach dem Absenden kann sie "
+                "noch auftauchen - danach ist die Antwort endgültig."
+            )
+        # Symbolbindung (28.09.2026): Unter einem anderen Symbol antwortet
+        # Binance ebenfalls mit -2013. Ohne Symbol aus --symbol oder aus der
+        # eigenen Buchhaltung ist "nicht gefunden" deshalb keine Aussage
+        # darueber, ob es die Order gibt.
         return (
-            "Binance kennt diese clientOrderId nicht (-2013): die Order wurde "
-            "nie angenommen. Bis etwa "
-            f"{int(UNKNOWN_FINAL_AFTER_SECONDS)} s nach dem Absenden kann sie "
-            "noch auftauchen - danach ist die Antwort endgültig."
+            f"Unter {', '.join(lookup.searched)} nicht gefunden (-2013). Über andere "
+            "Paare sagt das nichts: Wurde die Order unter einem anderen Symbol "
+            "platziert (etwa vor einem Paarwechsel), mit --symbol <paar> erneut suchen."
         )
 
     state = lookup.lifecycle
@@ -430,7 +503,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     client_order_id = args.client_order_id.strip()
-    lookup = look_up(client, client_order_id, args.symbol)
+    bot = bot_for_client_order_id(client_order_id, BOT_NAMES)
+    lookup = look_up(client, client_order_id, args.symbol, known_symbol(bot, client_order_id))
     local = (
         check_local_bookkeeping(lookup.bot, client_order_id, lookup.order)
         if lookup.bot is not None
