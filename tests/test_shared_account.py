@@ -709,6 +709,34 @@ class TrendPartialStopFillTestCase(SharedAccountTestBase):
         self.assertAlmostEqual(closed["dust_qty"], 0.00005, places=9)
         self.assertTrue(any("Staub" in m for m in self.messages), self.messages)
 
+    def test_dust_on_btceur_is_reported_in_euro(self):
+        """
+        Symbolbindung (28.09.2026): Wert und Ergebnis des Staubs in der
+        Quote-Waehrung des Paars aus exchangeInfo - bisher stand dort fest
+        "USDT", auch wenn der Bot in Euro handelt.
+        """
+        self.seed_dca_holdings()
+        trend = self.start_trend(symbol="BTCEUR")
+        entry = self.exchange.prices["BTCEUR"]
+        trend._open_position(entry)
+        trade = trend._ledger.open_position()
+        self.exchange.fill_stop(trade["stop_loss_order_id"], trade["quantity"] - 0.00005)
+        self.exchange.prices["BTCEUR"] = entry * 0.85  # Rest ~1,8 EUR < 5,00
+
+        with self.assertLogs("trend_bot", level="WARNING") as logs:
+            trend.execute_once()
+
+        closed = trend._ledger._read()[0]
+        self.assertAlmostEqual(closed["dust_qty"], 0.00005, places=9)
+        dust_messages = [m for m in self.messages if "Staub" in m]
+        self.assertEqual(len(dust_messages), 1, self.messages)
+        dust_log = [line for line in logs.output if "TREND-STAUB" in line]
+        self.assertEqual(len(dust_log), 1, logs.output)
+        for text in (dust_messages[0], dust_log[0]):
+            self.assertIn("EUR", text)
+            self.assertIn("BTC", text)
+            self.assertNotIn("USDT", text)
+
 
 # ---------------------------------------------------------------------------
 # K-B: kein zweiter Verkauf, solange der erste ungeklaert ist

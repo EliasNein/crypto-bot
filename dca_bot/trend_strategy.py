@@ -530,7 +530,9 @@ class TrendFollowingStrategy:
         sellable = quantize_quantity(quantity, rules.step_size)
         return sellable <= 0 or sellable * price < rules.min_notional
 
-    def _close_with_dust(self, open_trade: dict, price: float, log_prefix: str = "") -> None:
+    def _close_with_dust(
+        self, open_trade: dict, price: float, rules, log_prefix: str = ""
+    ) -> None:
         """
         Schließt eine Position, deren Rest nach einer Teilfüllung nicht mehr
         verkaufbar ist (K-A, Entscheidung 3 vom 27.09.2026). Ohne diese
@@ -542,6 +544,10 @@ class TrendFollowingStrategy:
         Ledger; gemeldet wird er per Log und Telegram. Der Erlös ist allein
         der der Teilfüllung(en). Ausstiegsgrund stop_loss mit Latch - es
         hat ein Stop-Loss-Ereignis stattgefunden.
+
+        Menge und Wert des Rests werden in Base- und Quote-Asset des Paars
+        aus exchangeInfo (`rules`) angegeben - bis zur Symbolbindung vom
+        28.09.2026 stand hier fest "USDT", auf BTCEUR waeren es Euro.
         """
         dust = open_quantity(open_trade)
         partial_qty = float(open_trade.get("partial_exit_qty") or 0.0)
@@ -561,22 +567,24 @@ class TrendFollowingStrategy:
         )
         logger.warning(
             "%s[TREND-STAUB] Position %s geschlossen: nach der Teilfüllung "
-            "bleiben %.8f %s (~%.2f USDT), unter dem Mindestvolumen und damit "
+            "bleiben %.8f %s (~%.2f %s), unter dem Mindestvolumen und damit "
             "nicht verkaufbar. Der Rest bleibt als Staub auf dem Konto "
-            "(dust_qty im Ledger). Realisiert %.2f.",
+            "(dust_qty im Ledger). Realisiert %.2f %s.",
             log_prefix,
             open_trade["id"],
             dust,
-            self._config.symbol,
+            rules.base_asset,
             dust * price,
+            rules.quote_asset,
             realized_pnl,
+            rules.quote_asset,
         )
         send_notification(
             f"{log_prefix}[TREND-AUSSTIEG] (Stop-Loss, Teilfüllung): "
             f"{partial_qty:.8f} {self._config.symbol} @ {exit_price:.2f} verkauft, "
-            f"realisiert: {realized_pnl:+.2f}. Rest {dust:.8f} (~{dust * price:.2f} "
-            "USDT) liegt unter dem Mindestvolumen und bleibt als Staub auf dem "
-            "Konto."
+            f"realisiert: {realized_pnl:+.2f} {rules.quote_asset}. Rest {dust:.8f} "
+            f"{rules.base_asset} (~{dust * price:.2f} {rules.quote_asset}) liegt unter "
+            "dem Mindestvolumen und bleibt als Staub auf dem Konto."
         )
         loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
         self._stop_loss.pause(
@@ -711,7 +719,7 @@ class TrendFollowingStrategy:
         if float(open_trade.get("partial_exit_qty") or 0.0) > 0:
             reason = "stop_loss"
             if self._remainder_is_dust(open_quantity(open_trade), price, rules):
-                self._close_with_dust(open_trade, price)
+                self._close_with_dust(open_trade, price, rules)
                 return
         sell_quantity = open_quantity(open_trade)
 
@@ -773,7 +781,7 @@ class TrendFollowingStrategy:
             # Latch-Datei, dem vorgesehenen Anker eines spaeteren
             # automatischen Resets (trading-bot-projekt.md 6i, Punkt 16).
             exit_price = average_fill_price(order, fallback=price)
-            # Netto, also abzüglich der in USDT abgerechneten
+            # Netto, also abzüglich der in der Quote-Währung abgerechneten
             # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
             proceeds = net_proceeds(order, rules, fallback=sell_quantity * price)
         else:
@@ -1218,7 +1226,7 @@ class TrendFollowingStrategy:
             rules = self._client.get_symbol_trading_rules(self._config.symbol)
             if self._remainder_is_dust(open_quantity(open_trade), limit_price, rules):
                 price = self._client.get_current_price(self._config.symbol)
-                self._close_with_dust(open_trade, price, log_prefix)
+                self._close_with_dust(open_trade, price, rules, log_prefix)
                 return
 
         stop_order = self._client.place_stop_loss_limit_sell(
