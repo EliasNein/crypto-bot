@@ -51,6 +51,14 @@ Mutationsproben gehören zu jeder sicherheitsrelevanten Änderung.
   Log-Einträge kommen ins „Log ab 29.09.2026“, nicht ins Archiv.
 - Commit erst nach meiner Freigabe, gepusht wird nur auf ausdrückliche Bitte
 
+## Umgang mit fehlgeschlagenen Befehlen
+Schlägt ein Befehl fehl (Anmeldung, Zugriff, Berechtigung), NIEMALS
+selbstständig einen alternativen Weg suchen (anderes Programm, anderer
+Agent, anderer Pfad). Stattdessen: anhalten, den Fehler zeigen, auf
+Anweisung warten. Das gilt auch, wenn die grundsätzliche Aktion (z.B.
+"push") bereits freigegeben war - eine Freigabe deckt den erwarteten Weg,
+nicht einen selbst gefundenen Ersatzweg.
+
 ## Umfang des Einlesens
 Nicht bei jeder Aufgabe alles lesen. Zwei Modi:
 
@@ -64,3 +72,5 @@ Nicht bei jeder Aufgabe alles lesen. Zwei Modi:
   verwende. Dann wie bisher: alles lesen, nichts überspringen.
 
 Im Zweifel nachfragen, welcher Modus gemeint ist, statt zu raten.
+
+Nur ich Pushe!
