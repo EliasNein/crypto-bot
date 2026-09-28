@@ -12,3 +12,4 @@ STOP_GRID
 STOP_TREND
 STOP_ALLOCATOR
 STOP_ALL
+.claude/settings.local.json
