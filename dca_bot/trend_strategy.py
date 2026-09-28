@@ -229,6 +229,7 @@ class TrendFollowingStrategy:
             quote_spent=quote_spent,
             dry_run=not self._config.trading_enabled,
             client_order_id=order.get("clientOrderId") if order else None,
+            symbol=self._config.symbol,
         )
 
         # Ledger-Eintrag SOFORT nach dem bestätigten Kauf - bewusst VOR
@@ -921,7 +922,7 @@ class TrendFollowingStrategy:
         (Systemcheck vom 27.09.2026, K-B/W-B).
         """
         return self._client.pending_orders.entries_for(
-            side="SELL", trade_id=open_trade["id"]
+            side="SELL", symbol=self._config.symbol, trade_id=open_trade["id"]
         )
 
     def _settle_unclear_sell(
@@ -1821,6 +1822,7 @@ class TrendFollowingStrategy:
             quote_spent=quote_spent,
             dry_run=False,
             client_order_id=pending.client_order_id,
+            symbol=symbol,
         )
         self._ledger.record_entry(trade)
 
@@ -2202,7 +2204,9 @@ class TrendFollowingStrategy:
             # Ein Einstieg mit ungeklaertem Ausgang kann eine offene Position
             # sein, die das Ledger noch nicht kennt - ein zweiter Kauf braeche
             # die Ein-Positions-Regel (Systemcheck vom 27.09.2026, K-B).
-            unclear_buys = self._client.pending_orders.entries_for(side="BUY")
+            unclear_buys = self._client.pending_orders.entries_for(
+                side="BUY", symbol=self._config.symbol
+            )
             if unclear_buys:
                 logger.warning(
                     "[TREND-EINSTIEG-UNGEKLAERT] Einstiegssignal fuer %s, aber "

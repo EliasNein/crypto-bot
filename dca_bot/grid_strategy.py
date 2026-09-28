@@ -281,7 +281,7 @@ class GridTradingStrategy:
         die Reconciliation.
         """
         pending = self._client.pending_orders.entries_for(
-            side="SELL", position_id=record["id"]
+            side="SELL", symbol=self._config.symbol, position_id=record["id"]
         )
         if not pending:
             return False
@@ -491,7 +491,9 @@ class GridTradingStrategy:
         steht noch) erst, wenn die Reconciliation ihn geklärt hat.
         """
         unclear = bool(
-            self._client.pending_orders.entries_for(side="SELL", position_id=record["id"])
+            self._client.pending_orders.entries_for(
+                side="SELL", symbol=self._config.symbol, position_id=record["id"]
+            )
         )
         follow_up = (
             "Ausgang UNKLAR - kein neuer Versuch, bis Binance ihn bestätigt."
@@ -531,7 +533,9 @@ class GridTradingStrategy:
         # K-B): war der Kauf durchgegangen, wuerde ein erneutes Durchqueren
         # sonst ein zweites Mal kaufen. Die Reconciliation traegt ihn nach
         # oder verwirft den Eintrag - danach ist die Stufe wieder regulaer.
-        for pending in self._client.pending_orders.entries_for(side="BUY"):
+        for pending in self._client.pending_orders.entries_for(
+            side="BUY", symbol=self._config.symbol
+        ):
             level = pending.context.get("level_index")
             if isinstance(level, int):
                 occupied_levels.add(level)
@@ -632,6 +636,7 @@ class GridTradingStrategy:
                 quote_spent=quote_spent,
                 dry_run=not self._config.trading_enabled,
                 client_order_id=order.get("clientOrderId") if order else None,
+                symbol=self._config.symbol,
             )
             self._ledger.record_buy(position)
             # Erst mit dem Kauf im Ledger ist die Order-Frage erledigt (W-A).
@@ -823,6 +828,7 @@ class GridTradingStrategy:
             quote_spent=quote_spent,
             dry_run=False,
             client_order_id=pending.client_order_id,
+            symbol=symbol,
         )
         self._ledger.record_buy(position)
 

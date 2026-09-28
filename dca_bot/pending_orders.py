@@ -411,22 +411,38 @@ class PendingOrderStore:
             return
         self._write_payload(remaining)
 
-    def entries_for(self, *, side: str | None = None, kind: str | None = None, **context) -> list[PendingOrder]:
+    def entries_for(
+        self,
+        *,
+        side: str | None = None,
+        kind: str | None = None,
+        symbol: str | None = None,
+        **context,
+    ) -> list[PendingOrder]:
         """
         Offene Eintraege, die zu einer bestimmten Position gehoeren - z.B.
-        `entries_for(side="SELL", position_id=...)`.
+        `entries_for(side="SELL", symbol="BTCUSDT", position_id=...)`.
 
         Grundlage der Sperre aus K-B (Systemcheck vom 27.09.2026): Solange
         fuer eine Position eine Order mit ungeklaertem Ausgang existiert,
         startet kein Bot fuer sie eine neue Aktion. Die Kontext-Felder
         schreibt die Strategie selbst beim Platzieren (siehe die
         `context=`-Argumente der place_*-Aufrufe).
+
+        `symbol` (Symbolbindung vom 28.09.2026): Ein Eintrag zu einem
+        anderen Paar gehoert nicht zu dieser Position, auch wenn Stufe oder
+        Trade-ID zufaellig passen - eine alte BTCUSDT-Kaufstufe 3 ist nicht
+        die Stufe 3 eines BTCEUR-Grids. Beim Start verhindert die
+        Symbolpruefung (symbol_guard.py) ohnehin, dass ein Bot mit fremden
+        Eintraegen laeuft; der Filter ist die zweite Sicherung dahinter.
         """
         result = []
         for entry in self.all():
             if side is not None and entry.side != side:
                 continue
             if kind is not None and entry.kind != kind:
+                continue
+            if symbol is not None and entry.symbol != symbol:
                 continue
             if all(entry.context.get(key) == value for key, value in context.items()):
                 result.append(entry)
