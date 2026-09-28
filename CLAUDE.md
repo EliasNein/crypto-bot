@@ -7,7 +7,11 @@ Vier eigenständige, testnet-only Python-Bausteine gegen Binance:
 - Trend: EMA-20/50-Crossover, long-only, echte STOP_LOSS_LIMIT-Order an der Börse
 - Allocator: berechnet nur den Trend-Anteil (0-1), platziert selbst nie Orders
 
-Details, Historie und offene Punkte: siehe trading-bot-projekt.md.
+Projektdokument: trading-bot-projekt.md - aktueller Stand und offene
+Punkte, Log ab 29.09.2026, technische Referenz (Abschnitt 7). Die
+Historie bis 28.09.2026 (Abschnitte 1-6i: Recherche, Reviews, Systemcheck,
+Symbolbindung) steht unverändert in trading-bot-projekt-archiv.md und wird
+nur bei Bedarf gelesen. Verweise wie „siehe 6g“ meinen das Archiv.
 
 ## Sicherheitsprinzipien (K1-K5, W1-W18, seit 16.09. abgeschlossen)
 - Dry-Run per Default, Notaus auf 5 unabhängigen Wegen
@@ -20,9 +24,9 @@ Details, Historie und offene Punkte: siehe trading-bot-projekt.md.
 - Homeserver: alle vier Bots live (Testnet). Code-Stand auf master siehe
   git log. ACHTUNG: Das ist nicht automatisch der Stand auf den Servern -
   deren tatsächlicher Commit-Hash steht in trading-bot-projekt.md,
-  Abschnitt 6g, im jüngsten Vermerk dazu (Stand 28.09.2026: 10ce096 auf
-  beiden Servern, genannt unter „Symbolbindung“, „Rückweg auf den alten
-  Code“)
+  Abschnitt „Aktueller Stand und offene Punkte“, unter „Deploy-Stand“
+  (Stand 28.09.2026: 10ce096 auf beiden Servern). Neue Deploys werden
+  dort vermerkt.
 - VPS: nur DCA live, endet 12.10.2026
 - Für echtes Geld: BTCEUR (nicht USDT, im EWR nicht handelbar)
 - Kapital geplant: 150€ Grid / 150€ Allocator-Topf (DCA+Trend)
@@ -38,10 +42,13 @@ Mutationsproben gehören zu jeder sicherheitsrelevanten Änderung.
 - Jede neue Sicherheitsprüfung bekommt eine Mutation zum Nachweis
 - Änderungen an Doku als datierte Vermerke ergänzen, nie alte Einträge
   überschreiben oder löschen
-- Ausnahme: Abschnitt 7 ('Technische Referenz') beschreibt den aktuellen
-  Stand und wird direkt korrigiert, nie mit datierten Vermerken versehen -
-  dort zählt nur, was jetzt gilt. Die Regel zu datierten Vermerken gilt für
-  die chronologischen Log-Abschnitte (6, 6g und ähnliche).
+- Ausnahme: Abschnitt 7 ('Technische Referenz') und der Abschnitt
+  „Aktueller Stand und offene Punkte“ beschreiben den aktuellen Stand und
+  werden direkt korrigiert, nie mit datierten Vermerken versehen - dort
+  zählt nur, was jetzt gilt. Die Regel zu datierten Vermerken gilt für die
+  chronologischen Log-Abschnitte: „Log ab 29.09.2026“ in
+  trading-bot-projekt.md und die Abschnitte 6, 6g usw. im Archiv. Neue
+  Log-Einträge kommen ins „Log ab 29.09.2026“, nicht ins Archiv.
 - Commit erst nach meiner Freigabe, gepusht wird nur auf ausdrückliche Bitte
 
 ## Umfang des Einlesens

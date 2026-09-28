@@ -452,8 +452,9 @@ python -m dca_bot.trend_backtest       # Trend-Following
 python -m dca_bot.allocator_backtest   # Allocator: kombiniert vs. isoliert
 ```
 
-Ergebnisse und ihre Einordnung stehen in `trading-bot-projekt.md`
-(Abschnitte 5a, 6, 6f und 6i; der Caveat zur Grid-Preisspanne in 7.2).
+Ergebnisse und ihre Einordnung stehen in `trading-bot-projekt-archiv.md`
+(Abschnitte 5a, 6, 6f und 6i), der Caveat zur Grid-Preisspanne in
+`trading-bot-projekt.md` 7.2.
 
 ### 8.3 Einmalige Datenkorrektur (Dry-Run-Beträge)
 
@@ -465,8 +466,8 @@ python -m dca_bot.fix_dry_run_quote_spent --apply    # schreibt
 Einmaliges Korrektur-Werkzeug zum Fund vom 22.09.2026: rechnet
 `quote_spent` und `realized_pnl` betroffener Dry-Run-Einträge neu.
 **Ohne `--apply` wird nichts geschrieben**, nur berichtet. Hintergrund
-und Eigenschaften: `trading-bot-projekt.md` Abschnitt 6g („Folgefund aus
-K3“).
+und Eigenschaften: `trading-bot-projekt-archiv.md` Abschnitt 6g
+(„Folgefund aus K3“).
 
 ### 8.4 Orders nachschlagen (z.B. nach `[ORDER-UNKLAR]`)
 
@@ -530,17 +531,27 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_allocator_backtest` | Allocator-Backtest: Stop-Loss-Sperre und Konsistenz mit dem Trend-Backtest |
 
 Was die einzelnen Tests prüfen und wie ihre Wirksamkeit gemessen wurde,
-steht bei den jeweiligen Fixes in `trading-bot-projekt.md` (6f, 6g, 6i,
-ergänzend 7.6).
+steht bei den jeweiligen Fixes in `trading-bot-projekt-archiv.md` (6f, 6g,
+6i), für neuere im „Log ab 29.09.2026“ in `trading-bot-projekt.md`,
+ergänzend dort 7.6.
 
 ## 10. Weiterführende Doku
 
-`trading-bot-projekt.md` ist das Projektdokument mit Planung, Recherche
-und dem Fortschritts-Log:
+Das Projektdokument besteht seit dem 29.09.2026 aus zwei Dateien.
+
+`trading-bot-projekt.md`, der aktuelle Stand:
+
+- **Aktueller Stand und offene Punkte:** Betrieb, Deploy-Stand, Termine,
+  Vorbedingungen für echtes Kapital, zurückgestellte Punkte
+- **Log ab 29.09.2026:** das laufende Fortschritts-Log
+- **Abschnitt 7:** Technische Referenz - alle Sicherheitsmechanismen und
+  die Kernlogik der vier Bausteine im Detail
+
+`trading-bot-projekt-archiv.md`, Planung, Recherche und das Log bis
+28.09.2026, unverändert verschoben:
 
 - **Abschnitt 5 / 5a:** Recherche zu den Strategien, Backtest des Allocators
 - **Abschnitt 6:** Fortschritts-Log inkl. Backtest-Ergebnisse von DCA, Grid und Trend
 - **Abschnitte 6f-6i:** Stop-Loss an der Börse, Sicherheitsreview mit allen
-  Fixes (K1-K5, W1-W18), Verbesserungsvorschläge
-- **Abschnitt 7:** Technische Referenz - alle Sicherheitsmechanismen und
-  die Kernlogik der vier Bausteine im Detail
+  Fixes (K1-K5, W1-W18), Verbesserungsvorschläge, Systemcheck vom
+  27.09.2026 und Symbolbindung
