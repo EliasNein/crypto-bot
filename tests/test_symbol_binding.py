@@ -27,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from dca_bot import allocator as allocator_module
+from dca_bot import symbol_guard
 from dca_bot.allocator import Allocator
 from dca_bot.allocator_config import AllocatorConfig
 from dca_bot.grid_config import GridConfig
@@ -246,6 +247,105 @@ class TrendSymbolTestCase(_TmpDir):
                 self.assertLogs("trend_bot", level="WARNING"):
             strategy.execute_once()
         self.assertIsNone(strategy._ledger.open_position())
+
+
+class LegacySymbolTestCase(_TmpDir):
+    """
+    Altbestand ohne Feld `symbol` (Entscheidung E1 vom 28.09.2026, Option c):
+    gilt als BTCUSDT, wird aber nie nachtraeglich gestempelt.
+    """
+
+    def test_the_legacy_symbol_is_btcusdt(self):
+        """
+        Keine Annahme, sondern Projektgeschichte: Jedes Ledger, das es am
+        28.09.2026 gibt, stammt aus BTCUSDT-Laeufen (trading-bot-projekt.md
+        6a-6h). Aendert jemand die Konstante, gaelte der Altbestand der
+        Server ploetzlich als anderes Paar.
+        """
+        self.assertEqual(symbol_guard.LEGACY_SYMBOL, "BTCUSDT")
+
+    def test_missing_or_null_field_counts_as_legacy(self):
+        for entry in ({}, {"symbol": None}):
+            with self.subTest(entry=entry):
+                self.assertEqual(symbol_guard.effective_symbol(entry), "BTCUSDT")
+                self.assertTrue(symbol_guard.is_legacy(entry))
+
+    def test_a_set_field_is_taken_as_is(self):
+        self.assertEqual(symbol_guard.effective_symbol({"symbol": "BTCEUR"}), "BTCEUR")
+        self.assertFalse(symbol_guard.is_legacy({"symbol": "BTCEUR"}))
+
+    def test_a_broken_field_is_not_waved_through_as_legacy(self):
+        """
+        Ein leerer oder falsch typisierter Wert entsteht nur durch
+        manuelles Editieren. Er darf nicht still als BTCUSDT gelten - sonst
+        passte ein kaputtes Feld zu jedem BTCUSDT-Bot.
+        """
+        for value in ("", "   ", 5, ["BTCUSDT"]):
+            with self.subTest(value=value):
+                result = symbol_guard.effective_symbol({"symbol": value})
+                self.assertNotEqual(result, "BTCUSDT")
+                self.assertNotEqual(result, "BTCEUR")
+
+    def test_a_legacy_grid_position_is_sold_normally_and_not_stamped(self):
+        """
+        Die laufenden Homeserver-Ledger: Der neue Code verkauft eine alte
+        Position wie bisher und schreibt dabei KEIN Symbol nachtraeglich
+        hinein - die Regel gilt beim Lesen, die Datei bleibt, wie sie war.
+        """
+        path = self.tmp / "grid_positions.json"
+        legacy = {
+            "id": "alt-1", "level_index": 3, "buy_price": 74_000.0,
+            "target_sell_price": 75_110.0, "quantity": 0.0002, "quote_spent": 14.8,
+            "bought_at": "2026-09-15T13:38:07+00:00", "dry_run": False,
+            "client_order_id": None, "status": "open", "sell_price": None,
+            "sold_at": None, "realized_pnl": None,
+        }
+        path.write_text(json.dumps([legacy]), encoding="utf-8")
+        config = GridConfig(
+            api_key="test", api_secret="test", symbol="BTCUSDT", lower_limit=70_000.0,
+            upper_limit=90_000.0, grid_spacing_pct=1.5, amount_per_level=15.0,
+            trading_enabled=True, kill_switch_file=self._path("STOP_GRID_UNUSED"),
+            state_file=str(path), stop_loss_state_file=self._path("grid_sl.json"),
+        )
+        client = FakeGridClient(True, 75_200.0)
+        strategy = GridTradingStrategy(config, client)
+        strategy._process_sells(75_200.0)
+
+        (record,) = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["status"], "closed")
+        self.assertNotIn("symbol", record)
+
+    def test_the_open_dry_run_trend_position_of_15_09_is_treated_as_before(self):
+        """
+        Die offene Dry-Run-Trend-Position vom 15.09.2026 (6h) hat kein
+        Symbol. Mit BTCUSDT konfiguriert laeuft fuer sie alles wie bisher:
+        ein faelliger Ausstieg bleibt simuliert, und nichts wird gestempelt.
+        """
+        path = self.tmp / "trend_ledger.json"
+        legacy = {
+            "id": "dry-15-09", "entry_price": 115_000.0,
+            "entry_time": "2026-09-15T12:19:01+00:00", "quantity": 0.00013,
+            "quote_spent": 14.95, "dry_run": True, "client_order_id": None,
+            "stop_loss_order_id": None, "stop_limit_price": None,
+            "uncertain_cycles": 0, "unprotected_cycles": 0, "status": "open",
+            "exit_price": None, "exit_time": None, "exit_reason": None, "realized_pnl": None,
+        }
+        path.write_text(json.dumps([legacy]), encoding="utf-8")
+        config = TrendConfig(
+            api_key="test", api_secret="test", symbol="BTCUSDT", trading_enabled=True,
+            kill_switch_file=self._path("STOP_TREND_UNUSED"), state_file=str(path),
+            stop_loss_state_file=self._path("trend_sl.json"),
+        )
+        client = FakeTradingClient(True, 116_000.0)
+        strategy = TrendFollowingStrategy(config, client)
+        strategy._seeded = True
+        with self.assertLogs("trend_bot", level="WARNING"):
+            strategy._close_position(strategy._ledger.open_position(), 116_000.0, "signal")
+
+        (record,) = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["status"], "closed")
+        self.assertEqual(client.market_sell_calls, [], "Dry-Run-Position wird nie echt verkauft")
+        self.assertNotIn("symbol", record)
 
 
 class ReconciledEntrySymbolTestCase(ReconciliationTestBase):
