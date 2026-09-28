@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    DEFAULT_SYMBOL,
+    check_allocator_symbol,
     GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_bool,
@@ -42,7 +44,7 @@ class Config:
     use_testnet: bool = True
 
     # --- DCA-Strategie ---
-    symbol: str = "BTCUSDT"       # Handelspaar
+    symbol: str = DEFAULT_SYMBOL  # Handelspaar (live: BTCEUR, siehe config_guard.DEFAULT_SYMBOL)
     quote_amount: float = 15.0    # Betrag in Quote-Währung (z.B. USDT) pro Kauf
     interval_hours: int = 24      # Kaufintervall in Stunden
 
@@ -152,12 +154,13 @@ def load_config() -> Config:
             "JEDEN Kauf blockieren und der Bot liefe dauerhaft leer."
         )
 
-    return Config(
+    config = Config(
         api_key=api_key,
         api_secret=api_secret,
         use_testnet=use_testnet,
         symbol=env_text(
-            "DCA_SYMBOL", "BTCUSDT", hint="Zum Beispiel BTCUSDT."
+            "DCA_SYMBOL", DEFAULT_SYMBOL,
+            hint="Zum Beispiel BTCEUR (echtes Geld) oder BTCUSDT (Testnet).",
         ),
         quote_amount=quote_amount,
         interval_hours=env_int("DCA_INTERVAL_HOURS", "24", gt=0),
@@ -191,3 +194,7 @@ def load_config() -> Config:
         # 0 schaltet den Heartbeat ab (siehe heartbeat.py).
         heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
     )
+    # Symbolbindung (28.09.2026, E4): das Paar muss zu dem passen, fuer das
+    # der Allocator rechnet - siehe config_guard.allocator_symbol_conflict.
+    check_allocator_symbol("DCA_SYMBOL")
+    return config

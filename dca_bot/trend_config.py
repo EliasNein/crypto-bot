@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    DEFAULT_SYMBOL,
+    check_allocator_symbol,
     GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_bool,
@@ -41,7 +43,7 @@ class TrendConfig:
     # Siehe config.py (DCA): kommt seit dem W12-Fix aus `USE_TESTNET`.
     use_testnet: bool = True
 
-    symbol: str = "BTCUSDT"
+    symbol: str = DEFAULT_SYMBOL
     ema_fast_period: int = 20
     ema_slow_period: int = 50
     min_gap_pct: float = 1.0        # Trendstärke-Filter: Mindestabstand der EMAs in %
@@ -131,11 +133,15 @@ def load_trend_config() -> TrendConfig:
             f"(aktuell: fast={ema_fast_period}, slow={ema_slow_period})."
         )
 
-    return TrendConfig(
+    config = TrendConfig(
         api_key=api_key,
         api_secret=api_secret,
         use_testnet=use_testnet,
-        symbol=env_text("TREND_SYMBOL", "BTCUSDT", hint="Zum Beispiel BTCUSDT."),
+        symbol=env_text(
+            "TREND_SYMBOL",
+            DEFAULT_SYMBOL,
+            hint="Zum Beispiel BTCEUR (echtes Geld) oder BTCUSDT (Testnet).",
+        ),
         ema_fast_period=ema_fast_period,
         ema_slow_period=ema_slow_period,
         # 0 ist zulässig und heißt "kein Trendstärke-Filter" - dann zählt
@@ -176,3 +182,7 @@ def load_trend_config() -> TrendConfig:
         telegram_chat_id=telegram_chat_id,
         heartbeat_interval_hours=env_float("HEARTBEAT_INTERVAL_HOURS", "24.0", ge=0),
     )
+    # Symbolbindung (28.09.2026, E4): das Paar muss zu dem passen, fuer das
+    # der Allocator rechnet - siehe config_guard.allocator_symbol_conflict.
+    check_allocator_symbol("TREND_SYMBOL")
+    return config

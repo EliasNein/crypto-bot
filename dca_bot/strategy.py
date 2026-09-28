@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from . import symbol_guard
 from .allocator_signals import MIN_EFFECTIVE_QUOTE_AMOUNT, read_allocation_fraction
 from .binance_client import TradingClient
 from .config import Config
@@ -74,6 +75,38 @@ class DCAStrategy:
         herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
         """
         self._ledger.verify_readable()
+
+    def verify_symbol_binding(self) -> None:
+        """
+        Prueft beim Bot-Start, ob Ledger, Pending-Datei, Stop-Loss-Sperre und
+        - bei aktivem Opt-in - der Allocator-Zustand zu DCA_SYMBOL gehoeren
+        (Symbolbindung vom 28.09.2026, siehe symbol_guard.py). Wirft
+        `SymbolMismatch`.
+
+        Beim DCA-Bot trug jeder Kauf schon immer sein Symbol. Kaeufe eines
+        anderen Paars wurden aber still ignoriert (TradeLedger.position(),
+        spent_on_day() und last_trade_time() filtern danach) und fielen
+        damit aus Stop-Loss-Kostenbasis, Tageslimit, W2-Wartezeit und
+        Bestandsabgleich heraus. Jetzt startet der Bot damit nicht.
+        """
+        symbol_guard.enforce(
+            symbol_guard.bot_findings(
+                symbol_var="DCA_SYMBOL",
+                expected=self._config.symbol,
+                ledger_label="DCA-Ledger",
+                ledger_path=self._config.state_file,
+                ledger_records=self._ledger.records(),
+                pending_store=self._client.pending_orders,
+                latch_path=self._config.stop_loss_state_file,
+                latch_reset="python -m dca_bot.reset_stop_loss",
+                allocator_path=self._config.allocator_state_file,
+            ),
+            bot_label="DCA-Bot",
+            symbol_var="DCA_SYMBOL",
+            expected=self._config.symbol,
+            logger=logger,
+            notify=send_notification,
+        )
 
     def check_balance_on_startup(self) -> None:
         """
@@ -237,7 +270,9 @@ class DCAStrategy:
         # nur aktiv, wenn DCA_ALLOCATOR_STATE_FILE explizit gesetzt ist -
         # sonst read_allocation_fraction() -> None und amount bleibt
         # unverändert (exakt das Verhalten ohne Allocator).
-        trend_fraction = read_allocation_fraction(self._config.allocator_state_file)
+        trend_fraction = read_allocation_fraction(
+            self._config.allocator_state_file, self._config.symbol
+        )
         if trend_fraction is not None:
             amount = self._config.quote_amount * (1 - trend_fraction)
             logger.info(

@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from . import symbol_guard
 from .balance_guard import (
     SELL_INSUFFICIENT,
     BalanceSnapshot,
@@ -665,6 +666,36 @@ class GridTradingStrategy:
         herum. Ein beschaedigtes Ledger MUSS den Start verhindern.
         """
         self._ledger.verify_readable()
+
+    def verify_symbol_binding(self) -> None:
+        """
+        Prueft beim Bot-Start, ob Ledger, Pending-Datei und Stop-Loss-Sperre
+        zu GRID_SYMBOL gehoeren (Symbolbindung vom 28.09.2026, siehe
+        symbol_guard.py). Wirft `SymbolMismatch`.
+
+        Ohne diese Pruefung haette ein Grid-Bot mit geaendertem GRID_SYMBOL
+        alte Positionen still als Positionen des neuen Paars weitergefuehrt:
+        Verkaufsziele in USDT gegen einen EUR-Kurs, Verkauf gegen EUR,
+        realisierte PnL aus EUR-Erloes minus USDT-Einsatz, und die alten
+        Stufen-Indizes belegten Stufen des neuen Grids.
+        """
+        symbol_guard.enforce(
+            symbol_guard.bot_findings(
+                symbol_var="GRID_SYMBOL",
+                expected=self._config.symbol,
+                ledger_label="Grid-Ledger",
+                ledger_path=self._config.state_file,
+                ledger_records=self._ledger.records(),
+                pending_store=self._client.pending_orders,
+                latch_path=self._config.stop_loss_state_file,
+                latch_reset="python -m dca_bot.reset_grid_stop_loss",
+            ),
+            bot_label="Grid-Bot",
+            symbol_var="GRID_SYMBOL",
+            expected=self._config.symbol,
+            logger=logger,
+            notify=send_notification,
+        )
 
     def check_balance_on_startup(self) -> None:
         """

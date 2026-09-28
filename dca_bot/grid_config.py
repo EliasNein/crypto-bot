@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 from .config_guard import (
+    DEFAULT_SYMBOL,
     GLOBAL_KILL_SWITCH_NAME,
     ConfigError,
     env_bool,
@@ -43,7 +44,7 @@ class GridConfig:
     use_testnet: bool = True
 
     # --- Grid-Strategie ---
-    symbol: str = "BTCUSDT"
+    symbol: str = DEFAULT_SYMBOL
     lower_limit: float = 70000.0    # Untere Grid-Grenze in Quote-Währung
     upper_limit: float = 90000.0    # Obere Grid-Grenze in Quote-Währung
     grid_spacing_pct: float = 1.5   # Abstand zwischen den Grid-Stufen in %
@@ -137,7 +138,11 @@ def load_grid_config() -> GridConfig:
         api_key=api_key,
         api_secret=api_secret,
         use_testnet=use_testnet,
-        symbol=env_text("GRID_SYMBOL", "BTCUSDT", hint="Zum Beispiel BTCUSDT."),
+        symbol=env_text(
+            "GRID_SYMBOL",
+            DEFAULT_SYMBOL,
+            hint="Zum Beispiel BTCEUR (echtes Geld) oder BTCUSDT (Testnet).",
+        ),
         lower_limit=lower_limit,
         upper_limit=upper_limit,
         grid_spacing_pct=grid_spacing_pct,

@@ -34,6 +34,7 @@ from .heartbeat_status import HeartbeatStatusWriter
 from .notifier import init as init_notifier
 from .notifier import send_notification
 from .process_lock import BotAlreadyRunning, ProcessLock
+from .symbol_guard import SymbolMismatch
 from .risk import BotHalted, KillSwitch
 from .version import get_code_version
 
@@ -126,6 +127,19 @@ def main() -> None:
 
     client = TradingClient(config)
     allocator = Allocator(config, client)
+
+    # Symbolbindung (28.09.2026): Gehoert der eigene Zustand zu einem
+    # anderen Paar als ALLOCATOR_SYMBOL, startet der Allocator nicht.
+    # Exit-Code 0 wie bei Konfigurationsfehlern, also keine
+    # Neustartschleife. Vor einem Neustart pruefbar mit
+    # python -m dca_bot.symbol_guard --report.
+    try:
+        allocator.verify_symbol_binding()
+    except SymbolMismatch as exc:
+        logger.error("%s", exc)
+        send_notification(f"[SYMBOL-KONFLIKT] {exc}")
+        return
+
     kill_switch = KillSwitch(config.kill_switch_file, env_var_name="ALLOCATOR_HALT")
 
     heartbeat = Heartbeat("Kapital-Allocator", config.heartbeat_interval_hours)

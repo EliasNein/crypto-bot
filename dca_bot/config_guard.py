@@ -96,6 +96,67 @@ LIVE_CONFIRMED_VALUES_VAR = "LIVE_CONFIRMED_VALUES"
 
 _BANNER_WIDTH = 66
 
+# Default-Paar aller vier Bots, solange *_SYMBOL nicht gesetzt ist. Fuer
+# echtes Geld nicht handelbar - Binance hat im EWR alle USDT-Spot-Paare
+# entfernt, live wird BTCEUR gehandelt (Entscheidung vom 28.09.2026, siehe
+# trading-bot-projekt.md 6h). Der Default bleibt trotzdem BTCUSDT: Er ist
+# das Testnet-Paar beider Server, und ein Update darf deren Verhalten nicht
+# veraendern.
+DEFAULT_SYMBOL = "BTCUSDT"
+
+# Welche Bots ihr Paar mit dem Allocator teilen muessen (Symbolbindung vom
+# 28.09.2026, Entscheidung E4): Eine auf BTCUSDT gerechnete Trendstaerke
+# soll keine BTCEUR-Order skalieren. DCA und Trend nur mit aktivem Opt-in
+# (*_ALLOCATOR_STATE_FILE gesetzt) - ohne lesen sie die Zuteilung nicht.
+# Der Allocator prueft immer gegen beide.
+_ALLOCATOR_CONSUMERS = (("DCA_SYMBOL", "DCA_ALLOCATOR_STATE_FILE"),
+                        ("TREND_SYMBOL", "TREND_ALLOCATOR_STATE_FILE"))
+
+
+def _symbol_value(var: str) -> str:
+    raw = os.getenv(var)
+    return (DEFAULT_SYMBOL if raw is None else raw).strip()
+
+
+def allocator_symbol_conflict(own_var: str) -> str | None:
+    """
+    Die Meldung, falls das Paar von `own_var` nicht zum Allocator passt -
+    sonst None. Liest nur die Umgebung (alle vier Prozesse teilen sich die
+    .env), damit auch symbol_guard --report dieselbe Regel anwendet.
+    """
+    if own_var == "ALLOCATOR_SYMBOL":
+        allocator = _symbol_value("ALLOCATOR_SYMBOL")
+        others = [(var, _symbol_value(var)) for var, _ in _ALLOCATOR_CONSUMERS]
+        bad = [f"{var}={value}" for var, value in others if value != allocator]
+        if not bad:
+            return None
+        return (
+            f"ALLOCATOR_SYMBOL={allocator} passt nicht zu {', '.join(bad)}. Die Zuteilung des "
+            "Allocators skaliert die Orders von DCA und Trend - alle drei muessen dasselbe "
+            "Paar handeln."
+        )
+    for var, opt_in_var in _ALLOCATOR_CONSUMERS:
+        if var != own_var:
+            continue
+        if not os.getenv(opt_in_var, "").strip():
+            return None
+        own, allocator = _symbol_value(var), _symbol_value("ALLOCATOR_SYMBOL")
+        if own == allocator:
+            return None
+        return (
+            f"{var}={own}, aber ALLOCATOR_SYMBOL={allocator}, und {opt_in_var} ist gesetzt. "
+            "Die Zuteilung waere fuer ein anderes Paar gerechnet. ALLOCATOR_SYMBOL angleichen "
+            f"(fehlt die Zeile, gilt {DEFAULT_SYMBOL}) oder das Opt-in leeren."
+        )
+    return None
+
+
+def check_allocator_symbol(own_var: str) -> None:
+    """Wie allocator_symbol_conflict, aber als ConfigError - fuer die load_*-Funktionen."""
+    conflict = allocator_symbol_conflict(own_var)
+    if conflict:
+        raise ConfigError(conflict)
+
 
 class ConfigError(ValueError):
     """
