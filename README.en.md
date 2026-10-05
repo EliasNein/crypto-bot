@@ -1,7 +1,8 @@
 # Trading Bots (Binance Testnet)
 
-> English translation of `README.md`. The German original is authoritative;
-> this copy is not updated automatically and may lag behind. Log tags and
+> English translation of `README.md`, kept in sync with it (every change
+> lands in both files in the same commit). If they ever differ, the German
+> original is authoritative. Log tags and
 > messages (e.g. `[KAUF]`, `[NOTAUS]`) are quoted exactly as the code emits
 > them, i.e. in German. Dates use the original DD.MM.YYYY format.
 
