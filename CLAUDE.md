@@ -13,6 +13,9 @@ Historie bis 28.09.2026 (Abschnitte 1-6i: Recherche, Reviews, Systemcheck,
 Symbolbindung) steht unverändert in trading-bot-projekt-archiv.md und wird
 nur bei Bedarf gelesen. Verweise wie „siehe 6g“ meinen das Archiv.
 
+Englische Übersetzungen (README.en.md, trading-bot-project.en.md) sind
+Kopien, maßgeblich ist Deutsch; sie werden nicht automatisch nachgezogen.
+
 ## Sicherheitsprinzipien (K1-K5, W1-W18, seit 16.09. abgeschlossen)
 - Dry-Run per Default, Notaus auf 5 unabhängigen Wegen
 - Keine Order ohne Ledger-Eintrag (clientOrderId-Idempotenz, Reconciliation)
