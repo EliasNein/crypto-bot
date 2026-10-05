@@ -1,7 +1,8 @@
 # Trading Bot Project: Planning, Progress Log and Technical Reference
 
-> English translation of `trading-bot-projekt.md`. The German original is
-> authoritative; this copy is not updated automatically and may lag behind.
+> English translation of `trading-bot-projekt.md`, kept in sync with it
+> (every change lands in both files in the same commit). If they ever
+> differ, the German original is authoritative.
 > The archive `trading-bot-projekt-archiv.md` exists in German only. Quoted
 > titles of archive sections (e.g. 6g „Symbolbindung“) are left in German so
 > they can be found there. Log tags and messages (e.g. `[ORDER-UNKLAR]`) are
