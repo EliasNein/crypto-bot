@@ -33,9 +33,9 @@ gibt es nur auf Deutsch.
   git log. ACHTUNG: Das ist nicht automatisch der Stand auf den Servern -
   deren tatsächlicher Commit-Hash steht in trading-bot-projekt.md,
   Abschnitt „Aktueller Stand und offene Punkte“, unter „Deploy-Stand“
-  (Stand 28.09.2026: 10ce096 auf beiden Servern). Neue Deploys werden
+  (seit 29.09.2026: 980f3c3 auf dem Homeserver). Neue Deploys werden
   dort vermerkt.
-- VPS: nur DCA live, endet 12.10.2026
+- VPS: abgeschlossen seit 07.10.2026, Vertrag endet 12.10.2026
 - Für echtes Geld: BTCEUR (nicht USDT, im EWR nicht handelbar)
 - Kapital geplant: 150€ Grid / 150€ Allocator-Topf (DCA+Trend)
 

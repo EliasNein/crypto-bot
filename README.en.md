@@ -234,7 +234,8 @@ trading-bot/
 │   ├── reset_stop_loss.py         # CLI: reset the DCA stop-loss pause
 │   ├── reset_grid_stop_loss.py    # CLI: reset the grid stop-loss pause
 │   ├── reset_trend_stop_loss.py   # CLI: reset the trend stop-loss pause
-│   └── fix_dry_run_quote_spent.py # CLI: one-off correction of corrupted dry-run amounts
+│   ├── fix_dry_run_quote_spent.py # CLI: one-off correction of corrupted dry-run amounts
+│   └── close_dry_run_trend.py     # CLI: close the dry-run trend position in the ledger
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -506,6 +507,27 @@ DCA purchase while trading was active.) The script only reads: it uses
 the same client as the position audit (8.1), which structurally cannot
 place orders.
 
+### 8.5 Closing the dry-run trend position
+
+```bash
+python -m dca_bot.close_dry_run_trend                          # report only
+python -m dca_bot.close_dry_run_trend --apply --trade-id <id> --exit-price <price>
+```
+
+Closes the open **dry-run** position of the trend bot in the ledger
+(`exit_reason` = `manual_close`), so that the only trend slot becomes free
+for a real entry. No order is placed and **no stop-loss latch** is set.
+**Without `--apply` nothing is written.** With `--apply`, `--trade-id` and
+`--exit-price` are mandatory, the trend bot must be stopped (otherwise the
+tool aborts via its process lock), and a copy
+`trend_ledger.json.pre-close-<timestamp>` is made before writing. The tool
+refuses if the position is not `dry_run: true`, refers to an exchange
+order, there is not exactly one open position, the pending file has
+entries, the latch is active or the symbol check does not pass. The
+simulated `realized_pnl` never counts as a result anywhere. Background and
+server procedure: `trading-bot-project.en.md`, log from 29.09.2026 (entry
+of 07.10.2026).
+
 ## 9. Tests
 
 ```bash
@@ -534,6 +556,7 @@ correction.
 | `test_startup_balance_check`, `test_audit_positions` | Consistency check at startup, position audit |
 | `test_trend_auto_reset` | Analysis mode `--analyze-auto-reset` of the trend backtest |
 | `test_fix_dry_run_quote_spent` | One-off data correction of the dry-run amounts |
+| `test_close_dry_run_trend` | Closing the dry-run trend position: refusals, report, lock, no latch, real entry afterwards |
 | `test_request_timeout` | Request timeout of the grid bot |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat timestamp, rate limit for cycle errors |
 | `test_shared_account` | All bots on one shared account: partial fill, unclear sales, long run with ownership invariant |
