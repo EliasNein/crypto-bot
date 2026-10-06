@@ -1,7 +1,7 @@
 # Trading-Bot-Projekt: Planung, Fortschritts-Log und technische Referenz
 
-**Stand:** 29. September 2026
-**Status:** Testnet-Betrieb, kein Live-Geld. Der Sicherheitsreview (K1–K5, W1–W18, Infrastruktur) ist seit dem 16.09. abgeschlossen. Der Homeserver läuft faktisch seit dem 16.09.2026 als vollständiges System, mit allen vier Bausteinen und aktivem Allocator-Opt-in für DCA und Trend. Der aktuelle Trading-Status dort wurde am 25.09.2026 verifiziert (siehe 6h). Der formale Cutover (VPS-Abschaltung, finaler Snapshot) bleibt für den 05.10.2026 geplant. Bis zum Vertragsende am 12.10. läuft der VPS isoliert weiter, ohne Allocator. Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026. Seit dem Review sind mehrere Fund-und-Fix-Serien abgeschlossen: die Verbesserungsvorschläge (6i, 17.09.), die Dry-Run-Beträge (22.09.), die Code-Überprüfung vom 25.09. und der Systemcheck vom 27.09. mit K-A/K-B und W-A bis W-G (alle 6g). Die technische Referenz zum aktuellen Stand steht in Abschnitt 7.
+**Stand:** 7. Oktober 2026
+**Status:** Testnet-Betrieb, kein Live-Geld. Der Sicherheitsreview (K1–K5, W1–W18, Infrastruktur) ist seit dem 16.09. abgeschlossen. Der Homeserver läuft faktisch seit dem 16.09.2026 als vollständiges System, mit allen vier Bausteinen und aktivem Allocator-Opt-in für DCA und Trend. Der aktuelle Trading-Status dort wurde am 25.09.2026 verifiziert (siehe 6h). Der VPS ist seit dem 07.10.2026 abgeschlossen (Dienste gestoppt, Zugang entfernt, Vertrag gekündigt zum 12.10.), die VPS-Daten werden nicht ausgewertet, und der formale Cutover am 05.10. mit Snapshot-Schritt entfällt (siehe Log 07.10.2026). Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026. Seit dem Review sind mehrere Fund-und-Fix-Serien abgeschlossen: die Verbesserungsvorschläge (6i, 17.09.), die Dry-Run-Beträge (22.09.), die Code-Überprüfung vom 25.09. und der Systemcheck vom 27.09. mit K-A/K-B und W-A bis W-G (alle 6g). Die technische Referenz zum aktuellen Stand steht in Abschnitt 7.
 
 ---
 
@@ -11,23 +11,22 @@
 
 ## Aktueller Stand und offene Punkte
 
-*Stand 29.09.2026. Dieser Abschnitt beschreibt wie Abschnitt 7 den aktuellen Stand und wird direkt korrigiert. Die Herleitung steht jeweils im Archiv (`trading-bot-projekt-archiv.md`), Abschnittsnummern und Überschriften sind dort unverändert.*
+*Stand 07.10.2026 für VPS, Termine und Auswertung der Testphase, übrige Angaben Stand 29.09.2026. Dieser Abschnitt beschreibt wie Abschnitt 7 den aktuellen Stand und wird direkt korrigiert. Die Herleitung steht jeweils im Archiv (`trading-bot-projekt-archiv.md`), Abschnittsnummern und Überschriften sind dort unverändert.*
 
 ### Betrieb
 
 - **Homeserver** (vollständiges System seit 16.09.2026): alle vier Bots als systemd-Services im Testnet. DCA, Grid und Trend handeln mit echten Testnet-Orders (`*_BOT_ENABLE_TRADING=true`, verifiziert 25.09.), das Allocator-Opt-in für DCA und Trend ist aktiv. `GRID_AMOUNT_PER_LEVEL` = 9,38, maximale Kapitalbindung ca. 150,08. Details: Archiv 6e, 6h, 6g „W16 umgesetzt“.
-- **VPS:** DCA mit echten Testnet-Orders, Grid und Trend im Dry-Run, kein Allocator. Vertragsende 12.10.2026. Details: Archiv 6b, 6h.
+- **VPS:** abgeschlossen seit 07.10.2026. Die drei Bot-Dienste (dca-bot, grid-bot, trend-bot) sind gestoppt und deaktiviert, `.env` und Archivdatei auf dem VPS sind gelöscht, der Claude-Code-Deploy-Schlüssel (claude-code-vps-deploy) ist aus `authorized_keys` entfernt, der VPS-Eintrag aus `known_hosts` auf dem lokalen Rechner ebenfalls. Es gibt keine Auswertung der VPS-Daten und keinen behaltenen Snapshot. Details: Log 07.10.2026.
 - **Paar:** im Testnet BTCUSDT, alle „€“-Beträge sind dort USDT. Für echtes Geld wird BTCEUR verwendet (Entscheidung 28.09.2026). Details: Archiv 5b (Vermerk 28.09.), 6g „Symbolbindung“.
 
 ### Deploy-Stand
 
-- Auf beiden Servern läuft `10ce096` (Stand 28.09.2026). Committet, aber nicht deployed: W-C bis W-G samt Nachtrag (`a67e7dc` bis `46ca7a7`) und die Symbolbindung (`e2a37bd` bis `9ef7d60`). Beim nächsten Deploy nach dem Pull und vor dem Neustart: `python -m dca_bot.symbol_guard --report`.
-- Deploys werden ab jetzt **hier** vermerkt, als `Deployed: <hash> auf Homeserver/VPS am <Datum>`. Das ersetzt den Vermerk vom 29.09.2026 in Archiv 6g. Details zum Rückweg auf den alten Code: Archiv 6g „Symbolbindung“.
+- Auf dem Homeserver läuft `10ce096` (Stand 28.09.2026). Committet, aber nicht deployed: W-C bis W-G samt Nachtrag (`a67e7dc` bis `46ca7a7`) und die Symbolbindung (`e2a37bd` bis `9ef7d60`). Beim nächsten Deploy nach dem Pull und vor dem Neustart: `python -m dca_bot.symbol_guard --report`.
+- Deploys werden ab jetzt **hier** vermerkt, als `Deployed: <hash> auf Homeserver am <Datum>`. Das ersetzt den Vermerk vom 29.09.2026 in Archiv 6g. Details zum Rückweg auf den alten Code: Archiv 6g „Symbolbindung“.
 
 ### Termine
 
-- **05.10.2026, formaler Cutover:** finaler Snapshot vom VPS (Logs und `data/` aller Bots), Integritätsprüfung, VPS-Services per `systemctl stop` abschalten. Damit endet auch der Vergleich VPS gegen Homeserver. Details: Archiv 6e (Zeitplan), 6c.
-- **12.10.2026, Vertragsende VPS:** spätestens dann der finale `data/`-Snapshot, außerdem den Claude-Code-Deploy-Key entfernen. Details: Archiv 6b, 6g „Sicherheitsreview vollständig abgearbeitet“.
+- **12.10.2026, Vertragsende VPS** (Contabo Cloud VPS 4 (2026), gekündigt zum 12.10.2026, laut Kundenbereich bis dahin abgerechnet, keine Zusatzposten): kein Handlungsbedarf mehr.
 - **Testphase** auf dem Homeserver bis etwa Mitte November bis Mitte Dezember 2026. Details: Archiv 6h.
 
 ### Vorbedingungen für echtes Kapital (300 €: 150 € Grid, 150 € Allocator-Topf)
@@ -43,7 +42,7 @@
 
 - **W14, Grid ohne börsenseitigen Stop-Loss:** eine eigene Architekturentscheidung zwischen einer Sammel-Stop-Order und n Einzel-Stop-Orders. Bis dahin sperrt der Trendbruch-Stop nur Käufe, und die Kapitalbindung ist durch Stufen × Betrag gedeckelt. Details: Archiv 6g „W14“.
 - **Automatischer Stop-Loss-Reset (Punkt 16):** im Backtest durchgespielt, n = 1. Entschieden wird mit echten Daten, bis dahin wird manuell zurückgesetzt. Details: Archiv 6i „Punkt 16 als Backtest-Experiment“.
-- **Punkt 13 (gemeinsame Bot-Runtime) und F2 (Notaus pausiert statt zu beenden):** fassen alle vier Einstiegspunkte an, erst nach dem Cutover. Details: Archiv 6i „Offen aus der Liste“, 6g „W-F“.
+- **Punkt 13 (gemeinsame Bot-Runtime) und F2 (Notaus pausiert statt zu beenden):** zurückgestellt, kein fester Zeitpunkt (der ursprüngliche Cutover am 05.10. entfällt). Voraussetzung: keine offenen Deploys und eine ruhige Woche, weil beide Punkte alle vier Einstiegspunkte anfassen. Details: Archiv 6i „Offen aus der Liste“, 6g „W-F“.
 - **DCA-Portfolio-Stop-Loss in den Backtests:** wird nicht abgebildet, die DCA-Zahlen in 5a und 6 überschätzen deshalb den Kapitaleinsatz im Bärenmarkt. Details: Archiv 6g „W-G“.
 - **Archivierung der Ledger-Dateien:** kein akuter Bedarf, nur zusammen mit der Dashboard-App. Details: Archiv 6g „Vorgemerkt: langfristiges Datenwachstum“.
 - **Füllpreis alter Ledger-Einträge rückwirkend korrigieren:** vorgemerkt für den Steuer-Export. Einträge von vor K2 haben keine `clientOrderId`. Details: Archiv 6g „Priorität 4“.
@@ -52,8 +51,8 @@
 ### Für die Auswertung der Testphase
 
 - In den Homeserver-Ledgern von DCA und Trend stehen Dry-Run- und echte Einträge nebeneinander, die Auswertung muss nach `dry_run` trennen. Das Grid-Ledger ist durchgehend echt. Details: Archiv 6h „Umstellung auf echte Orders“.
-- Die Zahl der Trades ist zwischen VPS und Homeserver nicht vergleichbar (Allocator). Verglichen wird die Rendite pro eingesetztem Euro. Details: Archiv 6g „Beobachtung zur Allocator-Wirkung“, 5a.
-- Die Dry-Run-Werte des VPS-Grid sind am 22.09. korrigiert, die `.pre-fix`-Kopie bleibt bis zur Auswertung liegen. Details: Archiv 6g „Folgefund aus K3“.
+- Einen Vergleich VPS gegen Homeserver gibt es nicht: Die VPS-Daten werden nicht ausgewertet (Entscheidung 07.10.2026, Gründe im Log). Details: Archiv 6g „Beobachtung zur Allocator-Wirkung“, 5a.
+- Die Dry-Run-Werte des VPS-Grid sind am 22.09. korrigiert. Die `.pre-fix`-Kopie wird nicht mehr gebraucht, weil die VPS-Daten nicht ausgewertet werden. Details: Archiv 6g „Folgefund aus K3“.
 - Staub (`dust_qty`) rechnet das Positions-Audit keinem Bot zu, er erscheint als Überschuss. Details: Archiv 6g „Systemcheck vom 27.09.2026“.
 - **Ticker-Ausreißer im Testnet:** Testnet-Gewinne sind dadurch verzerrt und taugen nicht für Renditeschätzungen. Als Ursache wird ein dünnes Orderbuch vermutet, das ist nicht gemessen. Beispiel 02.10.2026: Vom realisierten Grid-Ergebnis von 8,65 USDT (Auswertung vom 06.10.) entfallen 6,31 USDT auf diesen einen Tag, davon 6,15 USDT auf sechs Stufen (8 bis 13). Sie wurden am 02.10. zwischen 13:30:13 und 13:30:16 UTC zu 77.809 bis 79.480 USDT gekauft und zwischen 13:35:17 und 13:35:30 UTC zu 86.928 bis 86.962 USDT verkauft, je Stufe 0,82 bis 1,09 USDT, normale Zyklen bringen 0,14 bis 0,21 USDT. Die Mainnet-Stundenkerze von 13:00 UTC hatte ihr Tief bei 86.465,72, die Testnet-Kerze bei 75.745,57, das Mainnet-Tagestief lag bei 83.888 (Stundenkerzen, 18:00 UTC). Alle sechs Kaufpreise liegen unter dem Mainnet-Tagestief. Ansatz zur Bereinigung: Kauf- und Verkaufszeitpunkte der Grid-Trades gegen die Mainnet-Stundenkerzen prüfen. Aussagen über die Strategie stützen sich auf die Backtests (Mainnet-Kerzen), das Testnet belegt vor allem die Technik. Vom selben Ticker hängen auch die Trend-Dry-Run-Position vom 15.09. und die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` ab: Ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Details: Log 06.10.2026.
 
@@ -90,6 +89,21 @@ Bei der Auswertung der Homeserver-Daten am 06.10.2026 lag das realisierte Grid-E
 - Der Rest von etwa 2,5 USDT aus normalem Betrieb ist eine Näherung (8,65 minus 6,15) und nicht einzeln belegt. Ob dieser Rest frei von Ausreißern ist, wurde nicht geprüft.
 
 **Folgerung:** Testnet-Gewinne taugen nicht für Renditeschätzungen, die Regeln zur Auswertung stehen im Abschnitt „Aktueller Stand und offene Punkte“ unter „Für die Auswertung der Testphase“. Die Trend-Dry-Run-Position vom 15.09. und die Stop-Offset-Kalibrierung hängen vom selben Ticker ab, ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Dass es so war, ist nicht geprüft.
+
+### VPS abgeschlossen, keine Auswertung der VPS-Daten (07.10.2026)
+
+Der VPS ist am 07.10.2026 zurückgebaut. Die drei Bot-Dienste (dca-bot, grid-bot, trend-bot) sind gestoppt und deaktiviert. Auf dem VPS wurden `.env` und Archivdatei gelöscht, der Claude-Code-Deploy-Schlüssel (claude-code-vps-deploy) wurde aus `authorized_keys` entfernt, und der VPS-Eintrag wurde aus `known_hosts` auf dem lokalen Rechner entfernt. Der Vertrag (Contabo Cloud VPS 4 (2026)) ist zum 12.10.2026 gekündigt und laut Kundenbereich bis 12.10.2026 abgerechnet, es gibt keine Zusatzposten.
+
+**Entscheidung:** Es gibt keine Auswertung der VPS-Daten, und es wurde bewusst kein Snapshot behalten (reine Testnet-Daten). Gründe:
+
+- Grid und Trend liefen dort im Dry-Run. Ihre Ergebnisse hängen vom Testnet-Ticker ab, der am 02.10. Ausreißer hatte (siehe Eintrag vom 06.10.2026).
+- Es gab auf dem VPS keinen Allocator.
+- Der Code-Stand war `10ce096`.
+- DCA verkauft nie.
+
+Der Stabilitätstest vom 09.09. liegt weiter unter `docs/test-reports/`.
+
+**Folgen:** Der formale Cutover am 05.10. mit separatem Snapshot-Schritt entfällt. Damit gibt es auch keinen Vergleich VPS gegen Homeserver mehr. Die im Archiv dafür geplanten Schritte (Cutover mit Snapshot, finaler `data/`-Snapshot zum Vertragsende) sind nicht mehr vorgesehen. Der Abschnitt „Aktueller Stand und offene Punkte“ ist entsprechend angepasst.
 
 ---
 
