@@ -55,6 +55,7 @@
 - Die Zahl der Trades ist zwischen VPS und Homeserver nicht vergleichbar (Allocator). Verglichen wird die Rendite pro eingesetztem Euro. Details: Archiv 6g „Beobachtung zur Allocator-Wirkung“, 5a.
 - Die Dry-Run-Werte des VPS-Grid sind am 22.09. korrigiert, die `.pre-fix`-Kopie bleibt bis zur Auswertung liegen. Details: Archiv 6g „Folgefund aus K3“.
 - Staub (`dust_qty`) rechnet das Positions-Audit keinem Bot zu, er erscheint als Überschuss. Details: Archiv 6g „Systemcheck vom 27.09.2026“.
+- **Ticker-Ausreißer im Testnet:** Testnet-Gewinne sind dadurch verzerrt und taugen nicht für Renditeschätzungen. Als Ursache wird ein dünnes Orderbuch vermutet, das ist nicht gemessen. Beispiel 02.10.2026: Vom realisierten Grid-Ergebnis von 8,65 USDT (Auswertung vom 06.10.) entfallen 6,31 USDT auf diesen einen Tag, davon 6,15 USDT auf sechs Stufen (8 bis 13). Sie wurden am 02.10. zwischen 13:30:13 und 13:30:16 UTC zu 77.809 bis 79.480 USDT gekauft und zwischen 13:35:17 und 13:35:30 UTC zu 86.928 bis 86.962 USDT verkauft, je Stufe 0,82 bis 1,09 USDT, normale Zyklen bringen 0,14 bis 0,21 USDT. Die Mainnet-Stundenkerze von 13:00 UTC hatte ihr Tief bei 86.465,72, die Testnet-Kerze bei 75.745,57, das Mainnet-Tagestief lag bei 83.888 (Stundenkerzen, 18:00 UTC). Alle sechs Kaufpreise liegen unter dem Mainnet-Tagestief. Ansatz zur Bereinigung: Kauf- und Verkaufszeitpunkte der Grid-Trades gegen die Mainnet-Stundenkerzen prüfen. Aussagen über die Strategie stützen sich auf die Backtests (Mainnet-Kerzen), das Testnet belegt vor allem die Technik. Vom selben Ticker hängen auch die Trend-Dry-Run-Position vom 15.09. und die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` ab: Ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Details: Log 06.10.2026.
 
 ### Nicht im Repository
 
@@ -71,6 +72,24 @@ Chronologisches Log seit der Aufteilung des Dokuments, Fortsetzung von Abschnitt
 `trading-bot-projekt.md` war auf über 2.500 Zeilen (350 KB) gewachsen und wurde in vielen Sitzungen komplett mitgelesen, obwohl der Großteil abgeschlossen ist. Die Abschnitte 1–6i stehen jetzt unverändert in `trading-bot-projekt-archiv.md`. Hier bleiben der Kopfbereich, der neue Abschnitt „Aktueller Stand und offene Punkte“, dieses Log und Abschnitt 7. Nichts ist gelöscht oder umformuliert. Ein Prüfskript hat nach dem Verschieben festgestellt, dass der Archivteil byte-gleich mit den Originalzeilen ist und dass jede Originalzeile in genau einer der beiden Dateien steht. Geändert wurden nur die Zeile „Stand:“, der Einleitungsabsatz von Abschnitt 7 und die Fußzeile.
 
 Bewusst **nicht** angepasst sind die Verweise in Code-Kommentaren und Tests („siehe trading-bot-projekt.md 6g“ u.ä.). Die Abschnitte haben im Archiv dieselben Nummern, und der Verweis-Absatz oben führt dorthin. Angepasst sind die README (Abschnitte 8.2, 8.3, 9 und 10) und `CLAUDE.md`.
+
+### Grid-Ergebnis vom 02.10.2026 ist ein Testnet-Artefakt (06.10.2026)
+
+Bei der Auswertung der Homeserver-Daten am 06.10.2026 lag das realisierte Grid-Ergebnis bei 8,65 USDT, davon 6,31 USDT allein am 02.10.2026. Die Ursache ist ein Testnet-Artefakt: Der Bot hat korrekt zu den Preisen gekauft und verkauft, die der Testnet-Ticker gemeldet hat, auf dem echten Markt hätte es diese Preise nicht gegeben.
+
+**Belege:**
+
+- Am 02.10. wurden um 13:30:13 bis 13:30:16 UTC sechs Grid-Stufen (8 bis 13) zu Kaufpreisen von 77.809 bis 79.480 USDT gekauft. Um 13:35:17 bis 13:35:30 UTC wurden alle sechs zu 86.928 bis 86.962 verkauft, zusammen +6,15 USDT. Auf Stufe 8 bis 13 entfallen jeweils 0,82 bis 1,09 USDT, normale Zyklen bringen 0,14 bis 0,21 USDT.
+- Die öffentlichen Stundenkerzen (BTCUSDT, 1h) zeigen für den 02.10. folgende Tiefs, Testnet gegen Mainnet: 05:00 UTC 66.745,57 gegen 85.893,27; 13:00 UTC 75.745,57 gegen 86.465,72; 15:00 UTC 75.000,00 gegen 85.162,90. In allen übrigen Stunden liegen beide Quellen nahe beieinander. Das Mainnet-Tagestief lag bei 83.888 (Stundenkerzen, 18:00 UTC), alle sechs Kaufpreise liegen darunter.
+- Das Testnet-Tief von 75.745 in der Stunde 13:00 passt zu den Käufen um 13:30.
+
+**Grenzen der Aussage:**
+
+- Die Stunden 05:00 und 15:00 hatten ebenfalls Testnet-Ausreißer. Ob der Bot in diesen Stunden etwas gekauft hat, wurde nicht geprüft.
+- Ein dünnes Orderbuch ist als Ursache für die Abweichung der Testnet- von den Mainnet-Kerzen nur vermutet, nicht gemessen.
+- Der Rest von etwa 2,5 USDT aus normalem Betrieb ist eine Näherung (8,65 minus 6,15) und nicht einzeln belegt. Ob dieser Rest frei von Ausreißern ist, wurde nicht geprüft.
+
+**Folgerung:** Testnet-Gewinne taugen nicht für Renditeschätzungen, die Regeln zur Auswertung stehen im Abschnitt „Aktueller Stand und offene Punkte“ unter „Für die Auswertung der Testphase“. Die Trend-Dry-Run-Position vom 15.09. und die Stop-Offset-Kalibrierung hängen vom selben Ticker ab, ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Dass es so war, ist nicht geprüft.
 
 ---
 

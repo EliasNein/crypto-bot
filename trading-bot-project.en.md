@@ -64,6 +64,7 @@
 - The number of trades is not comparable between VPS and home server (allocator). What is compared is the return per euro deployed. Details: archive 6g „Beobachtung zur Allocator-Wirkung“, 5a.
 - The dry-run values of the VPS grid were corrected on 22.09.; the `.pre-fix` copy stays in place until the evaluation. Details: archive 6g „Folgefund aus K3“.
 - The position audit does not attribute dust (`dust_qty`) to any bot; it appears as a surplus. Details: archive 6g „Systemcheck vom 27.09.2026“.
+- **Ticker outliers on the testnet:** testnet profits are distorted by them and are not suitable for return estimates. A thin order book is suspected as the cause; this was not measured. Example 02.10.2026: of the realised grid result of 8,65 USDT (evaluation of 06.10.), 6,31 USDT fall on this single day, of which 6,15 USDT on six levels (8 to 13). On 02.10. they were bought between 13:30:13 and 13:30:16 UTC at 77.809 to 79.480 USDT and sold between 13:35:17 and 13:35:30 UTC at 86.928 to 86.962 USDT, 0,82 to 1,09 USDT per level, whereas normal cycles yield 0,14 to 0,21 USDT. The mainnet hourly candle of 13:00 UTC had its low at 86.465,72, the testnet candle at 75.745,57; the mainnet daily low was 83.888 (hourly candles, 18:00 UTC). All six purchase prices are below the mainnet daily low. Approach for cleaning up: check the buy and sell times of the grid trades against the mainnet hourly candles. Statements about the strategy rest on the backtests (mainnet candles); the testnet mainly proves the technology. The trend dry-run position of 15.09. and the calibration of `TREND_STOP_LIMIT_OFFSET_PCT` also depend on the same ticker: there, an outlier could produce entries or stop-loss triggers that would not exist on the real market. Details: log 06.10.2026.
 
 ### Not in the repository
 
@@ -80,6 +81,24 @@ Chronological log since the document was split, continuation of section 6 in the
 `trading-bot-projekt.md` had grown to over 2,500 lines (350 KB) and was read in full in many sessions, although most of it is completed. Sections 1–6i are now in `trading-bot-projekt-archiv.md`, unchanged. What remains here is the header, the new section "Current status and open items", this log and section 7. Nothing has been deleted or reworded. After the move, a check script confirmed that the archive part is byte-identical to the original lines and that every original line is in exactly one of the two files. Only the "Stand:" line, the introductory paragraph of section 7 and the footer were changed.
 
 Deliberately **not** adjusted are the references in code comments and tests („siehe trading-bot-projekt.md 6g“ and the like). The sections have the same numbers in the archive, and the reference paragraph above leads there. Adjusted were the README (sections 8.2, 8.3, 9 and 10) and `CLAUDE.md`.
+
+### Grid result of 02.10.2026 is a testnet artefact (06.10.2026)
+
+In the evaluation of the home server data on 06.10.2026, the realised grid result was 8,65 USDT, of which 6,31 USDT on 02.10.2026 alone. The cause is a testnet artefact: the bot correctly bought and sold at the prices the testnet ticker reported; on the real market these prices would not have existed.
+
+**Evidence:**
+
+- On 02.10., six grid levels (8 to 13) were bought at purchase prices of 77.809 to 79.480 USDT between 13:30:13 and 13:30:16 UTC. Between 13:35:17 and 13:35:30 UTC, all six were sold at 86.928 to 86.962, together +6,15 USDT. Levels 8 to 13 account for 0,82 to 1,09 USDT each, normal cycles yield 0,14 to 0,21 USDT.
+- The public hourly candles (BTCUSDT, 1h) show the following lows for 02.10., testnet versus mainnet: 05:00 UTC 66.745,57 vs 85.893,27; 13:00 UTC 75.745,57 vs 86.465,72; 15:00 UTC 75.000,00 vs 85.162,90. In all other hours the two sources are close together. The mainnet daily low was 83.888 (hourly candles, 18:00 UTC); all six purchase prices are below it.
+- The testnet low of 75.745 in the 13:00 hour matches the purchases at 13:30.
+
+**Limits of the statement:**
+
+- The 05:00 and 15:00 hours also had testnet outliers. Whether the bot bought anything in those hours was not checked.
+- A thin order book is only suspected as the cause of the deviation of the testnet from the mainnet candles, not measured.
+- The remainder of about 2,5 USDT from normal operation is an approximation (8,65 minus 6,15) and not individually substantiated. Whether this remainder is free of outliers was not checked.
+
+**Conclusion:** Testnet profits are not suitable for return estimates; the rules for the evaluation are in the section "Current status and open items" under "For evaluating the test phase". The trend dry-run position of 15.09. and the stop-offset calibration depend on the same ticker; an outlier could produce entries or stop-loss triggers there that would not exist on the real market. Whether this happened was not checked.
 
 ---
 
