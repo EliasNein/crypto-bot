@@ -74,7 +74,10 @@ class TrendTrade:
     status: str = "open"  # "open" | "closed"
     exit_price: float | None = None
     exit_time: str | None = None
-    exit_reason: str | None = None  # "signal" | "stop_loss"
+    # "signal" | "stop_loss" | "manual_close" - Letzteres nur durch
+    # close_dry_run_trend.py (Dry-Run-Position von Hand geschlossen, ohne
+    # Boerse und ohne Stop-Loss-Sperre).
+    exit_reason: str | None = None
     realized_pnl: float | None = None
     # clientOrderId der Order, die die Position geschlossen hat (eigener
     # Market-Sell oder die gefüllte Stop-Order) - Systemcheck vom

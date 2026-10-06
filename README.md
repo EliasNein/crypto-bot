@@ -225,7 +225,8 @@ trading-bot/
 │   ├── reset_stop_loss.py         # CLI: DCA-Stop-Loss-Pause zurücksetzen
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
 │   ├── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
-│   └── fix_dry_run_quote_spent.py # CLI: einmalige Korrektur verfälschter Dry-Run-Beträge
+│   ├── fix_dry_run_quote_spent.py # CLI: einmalige Korrektur verfälschter Dry-Run-Beträge
+│   └── close_dry_run_trend.py     # CLI: Dry-Run-Trend-Position im Ledger schließen
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -494,6 +495,27 @@ funktionieren Verbindung und API-Keys. (Das frühere
 Trading einen echten DCA-Kauf aus.) Das Skript liest nur: Es nutzt denselben Client wie das Positions-Audit
 (8.1), der strukturell keine Orders platzieren kann.
 
+### 8.5 Dry-Run-Trend-Position schließen
+
+```bash
+python -m dca_bot.close_dry_run_trend                          # nur Bericht
+python -m dca_bot.close_dry_run_trend --apply --trade-id <id> --exit-price <preis>
+```
+
+Schließt die offene **Dry-Run**-Position des Trend-Bots im Ledger
+(`exit_reason` = `manual_close`), damit der einzige Trend-Slot für einen
+echten Einstieg frei wird. Es wird keine Order platziert und **keine
+Stop-Loss-Sperre** gesetzt. **Ohne `--apply` wird nichts geschrieben.** Mit
+`--apply` sind `--trade-id` und `--exit-price` Pflicht, der Trend-Bot muss
+gestoppt sein (sonst Abbruch über sein Prozess-Lock), und vor dem Schreiben
+entsteht eine Kopie `trend_ledger.json.pre-close-<Zeitstempel>`. Das
+Werkzeug verweigert, wenn die Position nicht `dry_run: true` ist, auf eine
+Börsen-Order verweist, nicht genau eine offene Position existiert, die
+Pending-Datei Einträge hat, die Sperre aktiv ist oder die Symbolprüfung
+nicht passt. Die simulierte `realized_pnl` zählt nirgends als Ergebnis.
+Hintergrund und Serverablauf: `trading-bot-projekt.md`, Log ab 29.09.2026
+(Eintrag vom 07.10.2026).
+
 ## 9. Tests
 
 ```bash
@@ -523,6 +545,7 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_startup_balance_check`, `test_audit_positions` | Konsistenz-Check beim Start, Positions-Audit |
 | `test_trend_auto_reset` | Analyse-Modus `--analyze-auto-reset` des Trend-Backtests |
 | `test_fix_dry_run_quote_spent` | Einmalige Datenkorrektur der Dry-Run-Beträge |
+| `test_close_dry_run_trend` | Schließen der Dry-Run-Trend-Position: Weigerungen, Bericht, Lock, keine Sperre, danach echter Einstieg |
 | `test_request_timeout` | Request-Timeout des Grid-Bots |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat-Zeitstempel, Mengenlimit für Zyklusfehler |
 | `test_shared_account` | Alle Bots auf einem geteilten Konto: Teilfüllung, unklare Verkäufe, Dauerlauf mit Eigentums-Invariante |

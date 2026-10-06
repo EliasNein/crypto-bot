@@ -11,7 +11,7 @@
 
 ## Aktueller Stand und offene Punkte
 
-*Stand 07.10.2026 für VPS, Termine und Auswertung der Testphase, übrige Angaben Stand 29.09.2026. Dieser Abschnitt beschreibt wie Abschnitt 7 den aktuellen Stand und wird direkt korrigiert. Die Herleitung steht jeweils im Archiv (`trading-bot-projekt-archiv.md`), Abschnittsnummern und Überschriften sind dort unverändert.*
+*Stand 07.10.2026 für VPS, Deploy-Stand, Termine und Auswertung der Testphase, übrige Angaben Stand 29.09.2026. Dieser Abschnitt beschreibt wie Abschnitt 7 den aktuellen Stand und wird direkt korrigiert. Die Herleitung steht jeweils im Archiv (`trading-bot-projekt-archiv.md`), Abschnittsnummern und Überschriften sind dort unverändert.*
 
 ### Betrieb
 
@@ -21,7 +21,7 @@
 
 ### Deploy-Stand
 
-- Auf dem Homeserver läuft `10ce096` (Stand 28.09.2026). Committet, aber nicht deployed: W-C bis W-G samt Nachtrag (`a67e7dc` bis `46ca7a7`) und die Symbolbindung (`e2a37bd` bis `9ef7d60`). Beim nächsten Deploy nach dem Pull und vor dem Neustart: `python -m dca_bot.symbol_guard --report`.
+- Deployed: `980f3c3` auf Homeserver am 29.09.2026. Belege: das Journal vom 29.09.2026 (10:17 UTC) mit „Code-Version: 980f3c3“ bei Grid, Trend und Allocator, und laut Ausgabe von `git log -1` auf dem Homeserver am 06.10.2026. Damit laufen dort W-C bis W-G samt Nachtrag (`a67e7dc` bis `46ca7a7`) und die Symbolbindung (`e2a37bd` bis `9ef7d60`). Auf master seitdem nur Doku sowie `close_dry_run_trend` (nicht deployed). Bei jedem Deploy nach dem Pull und vor dem Neustart: `python -m dca_bot.symbol_guard --report`.
 - Deploys werden ab jetzt **hier** vermerkt, als `Deployed: <hash> auf Homeserver am <Datum>`. Das ersetzt den Vermerk vom 29.09.2026 in Archiv 6g. Details zum Rückweg auf den alten Code: Archiv 6g „Symbolbindung“.
 
 ### Termine
@@ -33,6 +33,7 @@
 
 1. **Positionsgrößen:** offen sind `DCA_QUOTE_AMOUNT`, `TREND_AMOUNT_PER_TRADE`, Grid-Spanne und `GRID_SPACING_PCT`. Beim Paarwechsel sind alle Beträge und die Spanne neu in Euro festzulegen. Details: Archiv 5b, 6d Punkt 3.
 2. **Datenbasis für `TREND_STOP_LIMIT_OFFSET_PCT`**, bisher n = 2 simulierte Exits. **Derzeit fließen keine Kalibrierungsdaten:** Die Dry-Run-Position vom 15.09. belegt den einzigen Trend-Slot. Nötig sind erst ihr Ausstieg, dann ein echter Einstieg, dann eine an der Börse gefüllte Stop-Order. Schließt sie über den internen Stop-Loss, sperrt der Latch neue Einstiege bis zum manuellen Reset. Details: Archiv 6f, 6h „Trend-Bot: Die Kalibrierungsdaten fließen noch nicht“.
+   Das Werkzeug `python -m dca_bot.close_dry_run_trend` schließt die Dry-Run-Position im Ledger, ohne Sperre; auf dem Homeserver ist es noch nicht angewendet (Ablauf: Log 07.10.2026). Als Datenbasis für den Offset taugt das Testnet aber kaum: Laut Auswertung der öffentlichen Kerzen zeigt es an etwa 4 % der Stunden ein Tief mehr als 10 % unter dem Mainnet. Eine echte Stop-Order wird dort vermutlich von einem Ausreißer ausgelöst, nicht vom Markt. Gefüllte Stop-Orders im Testnet belegen die Technik, nicht den Offset.
 3. **Abschließender Sicherheitsreview** kurz vor dem Live-Gang. Details: Archiv 6d, 6h.
 4. **Paarwechsel auf BTCEUR**, noch nicht geplant: alle vier `*_SYMBOL`, Grid-Spanne und Beträge in Euro, frische Ledger oder bewusst weitergeführter Altbestand. Offen sind außerdem die Dashboard-App und der Pilot. Nicht verifiziert ist, ob Binance bei einer Abfrage unter dem falschen Symbol mit −2013 antwortet, das lässt sich erst im Pilot prüfen. Details: Archiv 6g „Symbolbindung“, 6h.
 5. **„Gebühren mit BNB bezahlen“ ausgeschaltet.** Details: Archiv 6h.
@@ -104,6 +105,41 @@ Der VPS ist am 07.10.2026 zurückgebaut. Die drei Bot-Dienste (dca-bot, grid-bot
 Der Stabilitätstest vom 09.09. liegt weiter unter `docs/test-reports/`.
 
 **Folgen:** Der formale Cutover am 05.10. mit separatem Snapshot-Schritt entfällt. Damit gibt es auch keinen Vergleich VPS gegen Homeserver mehr. Die im Archiv dafür geplanten Schritte (Cutover mit Snapshot, finaler `data/`-Snapshot zum Vertragsende) sind nicht mehr vorgesehen. Der Abschnitt „Aktueller Stand und offene Punkte“ ist entsprechend angepasst.
+
+### Werkzeug zum Schließen der Dry-Run-Trend-Position (07.10.2026)
+
+**Begründung:** Die Dry-Run-Position vom 15.09.2026 (`c0e153c1-…`, Einstieg 76.960,01, `quote_spent` 15,0, `dry_run: true`, kein `symbol`-Feld, keine Stop-Order) belegt den einzigen Trend-Slot. Deshalb gab es im Testnet noch nie einen echten Trend-Einstieg, keine echte Stop-Order und keinen echten Ausstieg. Einen Take-Profit gibt es nicht, die Position schließt nur bei bestätigtem Abwärtssignal oder 10 % unter dem Einstieg. Laut Auswertung der öffentlichen Kerzen zeigt das Testnet an etwa 4 % der Stunden ein Tief mehr als 10 % unter dem Mainnet. Eine echte Position wird deshalb vermutlich bald durch einen Ausreißer ausgelöst. Das ist als Technik-Test gewollt, nicht als Kalibrierung.
+
+**Werkzeug:** `python -m dca_bot.close_dry_run_trend`, Bericht als Standard. `--apply` braucht `--trade-id` und `--exit-price` und schreibt nur, wenn der Trend-Bot gestoppt ist (Prozess-Lock, vor dem Lesen geholt). Vor dem Schreiben entsteht die Kopie `trend_ledger.json.pre-close-<Zeitstempel>`, geschrieben wird atomar über `TrendLedger.record_exit()`, danach wird geprüft, dass sich nur dieser eine Eintrag geändert hat. Ein zweiter Lauf ändert nichts. Entscheidungen:
+
+- Ausstiegspreis: Pflichtargument `--exit-price` (Mainnet-Kurs), kein Netzzugriff im Werkzeug.
+- `exit_reason`: neuer Wert `manual_close`. Gelesen wird das Feld weder im Bot (nur `trend_strategy` schreibt es) noch im Positions-Audit, im Allocator, in `check_orders` oder in der Dashboard-App; die Backtests werten nur ihr eigenes Trade-Log aus.
+- `record_exit()` statt Roh-Dicts. Die Stop-Loss-Sperre entsteht nur in `trend_strategy` und nur bei `stop_loss`; das Werkzeug importiert weder die Strategie noch `TrendStopLoss`.
+- Die simulierte `realized_pnl` (Menge × Ausstiegspreis − `quote_spent`) zählt nirgends als Ergebnis: Dashboard-Summen, PnL-Verlauf und CSV-Export filtern auf `dry_run: false`, das Positions-Audit zählt Dry-Run nicht zum Bestand. Einzige sichtbare Folge: Die Trend-Karte der App zählt einen geschlossenen Trade mehr, weil sie dort nach Status zählt.
+- Weigerung ohne Schreiben, wenn: das Ledger fehlt oder unlesbar ist, nicht genau eine offene Position existiert, die Position nicht `dry_run: true` ist, eines der Felder `client_order_id`, `stop_loss_order_id`, `exit_client_order_id` gesetzt ist oder Teilfüllungen verbucht sind, `--trade-id` nicht passt, die Pending-Datei Einträge hat oder unlesbar ist, die Stop-Loss-Sperre aktiv ist oder die Symbolprüfung etwas anderes als „passt“ meldet (für Pending-Datei, Sperre und Allocator-Zustand ist „nicht vorhanden“ in Ordnung).
+
+**Was der Bot danach tut (geprüft im Code):** Der erste Zyklus läuft direkt beim Start. Die EMAs werden aus Mainnet-Tageskerzen bis gestern aufgebaut, dazu kommt der aktuelle Testnet-Kurs. „up“ heißt EMA20 über EMA50 mit mindestens 1 % Abstand, ein frischer Crossover ist nicht nötig. Es gibt keinen Cooldown und keine Regel gegen einen Einstieg am selben Tag. Der Betrag ist `TREND_AMOUNT_PER_TRADE` × `trend_fraction` des Allocators, unter 5 USDT wird übersprungen. Die Stop-Order liegt bei Einstieg × 0,90, Limit × 0,995. Ihr Mindestvolumen wird vorher nicht geprüft: Bei Kursen um 85.000 braucht sie mindestens 7·10⁻⁵ BTC, also etwa 6 USDT Einstiegsbetrag (`trend_fraction` ab etwa 0,40 bei 15 USDT). Das ist gerechnet, nicht am Testnet geprüft. Freies USDT wird vor dem Kauf nicht geprüft.
+
+**Deploy:** Seit `980f3c3` hat sich auf master nur Doku geändert, Code erst mit diesem Werkzeug. Neu gestartet wird nur der Trend-Bot, DCA, Grid und Allocator laufen weiter.
+
+**Tests:** `tests/test_close_dry_run_trend.py` mit 40 Tests (alle Weigerungen, Normalfall, Bericht schreibt nichts, keine Sperre, echte Position bleibt unverändert, Lock, Kontrolle nach dem Schreiben, Ende-zu-Ende: nach dem Schließen steigt der Bot bei „up“ echt ein und platziert die Stop-Order). Mutationsprobe: 31 Mutationen, alle erkannt. Die Tests liefen nur unter Windows; dort sperrt `process_lock.py` mit `msvcrt.locking`, unter Linux mit `fcntl.flock`. Deshalb belegt Schritt 6 des Ablaufs das Lock auf dem Server.
+
+**Ablauf auf dem Homeserver:**
+
+1. Uhrzeit wählen: nicht 00:20–00:35 UTC (Zwangstrennung), nicht 06:40–07:00 UTC (apt-Neustarts).
+2. `git status` sauber, `git log -1` zeigt `980f3c3`, dann `git pull`.
+3. `python -m dca_bot.symbol_guard --report`: Der Trend-Bot muss „würde starten“ melden.
+4. `python -m dca_bot.close_dry_run_trend` (Bericht): genau eine offene Position `c0e153c1-…`, Dry-Run, keine Stop-Order, Pending-Datei leer, keine Sperre, Symbolprüfung passt.
+5. `trend_fraction` und Zeitstempel in `data/allocator_state.json` ansehen (siehe Mindestvolumen oben), Mainnet-Kurs notieren.
+6. Lock-Probe bei noch laufendem Trend-Bot, im Repo-Verzeichnis (dieselbe `.env` und damit dieselbe Lock-Datei wie der Dienst): `python -m dca_bot.close_dry_run_trend --apply --trade-id <volle ID> --exit-price <Mainnet-Kurs>`. Erwartung: Exit-Code 2 (`echo $?`), Meldung „ABGEBROCHEN“, nichts geschrieben, keine Sicherungskopie `trend_ledger.json.pre-close-*`.
+7. `sudo systemctl stop trend-bot`
+8. `python -m dca_bot.close_dry_run_trend --apply --trade-id <volle ID> --exit-price <Mainnet-Kurs>`
+9. `python -m dca_bot.audit_positions`: Trend ohne offene Position, keine neue Diskrepanz.
+10. `python -m dca_bot.check_orders`: freies USDT mindestens etwa 15.
+11. `sudo systemctl start trend-bot`, dann `journalctl -u trend-bot -f`: Symbolprüfung, Kurs, Allocator-Anteil und effektiver Betrag, dann entweder `[TREND-EINSTIEG]` mit platzierter Stop-Order ohne `[TREND-FEHLER]` oder kein Einstieg, weil das Signal nicht „up“ ist.
+12. Nach dem ersten Zyklus erneut `python -m dca_bot.audit_positions`. Anwendung und Deploy werden hier und unter „Deploy-Stand“ vermerkt.
+
+Löst danach ein Ausreißer die Stop-Order aus, schließt der Bot mit `stop_loss`, und die Sperre greift. Der nächste Einstieg braucht dann `python -m dca_bot.reset_trend_stop_loss`.
 
 ---
 
