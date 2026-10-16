@@ -534,6 +534,8 @@ of 07.10.2026).
 python -m unittest discover -s tests -t .
 ```
 
+919 automated tests (as of 16.10.2026, all passing).
+
 All tests run without network access and without Binance credentials
 (fake clients with the same interface as `binance_client.py`, temporary
 ledger files). The safety-critical paths are covered: token hygiene of the

@@ -522,6 +522,8 @@ Hintergrund und Serverablauf: `trading-bot-projekt.md`, Log ab 29.09.2026
 python -m unittest discover -s tests -t .
 ```
 
+919 automatische Tests (Stand 16.10.2026, alle grün).
+
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
 (Fake-Clients mit derselben Schnittstelle wie `binance_client.py`,
 temporäre Ledger-Dateien). Abgedeckt sind die sicherheitskritischen
