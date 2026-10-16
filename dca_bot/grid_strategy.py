@@ -33,20 +33,27 @@ from .grid_signals import compute_grid_levels, find_triggered_buy_levels, is_sel
 from .notifier import send_notification
 from .order_utils import (
     average_fill_price,
+    is_dust,
     net_executed_quantity,
     net_proceeds,
     quantize_quantity,
+    received_base_quantity,
 )
 from .pending_orders import (
     RECONCILIATION_PREFIX,
     ManualReviewRequired,
     PendingOrder,
+    is_partial_fill,
     reconcile_pending_orders,
 )
 from .risk import KillSwitch
 from .startup_checks import report_ledger_vs_account
 
 logger = logging.getLogger("grid_bot")
+
+# close_reason einer Position, deren Kauf nur teilweise und unter dem
+# Mindestvolumen ausgefuehrt wurde (T2, 16.10.2026, siehe GridPosition).
+CLOSE_REASON_DUST = "dust"
 
 
 class GridTradingStrategy:
@@ -577,16 +584,25 @@ class GridTradingStrategy:
             )
 
             if order is None and self._config.trading_enabled:
-                # Echter Kaufversuch bei der Börse fehlgeschlagen - analog
-                # zum DCA-Bot keine Ledger-Eintragung, kein simulierter Erfolg.
+                # Echter Kauf nicht zustande gekommen - analog zum DCA-Bot
+                # keine Ledger-Eintragung, kein simulierter Erfolg. Seit A1
+                # (16.10.2026) landet hier auch eine Order, die die Boerse
+                # ohne Ausfuehrung beendet hat (EXPIRED mit 0) oder deren
+                # Ende unklar ist - der Grund steht in der Meldung des
+                # Clients direkt davor. Die Stufe bleibt frei (bzw. bei
+                # unklarem Ausgang ueber den Pending-Eintrag belegt).
                 logger.error(
-                    "Echter Grid-Kauf fehlgeschlagen für Stufe %d (Preis ~%.2f).",
+                    "Echter Grid-Kauf für Stufe %d (Preis ~%.2f) nicht verbucht: "
+                    "abgelehnt, ohne Ausfuehrung beendet oder Ausgang unklar "
+                    "(siehe Meldung davor).",
                     level_index,
                     price,
                 )
                 send_notification(
-                    f"[GRID-FEHLER] Echter Kauf fehlgeschlagen für Stufe "
-                    f"{level_index} (Preis ~{price:.2f}). Siehe Bot-Log."
+                    f"[GRID-FEHLER] Echter Kauf für Stufe {level_index} "
+                    f"(Preis ~{price:.2f}) nicht verbucht - von der Börse "
+                    "abgelehnt, ohne Ausführung beendet oder Ausgang unklar. "
+                    "Nichts gebucht, siehe Bot-Log."
                 )
                 continue
 
@@ -639,21 +655,84 @@ class GridTradingStrategy:
                 client_order_id=order.get("clientOrderId") if order else None,
                 symbol=self._config.symbol,
             )
+            partial = is_partial_fill(order)
+            dust = partial and is_dust(quantity, buy_price, rules)
+            if dust:
+                self._close_as_dust(position, order, rules)
             self._ledger.record_buy(position)
             # Erst mit dem Kauf im Ledger ist die Order-Frage erledigt (W-A).
             self._client.confirm_booked(position.client_order_id)
 
+            if dust:
+                self._report_dust(position, order, "")
+                continue
+
             logger.info(
-                "Grid-Kauf: Stufe %d @ %.2f (Ziel-Verkauf @ %.2f)",
+                "Grid-Kauf: Stufe %d @ %.2f (Ziel-Verkauf @ %.2f)%s",
                 level_index,
                 buy_price,
                 position.target_sell_price,
+                self._partial_note(order, quote_spent) if partial else "",
             )
             tag = "[GRID-KAUF]" if order is not None else "[GRID-KAUF DRY-RUN]"
             send_notification(
                 f"{tag} Stufe {level_index}: {quantity:.8f} {self._config.symbol} "
                 f"@ {buy_price:.2f} (Ziel-Verkauf @ {position.target_sell_price:.2f})"
+                + (self._partial_note(order, quote_spent) if partial else "")
             )
+
+    def _partial_note(self, order: dict, quote_spent: float) -> str:
+        """Zusatz fuer Log/Telegram bei einem nur teilweise ausgefuehrten Kauf (T2)."""
+        return (
+            f" - Teilfüllung: Börse meldet {order.get('status')}, ausgeführt "
+            f"{quote_spent:.2f} von {self._config.amount_per_level:.2f}"
+        )
+
+    def _close_as_dust(self, position: GridPosition, order: dict, rules) -> None:
+        """
+        Schliesst eine Position, deren Kauf nur teilweise ausgefuehrt wurde
+        und deren Menge unter dem Mindestvolumen liegt (T2, 16.10.2026,
+        Muster wie _close_with_dust beim Trend-Bot aus K-A).
+
+        Ohne das stuende sie offen im Ledger, ihre Stufe waere belegt, und
+        jeder Verkaufsversuch am Ziel kaeme als Ablehnung zurueck - Zyklus
+        fuer Zyklus. Der Staub bleibt auf dem Konto. Bewertet wird
+        vorsichtig: realized_pnl = -quote_spent, obwohl der Staub einen
+        Restwert unter dem Mindestvolumen hat. Keine Sperre.
+
+        `quantity` ist die tatsaechlich erhaltene Menge OHNE Rundung auf die
+        stepSize - gerundet koennte sie 0 sein, und das wuerde der
+        Ledger-Schutz A3 zu Recht ablehnen, obwohl Geld geflossen ist.
+        """
+        received = received_base_quantity(order, rules)
+        position.quantity = received
+        position.dust_qty = received
+        position.status = "closed"
+        position.sold_at = position.bought_at
+        position.realized_pnl = -position.quote_spent
+        position.close_reason = CLOSE_REASON_DUST
+
+    def _report_dust(self, position: GridPosition, order: dict, prefix: str) -> None:
+        logger.warning(
+            "%s[GRID-STAUB] Stufe %d: Kauf nur teilweise ausgefuehrt (Boerse meldet "
+            "%s, %.8f %s fuer %.2f) - die Menge liegt unter dem Mindestvolumen und "
+            "laesst sich nicht verkaufen. Position sofort geschlossen, Menge bleibt "
+            "als Staub auf dem Konto, als Verlust von %.2f gebucht. Stufe ist frei.",
+            prefix,
+            position.level_index,
+            order.get("status"),
+            position.dust_qty,
+            self._config.symbol,
+            position.quote_spent,
+            position.quote_spent,
+        )
+        send_notification(
+            f"{prefix}[GRID-STAUB] Stufe {position.level_index}: Kauf nur teilweise "
+            f"ausgeführt ({position.dust_qty:.8f} {self._config.symbol} für "
+            f"{position.quote_spent:.2f}), unter dem Mindestvolumen - bleibt als "
+            f"Staub auf dem Konto, als Verlust von {position.quote_spent:.2f} gebucht. "
+            "Stufe ist wieder frei."
+        )
 
     def verify_state_readable(self) -> None:
         """
@@ -861,6 +940,12 @@ class GridTradingStrategy:
             client_order_id=pending.client_order_id,
             symbol=symbol,
         )
+        # Dieselbe Staub-Regel wie im direkten Pfad (T2, 16.10.2026).
+        if is_partial_fill(order) and is_dust(quantity, buy_price, rules):
+            self._close_as_dust(position, order, rules)
+            self._ledger.record_buy(position)
+            self._report_dust(position, order, RECONCILIATION_PREFIX)
+            return
         self._ledger.record_buy(position)
 
         logger.warning(

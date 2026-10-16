@@ -32,8 +32,12 @@ from .pending_orders import (
     ORDER_WITHOUT_EFFECT,
     PendingOrder,
     PendingOrderStore,
+    classify_order_status,
+    executed_quantity,
+    is_partial_fill,
     lookup_command,
     new_client_order_id,
+    report_unbooked_partial_sell,
     resolve_pending_order,
 )
 
@@ -565,6 +569,10 @@ class TradingClient:
            Wirkung wird der Eintrag hier entfernt; bei einer ausgeführten
            Order erst durch die Strategie über confirm_booked(), NACHDEM
            sie den Trade im Ledger hat (W-A, Systemcheck vom 27.09.2026).
+           Bei einer Market-Order heisst "ausgeführt" seit dem 16.10.2026
+           auch im regulären Antwortweg: laut Status und `executedQty` der
+           Antwort, nicht schon "Binance hat geantwortet" (A1, siehe
+           _settle_market_response).
 
         Die drei Fehlerklassen werden dabei streng getrennt:
 
@@ -608,6 +616,9 @@ class TradingClient:
         except INCONCLUSIVE_REQUEST_ERRORS as exc:
             return self._resolve_after_network_error(pending, label, exc)
 
+        if kind == KIND_MARKET:
+            return self._settle_market_response(pending, label, order)
+
         # Der Pending-Eintrag bleibt bewusst STEHEN, bis die Strategie den
         # Trade im Ledger hat und confirm_booked() aufruft (Systemcheck vom
         # 27.09.2026, W-A). Bis dahin wurde er hier entfernt - scheiterte
@@ -617,6 +628,93 @@ class TradingClient:
         # wusste.
         logger.info("%s erfolgreich platziert: %s", label, order)
         return order
+
+    def _settle_market_response(
+        self, pending: PendingOrder, label: str, order: object
+    ) -> dict | None:
+        """
+        Bewertet die regulaere Antwort auf eine MARKET-Order, bevor die
+        Strategie sie verbucht (A1, 16.10.2026).
+
+        Bis dahin galt jede Antwort ohne Exception als ausgefuehrter Trade.
+        Beendet die Boerse eine Market-Order aber ohne Ausfuehrung
+        (`EXPIRED` mit `executedQty` 0), buchten alle drei Bots daraus eine
+        Position mit Menge 0 und Ticker-Preis - auf dem Homeserver elf
+        Grid-Eintraege vom 09.10. und 11.10.2026, die ihre Stufen
+        blockierten und jeden Zyklus einen Verkauf ueber Menge 0 versuchten.
+
+        Bewertet wird mit derselben Regel wie in der Reconciliation
+        (classify_order_status, also order_lifecycle_state) - eine einzige
+        Regel fuer Order-Status im ganzen Projekt (W7/W8):
+
+        - bestaetigt (terminal, ausgefuehrt > 0; auch EXPIRED mit Teilmenge):
+          wie bisher zurueckgeben, der Pending-Eintrag bleibt bis
+          confirm_booked() (W-A).
+        - ohne Wirkung (terminal, ausgefuehrt 0): Eintrag entfernen, `None`.
+          Die Strategie landet in ihrem bestehenden Fehlschlag-Pfad und
+          meldet einmal per Telegram (E3) - hier nur das Log.
+        - alles andere (NEW/PARTIALLY_FILLED, kein oder unbekannter
+          Status): unklar. Eintrag bleibt stehen, `[ORDER-UNKLAR]`, `None`.
+          Die Sperren aus K-B halten die Position fest, bis die
+          Reconciliation den Ausgang klaert.
+
+        Die Logtexte sagen bewusst "Boerse meldet Status ..." und nicht
+        "Verbindungsfehler": Die Antwort ist angekommen, nur ihr Inhalt
+        verbietet das Buchen. Stop-Orders laufen hier nicht durch (E1) -
+        fuer sie ist das Antwortformat im Repo nicht belegt.
+        """
+        side = f"Market-{pending.side}"
+        is_dict = isinstance(order, dict)
+        status = order.get("status") if is_dict else None
+        state = classify_order_status(order, KIND_MARKET) if is_dict else None
+
+        if state == ORDER_CONFIRMED:
+            logger.info(
+                "%s erfolgreich platziert (Boerse meldet Status %s, ausgefuehrt %s): %s",
+                label,
+                status,
+                order.get("executedQty"),
+                order,
+            )
+            return order
+
+        if state == ORDER_WITHOUT_EFFECT:
+            self._pending_store.remove(pending.client_order_id)
+            logger.error(
+                "[ORDER-OHNE-AUSFUEHRUNG] %s %s (clientOrderId %s): Boerse meldet "
+                "Status %s, ausgefuehrt %s - kein Trade, nichts gebucht. Antwort: %s",
+                side,
+                pending.symbol,
+                pending.client_order_id,
+                status,
+                order.get("executedQty"),
+                order,
+            )
+            return None
+
+        logger.error(
+            "UNKLARER ORDER-ZUSTAND: %s %s (clientOrderId %s): Boerse meldet "
+            "Status %r, ausgefuehrt %s - fuer eine Market-Order ist das kein "
+            "eindeutiges Ende. Die clientOrderId steht in '%s' und wird im "
+            "naechsten Zyklus erneut geprueft; bis dahin handelt der Bot fuer "
+            "diese Position nicht. Nachschlagen: %s",
+            side,
+            pending.symbol,
+            pending.client_order_id,
+            status,
+            executed_quantity(order) if is_dict else None,
+            self._pending_store.path,
+            lookup_command(pending.client_order_id),
+        )
+        send_notification(
+            f"[ORDER-UNKLAR] {pending.symbol}: {side} - Boerse meldet Status "
+            f"'{status}', fuer eine Market-Order kein eindeutiges Ende "
+            f"(clientOrderId {pending.client_order_id}). Sie steht in der "
+            "pending-orders-Datei und wird im naechsten Zyklus erneut geprueft - "
+            "bis dahin keine neue Order fuer diese Position. "
+            f"Nachschlagen: {lookup_command(pending.client_order_id)}"
+        )
+        return None
 
     def confirm_booked(self, client_order_id: str | None) -> None:
         """
@@ -870,7 +968,7 @@ class TradingClient:
             )
             return None
 
-        return self._place_order(
+        order = self._place_order(
             kind=KIND_MARKET,
             symbol=symbol,
             side="SELL",
@@ -882,6 +980,14 @@ class TradingClient:
                 newClientOrderId=client_order_id,
             ),
         )
+        # Teilfuellung beim Verkauf (Runde 1, 16.10.2026): Die Strategien
+        # buchen bis Runde 2 weiterhin die volle Menge - hier wird es
+        # wenigstens laut. Neue Ledger-Felder braucht das nicht.
+        if order is not None and is_partial_fill(order):
+            report_unbooked_partial_sell(
+                self._config.bot_name, symbol, order.get("clientOrderId"), order, quantity
+            )
+        return order
 
     def place_stop_loss_limit_sell(
         self,

@@ -86,6 +86,9 @@ class FakeDCAClient(PendingOrdersMixin):
         )
         return {
             "clientOrderId": f"dca-test-{self._next_client_order_id}",
+            # Wie jede echte Market-Antwort: mit Status (seit A1 vom
+            # 16.10.2026 bewertet der echte Client ihn vor dem Buchen).
+            "status": "FILLED",
             "executedQty": executed_qty,
             "cummulativeQuoteQty": reported_quote_qty,
             "fills": [

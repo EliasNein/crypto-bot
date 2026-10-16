@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .grid_signals import is_trend_break_stop_loss_hit
-from .risk import LedgerUnreadable
+from .risk import LedgerUnreadable, require_plausible_entry
 from .notifier import send_notification
 
 logger = logging.getLogger("grid_bot")
@@ -64,6 +64,16 @@ class GridPosition:
     # Verkauf gegen EUR, PnL aus EUR-Erloes minus USDT-Einsatz. Fehlt das
     # Feld (Altbestand), gilt symbol_guard.LEGACY_SYMBOL.
     symbol: str | None = None
+    # Staub beim Kauf (16.10.2026, T2): Hat die Boerse eine Kauf-Order nur
+    # teilweise ausgefuehrt und liegt die gekaufte Menge unter dem
+    # Mindestvolumen, laesst sie sich nie wieder verkaufen. Die Position
+    # wird dann sofort geschlossen - `close_reason` "dust", `dust_qty` die
+    # Menge, die als Staub auf dem Konto bleibt, `realized_pnl` =
+    # -quote_spent (vorsichtig bewertet wie K-A beim Trend-Bot: der Staub
+    # hat einen Restwert unter dem Mindestvolumen). Im Normalfall 0.0 bzw.
+    # None. Teilverkaeufe nutzen diese Felder erst ab Runde 2.
+    dust_qty: float = 0.0
+    close_reason: str | None = None
 
     @staticmethod
     def new(
@@ -239,6 +249,13 @@ class GridLedger:
         return any(r.get("client_order_id") == client_order_id for r in self._read())
 
     def record_buy(self, position: GridPosition) -> None:
+        # Nur der NEUE Eintrag wird geprueft (A3, 16.10.2026) - die alten
+        # Eintraege ohne Bestand duerfen das Schreiben nicht blockieren,
+        # sonst stuende der Bot bis zur Bereinigung still.
+        require_plausible_entry(
+            "Grid-Ledger", position.dry_run, position.quantity, position.quote_spent,
+            position.client_order_id,
+        )
         records = self._read()
         records.append(asdict(position))
         self._write(records)

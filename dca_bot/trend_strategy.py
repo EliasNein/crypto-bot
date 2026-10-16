@@ -36,9 +36,11 @@ from .binance_client import TradingClient
 from .notifier import send_notification
 from .order_utils import (
     average_fill_price,
+    is_dust,
     net_executed_quantity,
     net_proceeds,
     quantize_quantity,
+    received_base_quantity,
 )
 from .pending_orders import (
     KIND_MARKET,
@@ -53,6 +55,7 @@ from .pending_orders import (
     RECONCILIATION_PREFIX,
     PendingOrder,
     executed_quantity,
+    is_partial_fill,
     order_lifecycle_state,
     reconcile_pending_orders,
     resolve_pending_order,
@@ -98,6 +101,10 @@ STOP_ORDER_STATUS_UNAVAILABLE = "nicht abrufbar"
 # pending_orders.UNKNOWN_FINAL_AFTER_SECONDS). Der Notaus reagiert in dieser
 # Zeit verzoegert.
 UNCLEAR_SELL_RECHECKS = 3
+
+# exit_reason eines Einstiegs, der nur teilweise und unter dem
+# Mindestvolumen ausgefuehrt wurde (T2, 16.10.2026, siehe TrendTrade).
+EXIT_REASON_DUST_ON_ENTRY = "dust_on_entry"
 UNCLEAR_SELL_RECHECK_SECONDS = 20.0
 
 # Eigener Name statt time.sleep direkt - die Tests ersetzen ihn.
@@ -179,14 +186,22 @@ class TrendFollowingStrategy:
         )
 
         if order is None and self._config.trading_enabled:
+            # Seit A1 (16.10.2026) auch: Order ohne Ausfuehrung beendet
+            # (EXPIRED mit 0) oder Ende unklar - der Grund steht in der
+            # Meldung des Clients direkt davor. Kein Ledger-Eintrag, keine
+            # Stop-Order, der Slot bleibt frei.
             logger.error(
-                "Echter Trend-Einstieg fehlgeschlagen für %s (Preis ~%.2f).",
+                "Echter Trend-Einstieg für %s (Preis ~%.2f) nicht verbucht: "
+                "abgelehnt, ohne Ausfuehrung beendet oder Ausgang unklar "
+                "(siehe Meldung davor).",
                 self._config.symbol,
                 price,
             )
             send_notification(
-                f"[TREND-FEHLER] Echter Einstieg fehlgeschlagen für "
-                f"{self._config.symbol} (Preis ~{price:.2f}). Siehe Bot-Log."
+                f"[TREND-FEHLER] Echter Einstieg für {self._config.symbol} "
+                f"(Preis ~{price:.2f}) nicht verbucht - von der Börse abgelehnt, "
+                "ohne Ausführung beendet oder Ausgang unklar. Nichts gebucht, "
+                "siehe Bot-Log."
             )
             return
 
@@ -234,6 +249,19 @@ class TrendFollowingStrategy:
             client_order_id=order.get("clientOrderId") if order else None,
             symbol=self._config.symbol,
         )
+
+        # Teilfuellung unter dem Mindestvolumen (T2, 16.10.2026): Die
+        # Stop-Order ueber diese Menge wuerde abgelehnt, die Position galte
+        # Zyklus fuer Zyklus als ungeschuetzt und liesse sich auch nicht
+        # verkaufen. Gemessen am Limit-Preis der Stop-Order, wie in
+        # _ensure_stop_loss_protection.
+        partial = is_partial_fill(order)
+        if partial and is_dust(quantity, self._stop_limit_price_for(entry_price), rules):
+            self._close_entry_as_dust(trade, order, rules)
+            self._ledger.record_entry(trade)
+            self._client.confirm_booked(trade.client_order_id)
+            self._report_entry_dust(trade, order, "")
+            return
 
         # Ledger-Eintrag SOFORT nach dem bestätigten Kauf - bewusst VOR
         # der Stop-Loss-Order (Sicherheitsreview-Punkt K2). Vorher stand
@@ -300,12 +328,72 @@ class TrendFollowingStrategy:
                 "Position aktuell nur software-intern abgesichert."
             )
 
+        note = (
+            f" - Teilfüllung: Börse meldet {order.get('status')}, ausgeführt "
+            f"{quote_spent:.2f} von {amount:.2f}"
+            if partial
+            else ""
+        )
         logger.info(
-            "Trend-Einstieg: %s @ %.2f (Menge: %.8f)", self._config.symbol, entry_price, quantity
+            "Trend-Einstieg: %s @ %.2f (Menge: %.8f)%s",
+            self._config.symbol,
+            entry_price,
+            quantity,
+            note,
         )
         tag = "[TREND-EINSTIEG]" if order is not None else "[TREND-EINSTIEG DRY-RUN]"
         send_notification(
-            f"{tag} Long {quantity:.8f} {self._config.symbol} @ {entry_price:.2f}"
+            f"{tag} Long {quantity:.8f} {self._config.symbol} @ {entry_price:.2f}{note}"
+        )
+
+    def _stop_limit_price_for(self, entry_price: float) -> float:
+        """Limit-Preis der Stop-Order zu einem Einstieg (wie in _open_position)."""
+        stop_price = entry_price * (1 - self._config.stop_loss_pct / 100)
+        return stop_price * (1 - self._config.stop_limit_offset_pct / 100)
+
+    def _close_entry_as_dust(self, trade: TrendTrade, order: dict, rules) -> None:
+        """
+        Schliesst einen Einstieg, der nur teilweise und unter dem
+        Mindestvolumen ausgefuehrt wurde, noch bevor er ins Ledger kommt
+        (T2, 16.10.2026, Muster wie _close_with_dust aus K-A).
+
+        Anders als dort KEINE Stop-Loss-Sperre: Es hat kein Stop-Loss-
+        Ereignis stattgefunden, nur ein zu kleiner Kauf. Keine Stop-Order.
+        Bewertet wird vorsichtig mit realized_pnl = -quote_spent, obwohl
+        der Staub einen Restwert unter dem Mindestvolumen hat. `quantity`
+        ist die erhaltene Menge ohne Rundung (siehe
+        order_utils.received_base_quantity) - gerundet koennte sie 0 sein,
+        und das lehnt der Ledger-Schutz A3 ab.
+        """
+        received = received_base_quantity(order, rules)
+        trade.quantity = received
+        trade.dust_qty = received
+        trade.status = "closed"
+        trade.exit_time = trade.entry_time
+        trade.exit_reason = EXIT_REASON_DUST_ON_ENTRY
+        trade.realized_pnl = -trade.quote_spent
+
+    def _report_entry_dust(self, trade: TrendTrade, order: dict, prefix: str) -> None:
+        logger.warning(
+            "%s[TREND-STAUB] Einstieg nur teilweise ausgefuehrt (Boerse meldet %s, "
+            "%.8f %s fuer %.2f) - die Menge liegt unter dem Mindestvolumen, eine "
+            "Stop-Order darueber wuerde abgelehnt. Trade %s sofort geschlossen "
+            "(dust_on_entry), Menge bleibt als Staub auf dem Konto, als Verlust "
+            "von %.2f gebucht. Keine Sperre.",
+            prefix,
+            order.get("status"),
+            trade.dust_qty,
+            self._config.symbol,
+            trade.quote_spent,
+            trade.id,
+            trade.quote_spent,
+        )
+        send_notification(
+            f"{prefix}[TREND-STAUB] Einstieg nur teilweise ausgeführt "
+            f"({trade.dust_qty:.8f} {self._config.symbol} für {trade.quote_spent:.2f}), "
+            "unter dem Mindestvolumen - sofort geschlossen, bleibt als Staub auf dem "
+            f"Konto, als Verlust von {trade.quote_spent:.2f} gebucht. Keine Sperre, "
+            "keine Stop-Order."
         )
 
     def _resolve_stop_order_before_close(self, open_trade: dict, rules=None) -> str:
@@ -525,10 +613,10 @@ class TrendFollowingStrategy:
         """
         Ob sich der Rest einer teilgefüllten Position noch verkaufen lässt:
         weniger als eine stepSize oder unter dem Mindestvolumen lehnt
-        Binance jede Order ab.
+        Binance jede Order ab. Die Regel steht seit dem 16.10.2026 in
+        order_utils.is_dust - sie gilt dort auch fuer Staub beim Kauf (T2).
         """
-        sellable = quantize_quantity(quantity, rules.step_size)
-        return sellable <= 0 or sellable * price < rules.min_notional
+        return is_dust(quantity, price, rules)
 
     def _close_with_dust(
         self, open_trade: dict, price: float, rules, log_prefix: str = ""
@@ -1869,6 +1957,14 @@ class TrendFollowingStrategy:
             client_order_id=pending.client_order_id,
             symbol=symbol,
         )
+        # Dieselbe Staub-Regel wie im direkten Pfad (T2, 16.10.2026).
+        if is_partial_fill(order) and is_dust(
+            quantity, self._stop_limit_price_for(entry_price), rules
+        ):
+            self._close_entry_as_dust(trade, order, rules)
+            self._ledger.record_entry(trade)
+            self._report_entry_dust(trade, order, RECONCILIATION_PREFIX)
+            return
         self._ledger.record_entry(trade)
 
         logger.warning(

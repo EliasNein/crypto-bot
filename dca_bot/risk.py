@@ -60,6 +60,54 @@ class LedgerUnreadable(Exception):
     """
 
 
+class ImplausibleLedgerEntry(ValueError):
+    """
+    Ein ECHTER Kauf/Einstieg ohne Menge oder ohne Einsatz soll ins Ledger
+    (Ledger-Schutz A3, 16.10.2026).
+
+    Hintergrund: Bis zu diesem Fix buchten alle drei Bots eine Market-Order,
+    die die Boerse mit `EXPIRED` und ausgefuehrt 0 beendet hatte, als
+    offene Position mit Menge 0 - elf solche Eintraege standen im
+    Grid-Ledger des Homeservers. Der eigentliche Fix sitzt in
+    binance_client._place_order (A1); diese Pruefung ist die letzte
+    Verteidigungslinie fuer jeden Weg, der daran vorbeifuehrt.
+
+    Die Exception fliegt VOR confirm_booked(): Der Pending-Eintrag bleibt
+    stehen, und die Reconciliation im naechsten Zyklus fragt die Boerse
+    erneut - ohne Wirkung wird er verworfen, mit echter Menge korrekt
+    nachgetragen.
+    """
+
+
+def require_plausible_entry(
+    ledger_name: str,
+    dry_run: object,
+    quantity: object,
+    quote_spent: object,
+    client_order_id: object = None,
+) -> None:
+    """
+    Wirft `ImplausibleLedgerEntry`, wenn ein nicht ausdruecklich als
+    Dry-Run markierter Eintrag keine positive Menge oder keinen positiven
+    Einsatz hat. Dry-Run-Eintraege bleiben unberuehrt - ihre Werte sind
+    simuliert und erreichen nie die Boerse.
+
+    `not (x > 0)` statt `x <= 0`: faengt auch NaN ab.
+    """
+    if dry_run is True:
+        return
+    if not (isinstance(quantity, (int, float)) and quantity > 0) or not (
+        isinstance(quote_spent, (int, float)) and quote_spent > 0
+    ):
+        raise ImplausibleLedgerEntry(
+            f"{ledger_name}: echter Eintrag mit Menge {quantity!r} und Einsatz "
+            f"{quote_spent!r} (clientOrderId {client_order_id}) wird NICHT "
+            "geschrieben - eine Order ohne Ausfuehrung ist kein Kauf. Der "
+            "Pending-Eintrag bleibt stehen, die Reconciliation fragt die Boerse "
+            "im naechsten Zyklus erneut."
+        )
+
+
 def utc_today() -> date:
     """
     Heutiges Datum in UTC.
@@ -389,6 +437,12 @@ class TradeLedger:
         return self._read()
 
     def record(self, trade: TradeRecord) -> None:
+        # Nur der NEUE Eintrag wird geprueft (A3) - Altbestand darf das
+        # Schreiben nicht blockieren.
+        require_plausible_entry(
+            "DCA-Ledger", trade.dry_run, trade.quantity, trade.quote_spent,
+            trade.client_order_id,
+        )
         records = self._read()
         records.append(asdict(trade))
         self._write(records)

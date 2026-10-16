@@ -24,6 +24,7 @@ from .order_utils import average_fill_price, net_executed_quantity, quantize_qua
 from .pending_orders import (
     RECONCILIATION_PREFIX,
     PendingOrder,
+    is_partial_fill,
     reconcile_pending_orders,
 )
 from .risk import KillSwitch, PortfolioStopLoss, TradeLedger, TradeRecord, utc_today
@@ -328,20 +329,25 @@ class DCAStrategy:
         )
 
         if order is None and self._config.trading_enabled:
-            # Echter Kaufversuch, der bei der Börse fehlgeschlagen ist
-            # (siehe vorherige Fehlermeldung aus binance_client.py) - das
-            # ist etwas anderes als ein Dry-Run und darf NICHT wie ein
-            # ausgeführter Trade ins Ledger, sonst verfälscht die
-            # geschätzte Menge Stop-Loss- und Tageslimit-Berechnung.
+            # Echter Kaufversuch, der nicht zustande gekommen ist (siehe
+            # vorherige Meldung aus binance_client.py) - das ist etwas
+            # anderes als ein Dry-Run und darf NICHT wie ein ausgeführter
+            # Trade ins Ledger, sonst verfälscht die geschätzte Menge
+            # Stop-Loss- und Tageslimit-Berechnung. Seit A1 (16.10.2026)
+            # auch: Order ohne Ausfuehrung beendet (EXPIRED mit 0) oder
+            # Ende unklar. Bis dahin stand so eine Order mit Menge 0 im
+            # Ledger und zaehlte als Kaufzyklus (last_trade_time, W2).
             logger.error(
-                "Echter Kaufversuch für %s fehlgeschlagen (Preis ~%.2f) - "
-                "kein Ledger-Eintrag, Betrag zählt nicht gegen das Tageslimit.",
+                "Echter Kaufversuch für %s (Preis ~%.2f) nicht verbucht: "
+                "abgelehnt, ohne Ausfuehrung beendet oder Ausgang unklar - kein "
+                "Ledger-Eintrag, Betrag zählt nicht gegen das Tageslimit.",
                 symbol,
                 price,
             )
             send_notification(
-                f"[FEHLER] Echter Kauf fehlgeschlagen für {symbol} "
-                f"(Preis ~{price:.2f}). Siehe Bot-Log für Details."
+                f"[FEHLER] Echter Kauf für {symbol} (Preis ~{price:.2f}) nicht "
+                "verbucht - von der Börse abgelehnt, ohne Ausführung beendet oder "
+                "Ausgang unklar. Nichts gebucht, siehe Bot-Log."
             )
             return
 
@@ -406,15 +412,25 @@ class DCAStrategy:
         self._client.confirm_booked(order.get("clientOrderId") if order else None)
 
         if order is not None:
+            # Teilfuellung (T2, 16.10.2026): gebucht ist, was die Boerse
+            # ausgefuehrt hat. DCA verkauft nie, deshalb keine Staub-Regel -
+            # nur der Hinweis, dass weniger als angefragt gekauft wurde.
+            note = (
+                f" - Teilfüllung: Börse meldet {order.get('status')}, ausgeführt "
+                f"{quote_spent:.2f} von {amount:.2f}"
+                if is_partial_fill(order)
+                else ""
+            )
             logger.info(
-                "DCA-Kauf ausgeführt: %.2f %s zu Preis %.2f",
+                "DCA-Kauf ausgeführt: %.2f %s zu Preis %.2f%s",
                 amount,
                 symbol,
                 buy_price,
+                note,
             )
             send_notification(
                 f"[KAUF] Echter DCA-Kauf ausgeführt: {amount:.2f} {symbol} "
-                f"@ {buy_price:.2f} (Menge: {quantity:.8f})"
+                f"@ {buy_price:.2f} (Menge: {quantity:.8f}){note}"
             )
         else:
             send_notification(

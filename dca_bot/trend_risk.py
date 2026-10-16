@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .risk import LedgerUnreadable
+from .risk import LedgerUnreadable, require_plausible_entry
 from .notifier import send_notification
 
 logger = logging.getLogger("trend_bot")
@@ -74,9 +74,12 @@ class TrendTrade:
     status: str = "open"  # "open" | "closed"
     exit_price: float | None = None
     exit_time: str | None = None
-    # "signal" | "stop_loss" | "manual_close" - Letzteres nur durch
-    # close_dry_run_trend.py (Dry-Run-Position von Hand geschlossen, ohne
-    # Boerse und ohne Stop-Loss-Sperre).
+    # "signal" | "stop_loss" | "manual_close" | "dust_on_entry".
+    # "manual_close" nur durch close_dry_run_trend.py (Dry-Run-Position von
+    # Hand geschlossen, ohne Boerse und ohne Stop-Loss-Sperre).
+    # "dust_on_entry" (16.10.2026, T2): Der Einstieg wurde nur teilweise
+    # ausgefuehrt, und die gekaufte Menge liegt unter dem Mindestvolumen -
+    # sofort geschlossen, Menge als dust_qty, ohne Stop-Order und ohne Sperre.
     exit_reason: str | None = None
     realized_pnl: float | None = None
     # clientOrderId der Order, die die Position geschlossen hat (eigener
@@ -295,6 +298,11 @@ class TrendLedger:
         return any(r.get("client_order_id") == client_order_id for r in self._read())
 
     def record_entry(self, trade: TrendTrade) -> None:
+        # Nur der NEUE Eintrag wird geprueft (A3, 16.10.2026).
+        require_plausible_entry(
+            "Trend-Ledger", trade.dry_run, trade.quantity, trade.quote_spent,
+            trade.client_order_id,
+        )
         records = self._read()
         records.append(asdict(trade))
         self._write(records)

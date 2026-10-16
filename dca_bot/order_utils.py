@@ -131,6 +131,37 @@ def quantize_price(price: float, tick_size: float, round_down: bool = True) -> f
     return float(ticks * _to_decimal(tick_size))
 
 
+def is_dust(quantity: float, price: float, rules: SymbolTradingRules) -> bool:
+    """
+    Ob sich eine Menge an der Boerse nicht mehr verkaufen laesst: weniger
+    als eine stepSize oder unter dem Mindestvolumen bei `price` - beides
+    lehnt Binance bei jeder Order ab.
+
+    Die Regel stammt aus K-A (Rest einer teilgefuellten Stop-Order, siehe
+    trend_strategy._remainder_is_dust) und gilt seit dem 16.10.2026 auch
+    fuer einen nur teilweise ausgefuehrten KAUF (T2): Ist schon die
+    gekaufte Menge Staub, kaeme jeder spaetere Verkauf bzw. jede
+    Stop-Order als Ablehnung zurueck.
+    """
+    sellable = quantize_quantity(quantity, rules.step_size)
+    return sellable <= 0 or sellable * price < rules.min_notional
+
+
+def received_base_quantity(order: dict, rules: SymbolTradingRules) -> float:
+    """
+    Tatsaechlich erhaltene Base-Asset-Menge eines KAUFS, ohne Rundung auf
+    die stepSize: `executedQty` minus Kaufgebuehr in Base-Asset.
+
+    Fuer Staub (T2, 16.10.2026) - also gerade fuer Mengen, die
+    net_executed_quantity() auf 0 abrunden koennte, obwohl sie auf dem
+    Konto liegen. Ist die Gebuehr nicht kleiner als die Menge, gilt die
+    ungekuerzte Menge (gleiche Haltung wie net_executed_quantity).
+    """
+    raw = _safe_float(order.get("executedQty"), 0.0)
+    net = raw - sum_commission(order.get("fills"), rules.base_asset)
+    return net if net > 0 else raw
+
+
 def sum_commission(fills: object, asset: str) -> float:
     """
     Summiert die in `asset` abgerechnete Gebühr über alle Fills einer

@@ -125,6 +125,11 @@ class FakeExchange:
         # Jede Ausfuehrung, in Reihenfolge: Grundlage der Invariante.
         self.fills: list[dict] = []
         self._faults: dict[str, list[str]] = {}
+        # Liquiditaet je Market-Order (16.10.2026): Anteil der Menge, den die
+        # Boerse ausfuehrt, bevor sie den Rest ablaufen laesst. 1.0 = voll
+        # (FILLED), darunter EXPIRED - bei 0.0 mit ausgefuehrt 0, genau der
+        # Testnet-Befund vom 09.10./11.10.2026.
+        self._liquidity: dict[str, list[float]] = {}
         self.lookup_down = False
         self._next_order_id = 1000
 
@@ -158,6 +163,21 @@ class FakeExchange:
     def _fault(self, method: str) -> str | None:
         queue = self._faults.get(method)
         return queue.pop(0) if queue else None
+
+    def set_liquidity(self, method: str, *ratios: float) -> None:
+        """Anteile, die die naechsten Market-Orders von `method` ausfuehren."""
+        self._liquidity.setdefault(method, []).extend(ratios)
+
+    def _fill_ratio(self, method: str) -> float:
+        queue = self._liquidity.get(method)
+        return queue.pop(0) if queue else 1.0
+
+    def _execute_market(self, order: dict, qty: float, price: float, method: str) -> list[dict]:
+        """Fuehrt den verfuegbaren Teil aus; der Rest laeuft ab (EXPIRED)."""
+        fill_qty = self._q(qty * self._fill_ratio(method))
+        fills = [self._execute(order, fill_qty, price)] if fill_qty > 0 else []
+        order["status"] = "FILLED" if fill_qty >= qty - TOLERANCE else "EXPIRED"
+        return fills
 
     # -- interne Buchhaltung -------------------------------------------------
 
@@ -317,9 +337,8 @@ class FakeExchange:
             if qty * price < MIN_NOTIONAL:
                 raise _api_error(-1013, "Filter failure: NOTIONAL")
             order = self._new_order(symbol, newClientOrderId, "BUY", "MARKET", qty)
-            fill = self._execute(order, qty, price)
-            order["status"] = "FILLED"
-            return self._public(order, [fill])
+            fills = self._execute_market(order, qty, price, "order_market_buy")
+            return self._public(order, fills)
 
         return self._place("order_market_buy", action)
 
@@ -332,11 +351,10 @@ class FakeExchange:
                 raise _api_error(-1013, "Filter failure: NOTIONAL")
             if qty > self.free[base] + TOLERANCE:
                 raise _api_error(-2010, "Account has insufficient balance.")
-            self.free[base] -= qty
             order = self._new_order(symbol, newClientOrderId, "SELL", "MARKET", qty)
-            fill = self._execute(order, qty, price)
-            order["status"] = "FILLED"
-            return self._public(order, [fill])
+            fills = self._execute_market(order, qty, price, "order_market_sell")
+            self.free[base] -= float(order["executedQty"])
+            return self._public(order, fills)
 
         return self._place("order_market_sell", action)
 
@@ -567,9 +585,11 @@ class SharedAccountTestBase(unittest.TestCase):
         if bot_name == "dca":
             return bot._ledger.position(SYMBOL)[1]
         if bot_name == "grid":
+            # Staub beim Kauf (T2, 16.10.2026) gehoert dem Bot weiterhin -
+            # wie beim Trend-Bot (K-A), nur in einer geschlossenen Position.
             return sum(
-                float(r["quantity"])
-                for r in bot._ledger.open_positions()
+                float(r["quantity"]) if r["status"] == "open" else float(r.get("dust_qty") or 0.0)
+                for r in bot._ledger._read()
                 if r.get("dry_run") is False
             )
         total = 0.0

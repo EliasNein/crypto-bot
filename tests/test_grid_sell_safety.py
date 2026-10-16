@@ -150,6 +150,9 @@ class FakeGridClient(PendingOrdersMixin):
         )
         return {
             "clientOrderId": self._new_client_order_id(),
+            # Wie jede echte Market-Antwort: mit Status (seit A1 vom
+            # 16.10.2026 bewertet der echte Client ihn vor dem Buchen).
+            "status": "FILLED",
             "executedQty": executed_qty,
             "cummulativeQuoteQty": reported_quote_qty,
             "fills": [
@@ -184,6 +187,9 @@ class FakeGridClient(PendingOrdersMixin):
         # es liesse sich aus der Antwort kein Fuellpreis ableiten.
         return {
             "clientOrderId": self._new_client_order_id(),
+            # Wie jede echte Market-Antwort: mit Status (seit A1 vom
+            # 16.10.2026 bewertet der echte Client ihn vor dem Buchen).
+            "status": "FILLED",
             "executedQty": quantity,
             "cummulativeQuoteQty": gross,
             "fills": [

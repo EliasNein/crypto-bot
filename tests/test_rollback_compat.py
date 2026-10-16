@@ -27,10 +27,16 @@ ausprobiert wird, ist keiner.
    check_orders-Abgleich laufen. Dabei muss das unbekannte Feld die
    Schreibvorgaenge des alten Codes ueberleben.
 
-Geprueft werden zwei Staende: 10ce096 laeuft am 28.09.2026 auf beiden
-Servern, 46ca7a7 ist der Stand direkt vor dieser Runde. Fehlt einer davon
-(flacher Klon, kein git), wird der Test mit Begruendung uebersprungen -
-er ist dann ausdruecklich NICHT gelaufen.
+Geprueft werden drei Staende: 10ce096 laeuft am 28.09.2026 auf beiden
+Servern, 46ca7a7 ist der Stand direkt vor dieser Runde, 980f3c3 laeuft seit
+dem 29.09.2026 auf dem Homeserver (Rueckweg fuer den Fix vom 16.10.2026).
+Fehlt einer davon (flacher Klon, kein git), wird der Test mit Begruendung
+uebersprungen - er ist dann ausdruecklich NICHT gelaufen.
+
+Seit dem 16.10.2026 enthalten die Dateien zusaetzlich die Staub-Faelle aus
+T2: eine geschlossene Grid-Position mit `dust_qty`/`close_reason` und einen
+Trend-Trade mit `exit_reason` "dust_on_entry". Der alte Code muss beide
+lesen und darf die neuen Felder beim Schreiben nicht verlieren.
 
 Ausfuehren mit:  python -m unittest tests.test_rollback_compat -v
 """
@@ -63,6 +69,7 @@ REPO = Path(__file__).resolve().parent.parent
 OLD_STATES = (
     ("10ce096", "laeuft am 28.09.2026 auf VPS und Homeserver"),
     ("46ca7a7", "Stand direkt vor der Symbolbindung"),
+    ("980f3c3", "laeuft seit 29.09.2026 auf dem Homeserver"),
 )
 
 
@@ -106,6 +113,14 @@ def write_new_format_files(data: Path) -> dict[str, str]:
     )
     grid.record_buy(closed)
     grid.record_sell(closed.id, 77_140.0, datetime.now(timezone.utc).isoformat(), 0.2, "grid-sold")
+    # Staub beim Kauf (T2, 16.10.2026): sofort geschlossen, ohne Verkauf.
+    dust = GridPosition.new(
+        level_index=6, buy_price=77_000.0, target_sell_price=78_155.0, quantity=0.00005,
+        quote_spent=3.85, dry_run=False, client_order_id="grid-dust", symbol="BTCUSDT",
+    )
+    dust.status, dust.sold_at, dust.realized_pnl = "closed", dust.bought_at, -3.85
+    dust.dust_qty, dust.close_reason = 0.00005, "dust"
+    grid.record_buy(dust)
 
     trend = TrendLedger(paths["trend"])
     old_trade = TrendTrade.new(entry_price=48_000.0, quantity=0.0003, quote_spent=14.4,
@@ -113,6 +128,12 @@ def write_new_format_files(data: Path) -> dict[str, str]:
     trend.record_entry(old_trade)
     trend.record_exit(old_trade.id, 49_000.0, datetime.now(timezone.utc).isoformat(),
                       "signal", 0.3, "trend-old-exit")
+    dust_trade = TrendTrade.new(entry_price=50_000.0, quantity=0.00006, quote_spent=3.0,
+                                dry_run=False, client_order_id="trend-dust", symbol="BTCUSDT")
+    dust_trade.status, dust_trade.exit_time = "closed", dust_trade.entry_time
+    dust_trade.exit_reason, dust_trade.realized_pnl = "dust_on_entry", -3.0
+    dust_trade.dust_qty = 0.00006
+    trend.record_entry(dust_trade)
     open_trade = TrendTrade.new(entry_price=50_000.0, quantity=0.0003, quote_spent=15.0,
                                 dry_run=False, client_order_id="trend-open", symbol="BTCUSDT")
     trend.record_entry(open_trade)
@@ -254,6 +275,10 @@ assert client.sells, "Grid hat die offene Position nicht verkauft"
 sold = GridLedger(P["grid"]).position_by_id(opens[0]["id"])
 assert sold["status"] == "closed", "Grid-Position nicht geschlossen"
 assert sold["symbol"] == "BTCUSDT", "Feld symbol hat den Schreibvorgang des alten Codes nicht ueberlebt"
+dust = [r for r in GridLedger(P["grid"])._read() if r.get("client_order_id") == "grid-dust"]
+assert len(dust) == 1 and dust[0]["status"] == "closed", "Grid-Staub nicht mehr da"
+assert dust[0]["close_reason"] == "dust" and dust[0]["dust_qty"] == 0.00005, \
+    "Grid: Staub-Felder haben den Schreibvorgang des alten Codes nicht ueberlebt"
 
 from dca_bot.trend_config import TrendConfig
 from dca_bot.trend_strategy import TrendFollowingStrategy
@@ -271,6 +296,9 @@ exited = TrendLedger(P["trend"]).trade_by_id(open_trade["id"])
 assert exited["status"] == "closed" and exited["exit_reason"] == "stop_loss", "Trend-Ausstieg"
 assert client.cancels == ["9001"], "Trend hat die Stop-Order nicht storniert"
 assert exited["symbol"] == "BTCUSDT", "Trend: Feld symbol verloren"
+dust_trades = [t for t in TrendLedger(P["trend"])._read() if t.get("client_order_id") == "trend-dust"]
+assert len(dust_trades) == 1 and dust_trades[0]["exit_reason"] == "dust_on_entry", \
+    "Trend: Staub-Trade verloren"
 
 from dca_bot.config import Config
 from dca_bot.strategy import DCAStrategy
@@ -344,6 +372,8 @@ class NewFilesPremiseTestCase(unittest.TestCase):
             trend = json.loads(Path(paths["trend"]).read_text(encoding="utf-8"))
             alloc = json.loads(Path(paths["alloc"]).read_text(encoding="utf-8"))
             self.assertTrue(all(r["symbol"] == "BTCUSDT" for r in grid))
+            self.assertTrue(any(r.get("close_reason") == "dust" for r in grid))
+            self.assertTrue(any(r.get("exit_reason") == "dust_on_entry" for r in trend))
             self.assertTrue(all(r["symbol"] == "BTCUSDT" for r in trend))
             self.assertEqual(alloc["symbol"], "BTCUSDT")
             for latch in ("dca_sl", "grid_sl", "trend_sl"):
