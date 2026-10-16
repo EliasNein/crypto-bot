@@ -235,7 +235,8 @@ trading-bot/
 │   ├── reset_grid_stop_loss.py    # CLI: reset the grid stop-loss pause
 │   ├── reset_trend_stop_loss.py   # CLI: reset the trend stop-loss pause
 │   ├── fix_dry_run_quote_spent.py # CLI: one-off correction of corrupted dry-run amounts
-│   └── close_dry_run_trend.py     # CLI: close the dry-run trend position in the ledger
+│   ├── close_dry_run_trend.py     # CLI: close the dry-run trend position in the ledger
+│   └── remove_unfilled_grid_positions.py # CLI: remove grid positions without holdings
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -312,6 +313,14 @@ exchange); a trend position only has its stop order on the exchange.
   look up whether the order exists and whether it is booked (section
   8.4):
   `python -m dca_bot.check_orders --client-order-id grid-7f3a9c2e14b84d6fa0e51c83`
+- **No purchase without execution:** if the exchange ends a market order
+  without executing anything (e.g. `EXPIRED` with 0), the bot books
+  nothing (`[ORDER-OHNE-AUSFUEHRUNG]` in the log), and no ledger accepts a
+  real entry without quantity or spend. A purchase executed only partially
+  is booked with the real quantity, and closed immediately as dust if it
+  is below the minimum volume. A sale executed only partially is still
+  booked over the full quantity until round 2, but reported loudly
+  (`[…-TEILFUELLUNG-UNGEBUCHT]`, partial fill not booked).
 - **No second sale on an unclear outcome:** as long as a sale or a stop
   order is unresolved, the bot does not sell the same position again – on
   the shared account that would go through using another bot's holdings.
@@ -420,7 +429,8 @@ or aborts a buy cycle – every error while sending is only logged (see
   `[GRID-VERKAUF-FEHLGESCHLAGEN]` (sale failed),
   `[GRID-VERKAUF-GESPERRT]` (sale blocked), `[GRID-STOP-LOSS]`,
   `[GRID-NOTAUS]` (kill switch), `[GRID-FEHLER]` (error),
-  `[GRID-DOPPELVERKAUF]` (double sale).
+  `[GRID-DOPPELVERKAUF]` (double sale), `[GRID-STAUB]` (dust),
+  `[GRID-TEILFUELLUNG-UNGEBUCHT]` (partial fill not booked).
 - **Trend-following bot:** `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`
   (entry), `[TREND-AUSSTIEG]` (exit, with realised profit/loss and exit
   reason), `[TREND-VERKAUF-FEHLGESCHLAGEN]` (sale failed),
@@ -428,7 +438,8 @@ or aborts a buy cycle – every error while sending is only logged (see
   `[TREND-WARNUNG]` (warning), `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`
   (protection restored), `[TREND-NOTAUS]` (kill switch), `[TREND-FEHLER]`
   (error), `[TREND-TEILFUELLUNG]` (partial fill), `[TREND-DOPPELVERKAUF]`
-  (double sale).
+  (double sale), `[TREND-STAUB]` (dust), `[TREND-TEILFUELLUNG-UNGEBUCHT]`
+  (partial fill not booked).
 - **Capital allocator:** `[ALLOCATION-UPDATE]` (on a significant shift),
   `[ALLOCATOR-NOTAUS]` (kill switch), `[ALLOCATOR-FEHLER]` (error).
 - **All four:** `[HEARTBEAT]` (sign of life, see section 6). Across bots
@@ -528,13 +539,33 @@ simulated `realized_pnl` never counts as a result anywhere. Background and
 server procedure: `trading-bot-project.en.md`, log from 29.09.2026 (entry
 of 07.10.2026).
 
+### 8.6 Removing grid positions without holdings
+
+```bash
+python -m dca_bot.remove_unfilled_grid_positions                     # report only
+python -m dca_bot.remove_unfilled_grid_positions --apply --expect 11
+```
+
+Removes open, real grid positions whose quantity **and** spend are exactly
+0 – purchase orders that the exchange had ended without execution and that
+were nonetheless booked before the fix of 16.10.2026. Each
+`client_order_id` is first looked up at Binance (read-only). Only what is
+proven there as ended without execution is removed; everything else is
+refused individually and stays. A position with holdings is never
+touched. **Without `--apply` nothing is written.** With `--apply`,
+`--expect` is mandatory (exactly this many proven entries, otherwise
+refusal), the grid bot must be stopped (process lock), and a copy
+`grid_positions.json.pre-remove-<timestamp>` is made before writing.
+Background and server procedure: `trading-bot-project.en.md`, log from
+29.09.2026 (entry of 16.10.2026).
+
 ## 9. Tests
 
 ```bash
 python -m unittest discover -s tests -t .
 ```
 
-919 automated tests (as of 16.10.2026, all passing).
+981 automated tests (as of 16.10.2026, all passing).
 
 All tests run without network access and without Binance credentials
 (fake clients with the same interface as `binance_client.py`, temporary
@@ -559,6 +590,8 @@ correction.
 | `test_trend_auto_reset` | Analysis mode `--analyze-auto-reset` of the trend backtest |
 | `test_fix_dry_run_quote_spent` | One-off data correction of the dry-run amounts |
 | `test_close_dry_run_trend` | Closing the dry-run trend position: refusals, report, lock, no latch, real entry afterwards |
+| `test_unfilled_market_orders` | Market orders without or with partial execution: assessing the response, ledger guard, dust on purchase, report on a partial sale |
+| `test_remove_unfilled_grid_positions` | Removing grid positions without holdings: filter, refusals, report, lock, copy, verification |
 | `test_request_timeout` | Request timeout of the grid bot |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat timestamp, rate limit for cycle errors |
 | `test_shared_account` | All bots on one shared account: partial fill, unclear sales, long run with ownership invariant |

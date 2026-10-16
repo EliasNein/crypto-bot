@@ -1,7 +1,7 @@
 # Trading-Bot-Projekt: Planung, Fortschritts-Log und technische Referenz
 
-**Stand:** 7. Oktober 2026
-**Status:** Testnet-Betrieb, kein Live-Geld. Der Sicherheitsreview (K1–K5, W1–W18, Infrastruktur) ist seit dem 16.09. abgeschlossen. Der Homeserver läuft faktisch seit dem 16.09.2026 als vollständiges System, mit allen vier Bausteinen und aktivem Allocator-Opt-in für DCA und Trend. Der aktuelle Trading-Status dort wurde am 25.09.2026 verifiziert (siehe 6h). Der VPS ist seit dem 07.10.2026 abgeschlossen (Dienste gestoppt, Zugang entfernt, Vertrag gekündigt zum 12.10.), die VPS-Daten werden nicht ausgewertet, und der formale Cutover am 05.10. mit Snapshot-Schritt entfällt (siehe Log 07.10.2026). Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026. Seit dem Review sind mehrere Fund-und-Fix-Serien abgeschlossen: die Verbesserungsvorschläge (6i, 17.09.), die Dry-Run-Beträge (22.09.), die Code-Überprüfung vom 25.09. und der Systemcheck vom 27.09. mit K-A/K-B und W-A bis W-G (alle 6g). Die technische Referenz zum aktuellen Stand steht in Abschnitt 7.
+**Stand:** 16. Oktober 2026
+**Status:** Testnet-Betrieb, kein Live-Geld. Der Sicherheitsreview (K1–K5, W1–W18, Infrastruktur) ist seit dem 16.09. abgeschlossen. Der Homeserver läuft faktisch seit dem 16.09.2026 als vollständiges System, mit allen vier Bausteinen und aktivem Allocator-Opt-in für DCA und Trend. Der aktuelle Trading-Status dort wurde am 25.09.2026 verifiziert (siehe 6h). Der VPS ist seit dem 07.10.2026 abgeschlossen (Dienste gestoppt, Zugang entfernt, Vertrag gekündigt zum 12.10.), die VPS-Daten werden nicht ausgewertet, und der formale Cutover am 05.10. mit Snapshot-Schritt entfällt (siehe Log 07.10.2026). Die Testphase ist auf ca. 2–3 Monate verlängert, also bis etwa Mitte November bis Mitte Dezember 2026. Seit dem Review sind mehrere Fund-und-Fix-Serien abgeschlossen: die Verbesserungsvorschläge (6i, 17.09.), die Dry-Run-Beträge (22.09.), die Code-Überprüfung vom 25.09. und der Systemcheck vom 27.09. mit K-A/K-B und W-A bis W-G (alle 6g). Am 16.10. kam ein Fund aus dem Betrieb dazu: Market-Orders, die die Börse ohne Ausführung beendet hatte, standen als Positionen mit Menge 0 im Grid-Ledger (Fix Runde 1, siehe Log 16.10.2026). Die technische Referenz zum aktuellen Stand steht in Abschnitt 7.
 
 ---
 
@@ -11,7 +11,7 @@
 
 ## Aktueller Stand und offene Punkte
 
-*Stand 07.10.2026 für VPS, Deploy-Stand, Termine und Auswertung der Testphase, übrige Angaben Stand 29.09.2026. Dieser Abschnitt beschreibt wie Abschnitt 7 den aktuellen Stand und wird direkt korrigiert. Die Herleitung steht jeweils im Archiv (`trading-bot-projekt-archiv.md`), Abschnittsnummern und Überschriften sind dort unverändert.*
+*Stand 16.10.2026 für Deploy-Stand, Vorbedingungen und Auswertung der Testphase, 07.10.2026 für VPS und Termine, übrige Angaben Stand 29.09.2026. Dieser Abschnitt beschreibt wie Abschnitt 7 den aktuellen Stand und wird direkt korrigiert. Die Herleitung steht jeweils im Archiv (`trading-bot-projekt-archiv.md`), Abschnittsnummern und Überschriften sind dort unverändert.*
 
 ### Betrieb
 
@@ -21,7 +21,7 @@
 
 ### Deploy-Stand
 
-- Deployed: `980f3c3` auf Homeserver am 29.09.2026. Belege: das Journal vom 29.09.2026 (10:17 UTC) mit „Code-Version: 980f3c3“ bei Grid, Trend und Allocator, und laut Ausgabe von `git log -1` auf dem Homeserver am 06.10.2026. Damit laufen dort W-C bis W-G samt Nachtrag (`a67e7dc` bis `46ca7a7`) und die Symbolbindung (`e2a37bd` bis `9ef7d60`). Auf master seitdem nur Doku sowie `close_dry_run_trend` (nicht deployed). Bei jedem Deploy nach dem Pull und vor dem Neustart: `python -m dca_bot.symbol_guard --report`.
+- Deployed: `980f3c3` auf Homeserver am 29.09.2026. Belege: das Journal vom 29.09.2026 (10:17 UTC) mit „Code-Version: 980f3c3“ bei Grid, Trend und Allocator, und laut Ausgabe von `git log -1` auf dem Homeserver am 06.10.2026. Damit laufen dort W-C bis W-G samt Nachtrag (`a67e7dc` bis `46ca7a7`) und die Symbolbindung (`e2a37bd` bis `9ef7d60`). Auf master seitdem Doku, `close_dry_run_trend` und der Fix vom 16.10.2026 zu Market-Orders ohne Ausführung samt Werkzeug `remove_unfilled_grid_positions` (beides nicht deployed, Ablauf: Log 16.10.2026). Bei jedem Deploy nach dem Pull und vor dem Neustart: `python -m dca_bot.symbol_guard --report`.
 - Deploys werden ab jetzt **hier** vermerkt, als `Deployed: <hash> auf Homeserver am <Datum>`. Das ersetzt den Vermerk vom 29.09.2026 in Archiv 6g. Details zum Rückweg auf den alten Code: Archiv 6g „Symbolbindung“.
 
 ### Termine
@@ -33,11 +33,13 @@
 
 1. **Positionsgrößen:** offen sind `DCA_QUOTE_AMOUNT`, `TREND_AMOUNT_PER_TRADE`, Grid-Spanne und `GRID_SPACING_PCT`. Beim Paarwechsel sind alle Beträge und die Spanne neu in Euro festzulegen. Details: Archiv 5b, 6d Punkt 3.
 2. **Datenbasis für `TREND_STOP_LIMIT_OFFSET_PCT`**, bisher n = 2 simulierte Exits. **Derzeit fließen keine Kalibrierungsdaten:** Die Dry-Run-Position vom 15.09. belegt den einzigen Trend-Slot. Nötig sind erst ihr Ausstieg, dann ein echter Einstieg, dann eine an der Börse gefüllte Stop-Order. Schließt sie über den internen Stop-Loss, sperrt der Latch neue Einstiege bis zum manuellen Reset. Details: Archiv 6f, 6h „Trend-Bot: Die Kalibrierungsdaten fließen noch nicht“.
-   Das Werkzeug `python -m dca_bot.close_dry_run_trend` schließt die Dry-Run-Position im Ledger, ohne Sperre; auf dem Homeserver ist es noch nicht angewendet (Ablauf: Log 07.10.2026). Als Datenbasis für den Offset taugt das Testnet aber kaum: Laut Auswertung der öffentlichen Kerzen zeigt es an etwa 4 % der Stunden ein Tief mehr als 10 % unter dem Mainnet. Eine echte Stop-Order wird dort vermutlich von einem Ausreißer ausgelöst, nicht vom Markt. Gefüllte Stop-Orders im Testnet belegen die Technik, nicht den Offset.
+   Das Werkzeug `python -m dca_bot.close_dry_run_trend` schließt die Dry-Run-Position im Ledger, ohne Sperre; auf dem Homeserver ist es noch nicht angewendet (Ablauf: Log 07.10.2026). Die Anwendung ist pausiert, bis der Fix vom 16.10.2026 deployt ist: Ein echter Einstieg, den die Börse ohne Ausführung beendet, hätte sonst eine Position ohne Bestand und ohne Stop-Order hinterlassen, die den Slot dauerhaft belegt. Als Datenbasis für den Offset taugt das Testnet aber kaum: Laut Auswertung der öffentlichen Kerzen zeigt es an etwa 4 % der Stunden ein Tief mehr als 10 % unter dem Mainnet. Eine echte Stop-Order wird dort vermutlich von einem Ausreißer ausgelöst, nicht vom Markt. Gefüllte Stop-Orders im Testnet belegen die Technik, nicht den Offset.
 3. **Abschließender Sicherheitsreview** kurz vor dem Live-Gang. Details: Archiv 6d, 6h.
 4. **Paarwechsel auf BTCEUR**, noch nicht geplant: alle vier `*_SYMBOL`, Grid-Spanne und Beträge in Euro, frische Ledger oder bewusst weitergeführter Altbestand. Offen sind außerdem die Dashboard-App und der Pilot. Nicht verifiziert ist, ob Binance bei einer Abfrage unter dem falschen Symbol mit −2013 antwortet, das lässt sich erst im Pilot prüfen. Details: Archiv 6g „Symbolbindung“, 6h.
 5. **„Gebühren mit BNB bezahlen“ ausgeschaltet.** Details: Archiv 6h.
 6. **Unterkonten pro Bot:** vor dem Live-Gang bewusst entscheiden, keine harte Vorbedingung. Fällt die Entscheidung dafür, braucht es Code (eigene Schlüssel je Bot, Audit über mehrere Konten) vor dem Live-Gang. Details: Archiv 6h (Ergänzung 29.09.), 6g „Systemcheck vom 27.09.2026“.
+7. **Kaufpfad prüft den Ausführungsstatus:** Die Antwort jeder Market-Order wird vor dem Buchen gegen Status und `executedQty` bewertet, dazu lehnen die Ledger echte Einträge ohne Menge oder Einsatz ab (A1/A3, auf master seit 16.10.2026, nicht deployed). Erfüllt, wenn deployt und auf dem Server belegt ist, dass eine Order ohne Ausführung im Journal als `[ORDER-OHNE-AUSFUEHRUNG]` erscheint und nicht als Kauf. Den Beleg liefert erst ein solcher Fall im Testnet. Details: Log 16.10.2026.
+8. **Teilfüllung beim Verkauf wird korrekt gebucht (Runde 2):** Bis dahin bucht der Bot einen nur teilweise ausgeführten Market-Verkauf über die volle Menge und meldet ihn nur laut (`[GRID-TEILFUELLUNG-UNGEBUCHT]`/`[TREND-TEILFUELLUNG-UNGEBUCHT]`). Details: Log 16.10.2026.
 
 ### Bewusst zurückgestellt oder vorgemerkt
 
@@ -54,8 +56,9 @@
 - In den Homeserver-Ledgern von DCA und Trend stehen Dry-Run- und echte Einträge nebeneinander, die Auswertung muss nach `dry_run` trennen. Das Grid-Ledger ist durchgehend echt. Details: Archiv 6h „Umstellung auf echte Orders“.
 - Einen Vergleich VPS gegen Homeserver gibt es nicht: Die VPS-Daten werden nicht ausgewertet (Entscheidung 07.10.2026, Gründe im Log). Details: Archiv 6g „Beobachtung zur Allocator-Wirkung“, 5a.
 - Die Dry-Run-Werte des VPS-Grid sind am 22.09. korrigiert. Die `.pre-fix`-Kopie wird nicht mehr gebraucht, weil die VPS-Daten nicht ausgewertet werden. Details: Archiv 6g „Folgefund aus K3“.
-- Staub (`dust_qty`) rechnet das Positions-Audit keinem Bot zu, er erscheint als Überschuss. Details: Archiv 6g „Systemcheck vom 27.09.2026“.
-- **Ticker-Ausreißer im Testnet:** Testnet-Gewinne sind dadurch verzerrt und taugen nicht für Renditeschätzungen. Als Ursache wird ein dünnes Orderbuch vermutet, das ist nicht gemessen. Beispiel 02.10.2026: Vom realisierten Grid-Ergebnis von 8,65 USDT (Auswertung vom 06.10.) entfallen 6,31 USDT auf diesen einen Tag, davon 6,15 USDT auf sechs Stufen (8 bis 13). Sie wurden am 02.10. zwischen 13:30:13 und 13:30:16 UTC zu 77.809 bis 79.480 USDT gekauft und zwischen 13:35:17 und 13:35:30 UTC zu 86.928 bis 86.962 USDT verkauft, je Stufe 0,82 bis 1,09 USDT, normale Zyklen bringen 0,14 bis 0,21 USDT. Die Mainnet-Stundenkerze von 13:00 UTC hatte ihr Tief bei 86.465,72, die Testnet-Kerze bei 75.745,57, das Mainnet-Tagestief lag bei 83.888 (Stundenkerzen, 18:00 UTC). Alle sechs Kaufpreise liegen unter dem Mainnet-Tagestief. Ansatz zur Bereinigung: Kauf- und Verkaufszeitpunkte der Grid-Trades gegen die Mainnet-Stundenkerzen prüfen. Aussagen über die Strategie stützen sich auf die Backtests (Mainnet-Kerzen), das Testnet belegt vor allem die Technik. Vom selben Ticker hängen auch die Trend-Dry-Run-Position vom 15.09. und die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` ab: Ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Details: Log 06.10.2026.
+- Staub (`dust_qty`) rechnet das Positions-Audit keinem Bot zu, er erscheint als Überschuss. Das gilt für den Trend-Bot seit K-A und für Staub beim Kauf (Grid und Trend) seit dem 16.10.2026. Details: Archiv 6g „Systemcheck vom 27.09.2026“, Log 16.10.2026.
+- **Einträge ohne Bestand im Grid-Ledger:** elf offene Positionen mit Menge 0 (Stufen 0 bis 3 seit 09.10., 4 bis 10 seit 11.10.2026) belegen bis zur Bereinigung ihre Stufen. Der Grid-Bot kauft dort nicht, das Grid-Ergebnis ab dem 09.10. ist dadurch zusätzlich verzerrt. In der Dashboard-App zählen sie als offen, im CSV-Export stehen sie als BUY-Zeilen mit Menge 0; ein vor der Bereinigung erstellter Export sollte danach neu erzeugt werden. Details: Log 16.10.2026.
+- **Ticker-Ausreißer im Testnet:** Testnet-Gewinne sind dadurch verzerrt und taugen nicht für Renditeschätzungen. Als Ursache wird ein dünnes Orderbuch vermutet, das ist nicht gemessen. Beispiel 02.10.2026: Vom realisierten Grid-Ergebnis von 8,65 USDT (Auswertung vom 06.10.) entfallen 6,31 USDT auf diesen einen Tag, davon 6,15 USDT auf sechs Stufen (8 bis 13). Sie wurden am 02.10. zwischen 13:30:13 und 13:30:16 UTC zu 77.809 bis 79.480 USDT gekauft und zwischen 13:35:17 und 13:35:30 UTC zu 86.928 bis 86.962 USDT verkauft, je Stufe 0,82 bis 1,09 USDT, normale Zyklen bringen 0,14 bis 0,21 USDT. Die Mainnet-Stundenkerze von 13:00 UTC hatte ihr Tief bei 86.465,72, die Testnet-Kerze bei 75.745,57, das Mainnet-Tagestief lag bei 83.888 (Stundenkerzen, 18:00 UTC). Alle sechs Kaufpreise liegen unter dem Mainnet-Tagestief. Die Prüfung aller Grid-Trades gegen die Mainnet-Stundenkerzen ist am 16.10.2026 gemacht (Elias, Kaufpreis mehr als 3 % unter dem Tief der Kaufstunde, nur verkaufte echte Positionen, ca. 41 Tage): Vom realisierten Grid-Ergebnis von **16,82 USDT** stammen **13,93 USDT** aus drei Ausreißer-Ereignissen (02.10. 13:30 UTC, Stufen 8 bis 13, 6,15; 09.10. 05:17 UTC, Stufen 4 und 5, 3,56; 09.10. 07:03 UTC, Stufen 7 bis 10, 4,23; die gerundeten Ereignissummen ergeben 13,94, die exakte Summe ist 13,93), rund 2,9 USDT aus normalem Betrieb (Näherung: 16,82 minus 13,93). Zum Vergleich der Stand vom 06.10.: 6,15 von 8,65 USDT. Details: Log 16.10.2026. Aussagen über die Strategie stützen sich auf die Backtests (Mainnet-Kerzen), das Testnet belegt vor allem die Technik. Vom selben Ticker hängen auch die Trend-Dry-Run-Position vom 15.09. und die Kalibrierung von `TREND_STOP_LIMIT_OFFSET_PCT` ab: Ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Details: Log 06.10.2026.
 
 ### Nicht im Repository
 
@@ -90,6 +93,8 @@ Bei der Auswertung der Homeserver-Daten am 06.10.2026 lag das realisierte Grid-E
 - Der Rest von etwa 2,5 USDT aus normalem Betrieb ist eine Näherung (8,65 minus 6,15) und nicht einzeln belegt. Ob dieser Rest frei von Ausreißern ist, wurde nicht geprüft.
 
 **Folgerung:** Testnet-Gewinne taugen nicht für Renditeschätzungen, die Regeln zur Auswertung stehen im Abschnitt „Aktueller Stand und offene Punkte“ unter „Für die Auswertung der Testphase“. Die Trend-Dry-Run-Position vom 15.09. und die Stop-Offset-Kalibrierung hängen vom selben Ticker ab, ein Ausreißer könnte dort Einstiege oder Stop-Loss-Auslösungen erzeugen, die es auf dem echten Markt nicht gäbe. Dass es so war, ist nicht geprüft.
+
+**Nachtrag 16.10.2026:** Die oben genannten 6,15 von 8,65 USDT waren unvollständig. Am 16.10.2026 hat Elias alle verkauften echten Grid-Positionen der letzten ca. 41 Tage per Skript gegen die Mainnet-Stundenkerzen geprüft (Kaufpreis mehr als 3 % unter dem Mainnet-Tief der Kaufstunde). Belegt sind zwei weitere Ereignisse am 09.10.2026 (05:17 und 07:03 UTC). Zusammen stammen 13,93 von inzwischen 16,82 USDT realisiert aus Ausreißer-Käufen, auf den 02.10. entfallen dabei wie oben 6,15 USDT. Details: Eintrag vom 16.10.2026.
 
 ### VPS abgeschlossen, keine Auswertung der VPS-Daten (07.10.2026)
 
@@ -140,6 +145,119 @@ Der Stabilitätstest vom 09.09. liegt weiter unter `docs/test-reports/`.
 12. Nach dem ersten Zyklus erneut `python -m dca_bot.audit_positions`. Anwendung und Deploy werden hier und unter „Deploy-Stand“ vermerkt.
 
 Löst danach ein Ausreißer die Stop-Order aus, schließt der Bot mit `stop_loss`, und die Sperre greift. Der nächste Einstieg braucht dann `python -m dca_bot.reset_trend_stop_loss`.
+
+### Market-Orders ohne Ausführung als Position verbucht (16.10.2026)
+
+**Befund vom Homeserver.** Im Grid-Ledger standen elf offene, echte Einträge ohne Bestand: `quantity` 0, `quote_spent` 0, als Kaufpreis der Ticker des Zyklus (am 11.10. bei allen sieben 70.192,26). Ausgabe der Abfrage auf dem Homeserver vom 16.10.2026, ergänzt um die Ordermenge laut Börse:
+
+| Stufe | `bought_at` (UTC) | Ledger-`id` | `client_order_id` | Ordermenge (BTC) |
+|---|---|---|---|---|
+| 0 | 2026-10-09T05:17:31 | `14f6af94-198f-47d0-91d0-33baf809d1d0` | `grid-33b3641be36f4e139d6c5fd3` | 0.00014000 |
+| 1 | 2026-10-09T05:17:31 | `54918462-99c6-46dc-a0c9-10478d687e32` | `grid-21918cc10b2c4d7fa859380c` | 0.00014000 |
+| 2 | 2026-10-09T05:17:32 | `c6564874-7359-4875-b4f2-8909599db89e` | `grid-1be308d2e7d14b0791bd1445` | 0.00014000 |
+| 3 | 2026-10-09T05:17:33 | `f29b06f6-e113-47c8-b03c-8f4a9b0aa756` | `grid-4bdc0b39c3aa43088c0e82c2` | 0.00014000 |
+| 4 | 2026-10-11T16:01:35 | `10418ef5-a18c-4241-adc5-8c9b8cdf3453` | `grid-f0f245ee4ac64a08bf933fae` | 0.00013000 |
+| 5 | 2026-10-11T16:01:36 | `19a4550e-ecc1-45fb-834a-dc7a4cce1787` | `grid-752a27dc70224a708070cb37` | 0.00013000 |
+| 6 | 2026-10-11T16:01:37 | `ed8c55fb-7c27-41f2-a7a8-1b7332014675` | `grid-d6a7e35b0665427bbd118d85` | 0.00013000 |
+| 7 | 2026-10-11T16:01:38 | `7aab14a6-6bf3-48e0-8eeb-34d729fdc684` | `grid-5ac7a25d606446e4ba972cf8` | 0.00013000 |
+| 8 | 2026-10-11T16:01:39 | `13f0fdee-b44c-4c7d-9f3b-17ec6d5ba9b3` | `grid-3932c321ec4f4907b6229765` | 0.00013000 |
+| 9 | 2026-10-11T16:01:39 | `1a5f6c8a-88ee-4466-87f3-dd46b4bd870e` | `grid-c67242e66b0d440e8d20d89a` | 0.00013000 |
+| 10 | 2026-10-11T16:01:40 | `c98bc132-506b-46db-a816-8d9b522a2019` | `grid-1fe9e148bbb041e5b74fa824` | 0.00013000 |
+
+**Börsenprüfung, von Hand gemacht** (Elias, 16.10.2026, `python -m dca_bot.check_orders --client-order-id <ID>` einzeln für alle elf IDs): Status `EXPIRED`, ausgeführt 0.00000000 bei allen elf. Die vier vom 09.10.2026 lauteten über je 0.00014000 BTC, die sieben vom 11.10.2026 über je 0.00013000 BTC. Die Börsenzeit der Orders vom 11.10. liegt bei 16:01:35 bis 16:01:40 UTC. Für die vier vom 09.10. liegt nur `bought_at` aus dem Ledger vor (05:17 UTC).
+
+**Abgrenzung.** Aus derselben Minute am 09.10.2026 stammen die echten Käufe der Stufen 4 bis 10 **mit** Bestand (05:17:43 bis 05:17:57 UTC, Menge 0.00011 bis 0.00014, Einsatz 9,07 bis 9,38, inzwischen alle `closed`). Sie gehören nicht dazu. Der Filter `status open, dry_run false, quantity 0, quote_spent 0` trifft auf dem Server genau die elf: Abfrage (a) 11 Zeilen, (b) beide Minuten 18 Zeilen (11 ohne und 7 mit Bestand), (c) halb leere Einträge keine. Das Journal vom 11.10. passt dazu: `[GRID-VERKAUF-FEHLGESCHLAGEN]` nach „Verkaufsmenge … 0“ für die Positionen der Stufen 0 bis 9 (`14f6af94` bis `1a5f6c8a`). Stufe 10 (`c98bc132`) fehlt dort, weil ihr Verkaufsziel nicht erreicht war.
+
+**Folgen bis zur Bereinigung** (aus dem Code abgeleitet): Die Stufen 0 bis 10 gelten als belegt, der Grid-Bot kauft dort nicht. Jeder 5-Minuten-Zyklus versucht für jede dieser Positionen mit erreichtem Ziel einen Verkauf über Menge 0, der vor der Börse abbricht: je Position ein ERROR „Verkaufsmenge … 0“ und eine WARNING `[GRID-VERKAUF-FEHLGESCHLAGEN]`, Telegram einmal je Position und Prozesslauf. Bei zehn Positionen sind das rund 5.800 Logzeilen am Tag. Positions-Audit, Bestandsabgleich und Startprüfung sehen keinen Fehler, weil Menge 0 nichts beansprucht. In der Dashboard-App zählen die Einträge als offen, der CSV-Export führt sie als BUY-Zeilen mit Menge 0.
+
+**Ursache.** `_place_order()` gab jede Antwort ohne Exception als ausgeführten Trade zurück. Status und `executedQty` wurden nur nach einem Verbindungs- oder Serverfehler bewertet (Rückfrage, Reconciliation), nicht im regulären Antwortweg. Bei `EXPIRED` mit 0 nahm `average_fill_price()` den Ticker als Ersatz, `net_executed_quantity()` ergab 0, `cummulativeQuoteQty` war 0, und alle drei Bots buchten das als Kauf, samt `[GRID-KAUF]`. Die Reconciliation bewertet `EXPIRED` mit 0 richtig als „ohne Wirkung“, sah diese Einträge aber nie: Der Pending-Eintrag war nach `confirm_booked()` sofort entfernt. Kein Test bildete eine Market-Order ohne Ausführung ab, alle Fakes füllten vollständig.
+
+**Quelle.** Dass eine nur teilweise gefüllte Market-Order mit Status `EXPIRED` endet, gilt laut Binance Spot API Enums, geprüft am 16.10.2026 (Elias): https://developers.binance.com/docs/binance-spot-api-docs/enums (Order status `EXPIRED`). Die Regel gilt damit für die Spot-API allgemein, nicht nur fürs Testnet. Dass eine Market-Order auch mit Ausführung 0 so endet, ist **nur auf dem Testnet beobachtet** (09.10. und 11.10.2026), **nicht in der Doku belegt**. Für BTCEUR im Echtgeld-Betrieb ist der Fix deshalb Vorbedingung 7.
+
+**Umgesetzt, Runde 1** (Plan und Entscheidungen vom 16.10.2026):
+
+- **A1, Ausführungsstatus im regulären Antwortweg** (`binance_client._settle_market_response`): Die Antwort einer Market-Order wird vor dem Buchen mit derselben Regel bewertet wie in der Reconciliation (`classify_order_status`, also `order_lifecycle_state`). Beendet mit Ausführung, auch `EXPIRED` mit Teilmenge: wie bisher, der Pending-Eintrag bleibt bis `confirm_booked()`. Beendet ohne Ausführung: Pending-Eintrag weg, ERROR `[ORDER-OHNE-AUSFUEHRUNG] … Boerse meldet Status EXPIRED, ausgefuehrt 0 - kein Trade, nichts gebucht`, `None` an die Strategie. Die meldet einmal per Telegram (`[GRID-FEHLER]`, `[TREND-FEHLER]` bzw. `[FEHLER]` mit „nicht verbucht“), es gibt keinen `[GRID-KAUF]`, und die Stufe bzw. der Trend-Slot bleibt frei. Noch aktiv, kein oder unbekannter Status: unklar, der Eintrag bleibt, `[ORDER-UNKLAR]` mit „Boerse meldet Status …“, die Sperren aus K-B greifen bis zur Reconciliation. Die läuft zu Beginn jedes Zyklus und bei jedem Start, beim Grid also alle 5 Minuten, beim Trend einmal am Tag. Ein Trend-Einstieg mit unklarem Ausgang belegt den Platz deshalb bis zum nächsten Tageszyklus (`[TREND-EINSTIEG-UNGEKLAERT]`, kein zweiter Kauf), bleibt die Order an der Börse auch dann ungeklärt, entsprechend länger. Die Logtexte trennen diesen Weg ausdrücklich vom Weg nach einem Verbindungsfehler. Stop-Orders laufen nicht durch diese Prüfung (E1), eine Market-Antwort ohne Statusfeld gilt als unklar (E2). Beleg, dass Market-Antworten das Feld tragen: `docs/test-reports/2026-09-09_dca-3tage-stabilitaetstest.log` (`'status': 'FILLED'`). Der Vorabcheck im Ablauf bleibt trotzdem Pflicht.
+- **A3, Ledger-Schutz** (`risk.require_plausible_entry`): `GridLedger.record_buy`, `TrendLedger.record_entry` und `TradeLedger.record` lehnen einen nicht als Dry-Run markierten Eintrag mit Menge ≤ 0 oder Einsatz ≤ 0 ab (`ImplausibleLedgerEntry`, auch bei NaN). Geprüft wird nur der neue Eintrag, die elf alten blockieren bis zur Bereinigung nichts. Die Exception fliegt vor `confirm_booked()`. Der Pending-Eintrag bleibt also stehen, und die Reconciliation fragt im nächsten Zyklus erneut.
+- **T2, Teilfüllung beim Kauf:** Gebucht wird die ausgeführte Menge mit dem echten Einsatz, wie bisher, jetzt mit dem Zusatz „Teilfüllung“ in `[GRID-KAUF]`, `[TREND-EINSTIEG]` und `[KAUF]`. Liegt die gekaufte Menge unter dem Mindestvolumen (`order_utils.is_dust`, beim Grid zum Füllpreis, beim Trend zum Limit-Preis der Stop-Order), wird sie sofort als Staub geschlossen. Beim Grid geschieht das über die neuen Felder `dust_qty` und `close_reason: "dust"` (`[GRID-STAUB]`, Stufe frei, keine Sperre), beim Trend über `exit_reason: "dust_on_entry"` und das bestehende `dust_qty` (`[TREND-STAUB]`, keine Stop-Order, keine Sperre). `realized_pnl` ist −`quote_spent` wie bei K-A. Das ist vorsichtig bewertet, denn der Staub hat einen Restwert unter dem Mindestvolumen. Die Menge des Staubs ist die tatsächlich erhaltene, nicht auf die `stepSize` gerundet, sonst könnte sie 0 sein und A3 würde sie ablehnen. Dieselbe Regel gilt beim Nachtragen über die Reconciliation. DCA verkauft nie und bucht nur die ausgeführte Menge. Entscheidung: `dust_qty` und `close_reason` kommen beim Grid schon in Runde 1, nur für Staub beim Kauf.
+- **Teilfüllung beim Verkauf, nur Absicherung:** Meldet die Börse bei einem Market-Verkauf weniger ausgeführt als bestellt (beendet, ausgeführt > 0, nicht `FILLED`), kommt `[GRID-TEILFUELLUNG-UNGEBUCHT]` bzw. `[TREND-TEILFUELLUNG-UNGEBUCHT]` in Log und Telegram, direkt in `place_market_sell()` und beim Nachtragen in `reconcile_pending_orders()`. Gebucht wird wie bisher die volle Menge, neue Felder braucht das nicht. Korrekt gebucht wird erst in Runde 2 (Vorbedingung 8). Ein Verkauf mit Ausführung 0 fällt unter A1: Die Position bleibt offen, beim Trend wird die Stop-Order neu gesetzt. Beim Grid wird ein Verkauf, der als `EXPIRED` mit 0 endet, in jedem 5-Minuten-Zyklus erneut versucht, solange das Ziel erreicht ist: je Zyklus und Position ein ERROR `[ORDER-OHNE-AUSFUEHRUNG]` und eine WARNING `[GRID-VERKAUF-FEHLGESCHLAGEN]`, per Telegram einmal je Position und Prozesslauf.
+- **Werkzeug** `python -m dca_bot.remove_unfilled_grid_positions` (Entscheidung B1): Es entfernt offene, echte Grid-Positionen, deren Menge **und** Einsatz als Zahl genau 0 sind. Jede `client_order_id` wird vorher bei Binance nachgeschlagen (nur lesender Client wie im Positions-Audit), entfernt wird nur, was beendet ohne Ausführung ist. Einzeln verweigert werden: nicht gefunden (−2013), Abfrage gescheitert, noch aktiv, ausgeführt > 0 (laut, mit „Bestand existiert“), Status unlesbar, Order-Seite nicht BUY, keine `client_order_id`, fremdes Symbol, Verkaufsfelder gesetzt, Teilverkauf oder Staub verbucht. Ein verweigerter Eintrag bleibt stehen. Insgesamt verweigert wird bei fehlendem oder unlesbarem Ledger, Einträgen in der Pending-Datei oder einer unlesbaren Pending-Datei, nicht passender Symbolprüfung, fehlendem Binance-Zugang und bei einem echten offenen Eintrag, bei dem nur Menge oder nur Einsatz 0 ist oder die Werte keine Zahlen sind. Bericht ist der Standard. `--apply` braucht `--expect N`, holt das Lock des Grid-Bots vor dem Lesen, prüft unter dem Lock alles neu, schreibt nur bei genau N belegten Einträgen, legt vorher die Kopie `grid_positions.json.pre-remove-<Zeitstempel>` an, entfernt atomar über `GridLedger.remove_unfilled_positions()` (die selbst nichts anderes als Einträge ohne Bestand entfernt) und kontrolliert danach, dass genau diese Einträge fehlen und alle anderen unverändert sind. Exit-Codes: 0, 1 Weigerung, 2 Bot läuft, 3 Kontrolle fehlgeschlagen.
+
+**Tests:** 62 neue, die Suite hat jetzt 981 Tests (vorher 919), alle grün. `tests/test_unfilled_market_orders.py` (32): A1 im echten `TradingClient` für Kauf und Verkauf mit `EXPIRED`, `CANCELED`, `REJECTED` und `EXPIRED_IN_MATCH` jeweils mit 0, Teilfüllung, `FILLED`, unklare und fehlende Status, Stop-Orders unverändert. Dazu die laute Meldung beim Teilverkauf (direkt und beim Nachtragen), A3 für alle drei Ledger, sowie Ende-zu-Ende auf dem geteilten Konto für Grid, Trend und DCA: Kauf und Verkauf mit Ausführung 0, Teilfüllung, Staub samt Bezugspreis (Grid Füllpreis, Trend Limit-Preis), Staub beim Nachtragen und A3 allein, wenn A1 umgangen wird. `FakeExchange` in `test_shared_account.py` hat dafür eine einstellbare Liquidität je Market-Order, die Eigentums-Invariante zählt Grid-Staub mit. `tests/test_remove_unfilled_grid_positions.py` (30) bildet die Lage auf dem Server nach, mit den elf IDs und den sieben gefüllten Käufen vom 09.10. (auch als offene Variante): Filter trifft genau die elf, Bericht schreibt nichts, je ein Test pro Weigerung, Lock, Kopie, Kontrolle und erneute Prüfung unter dem Lock, dazu Filter und Entfernen auf Ledger-Ebene (`is_unfilled_position`, `GridLedger.remove_unfilled_positions`). Die Fakes in `test_grid_sell_safety.py`, `test_trend_stop_loss.py` und `test_dca_fee_adjustment.py` liefern jetzt ein Statusfeld. `test_rollback_compat.py` prüft zusätzlich den Stand `980f3c3` und Dateien mit Grid- und Trend-Staub.
+
+**Mutationsprobe:** 59 Mutationen gegen die neuen Prüfungen (A1, Meldung beim Teilverkauf, A3, T2/Staub, Filter und Werkzeug). Im ersten Lauf waren es 58, davon 57 erkannt. Überlebt hatte der Wegfall der Pflichtprüfung von `--expect`: Die spätere Prüfung „genau N belegt“ fing den Fall ab, aber erst nach Lock und Börsenabfrage. Der Test verlangt jetzt die Weigerung davor, danach erkannt. Nachgereicht: Mutation 59 (Grid-Staub zum Verkaufsziel statt zum Füllpreis) mit eigenem Test auf Stufe 1, erkannt. Damit 59 von 59 erkannt. Die Tests liefen nur unter Windows; das Lock unter Linux belegt Schritt 8 des Ablaufs.
+
+**Rückweg:** `git checkout 980f3c3` und Neustart der Dienste. Der Rückweg-Test belegt für `980f3c3`, `46ca7a7` und `10ce096`: Der alte Code liest die neuen Dateien, arbeitet weiter und verliert `dust_qty`/`close_reason` beim Schreiben nicht. Teilverkäufe werden in Runde 1 nicht gebucht, offene Positionen haben also keine neuen Felder. Nach einem Rückweg fehlen A1 und A3, Einträge ohne Bestand können dann wieder entstehen. Die Bereinigung lässt sich mit der Kopie `.pre-remove-*` rückgängig machen, das brächte aber die elf Einträge zurück.
+
+**Ablauf auf dem Homeserver** (`jq` ist dort nicht bestätigt, die Prüfungen laufen deshalb als Python-Skripte):
+
+1. Uhrzeit wählen: nicht 00:20–00:35 UTC (Zwangstrennung), nicht 06:40–07:00 UTC (apt-Neustarts).
+2. Vorabcheck, Pflicht: `journalctl -u grid-bot --since "2026-10-11 16:01" --until "2026-10-11 16:02" | grep "erfolgreich platziert"` muss in der Antwort `'status': 'EXPIRED'` zeigen, eine normale Kauf-Zeile `'status': 'FILLED'`. Fehlt das Feld, anhalten: A1 würde dann jede Market-Order als unklar führen.
+3. `cp -a data data.bak-<Datum>`
+4. `git status` sauber, `git log -1` zeigt `980f3c3`, dann `git pull`.
+5. `python -m dca_bot.symbol_guard --report`: alle vier „würde starten“.
+6. Prüfskript, erwartet (a) 11 mit genau den IDs aus der Tabelle oben, (b) 18, (c) 0, Trend und DCA je 0:
+```bash
+python - <<'EOF'
+import json, os
+from dotenv import load_dotenv
+load_dotenv()
+num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+grid = json.load(open(os.getenv("GRID_STATE_FILE", "data/grid_positions.json"), encoding="utf-8"))
+a = [r for r in grid if r.get("status") == "open" and r.get("dry_run") is False
+     and num(r.get("quantity")) and r["quantity"] == 0
+     and num(r.get("quote_spent")) and r["quote_spent"] == 0]
+print("(a) Kandidaten:", len(a))
+for r in a:
+    print("   ", r["level_index"], r["bought_at"][:19], r["id"], r["client_order_id"])
+b = [r for r in grid if str(r.get("bought_at", ""))[:16] in ("2026-10-09T05:17", "2026-10-11T16:01")]
+print("(b) beide Minuten:", len(b))
+for r in b:
+    print("   ", r["level_index"], r["bought_at"][:19], r["status"], r["quantity"], r["quote_spent"], r["dry_run"])
+c = [r for r in grid if r.get("status") == "open" and r.get("dry_run") is False
+     and (not (num(r.get("quantity")) and num(r.get("quote_spent")))
+          or (r["quantity"] == 0) != (r["quote_spent"] == 0))]
+print("(c) halb leer oder keine Zahlen:", len(c))
+for name, var, default in (("Trend", "TREND_STATE_FILE", "data/trend_ledger.json"),
+                           ("DCA", "DCA_BOT_STATE_FILE", "data/trade_ledger.json")):
+    rows = json.load(open(os.getenv(var, default), encoding="utf-8"))
+    zero = [r for r in rows if r.get("dry_run") is False and r.get("status", "open") == "open"
+            and (r.get("quantity") == 0 or r.get("quote_spent") == 0)]
+    print(f"{name}: echte Einträge mit Menge oder Einsatz 0:", len(zero))
+EOF
+```
+7. `python -m dca_bot.remove_unfilled_grid_positions` (Bericht): 11 Kandidaten, alle „ohne Bestand belegt“, IDs wie in (a). Wird einer verweigert: anhalten.
+8. Lock-Probe bei laufendem Grid-Bot: `python -m dca_bot.remove_unfilled_grid_positions --apply --expect 11`. Erwartung: Exit-Code 2 (`echo $?`), „ABGEBROCHEN“, keine Kopie `grid_positions.json.pre-remove-*`.
+9. `sudo systemctl stop grid-bot`, dann `python -m dca_bot.remove_unfilled_grid_positions --apply --expect 11`: „GESCHRIEBEN: 11“.
+10. `python -m dca_bot.audit_positions` (Grid hat elf offene Positionen weniger, keine neue Diskrepanz) und das Prüfskript, erwartet überall 0:
+```bash
+python - <<'EOF'
+import json, os
+from dotenv import load_dotenv
+load_dotenv()
+for name, var, default in (("Grid", "GRID_STATE_FILE", "data/grid_positions.json"),
+                           ("Trend", "TREND_STATE_FILE", "data/trend_ledger.json"),
+                           ("DCA", "DCA_BOT_STATE_FILE", "data/trade_ledger.json")):
+    rows = json.load(open(os.getenv(var, default), encoding="utf-8"))
+    zero = [r for r in rows if r.get("dry_run") is False and r.get("status", "open") == "open"
+            and (r.get("quantity") == 0 or r.get("quote_spent") == 0)]
+    print(f"{name}: {len(rows)} Einträge, davon echt und offen mit Menge oder Einsatz 0: {len(zero)}")
+EOF
+```
+11. `sudo systemctl start grid-bot`, `journalctl -u grid-bot -f`: neue Code-Version, Symbolprüfung, erster Zyklus ohne „Verkaufsmenge … 0“.
+12. `sudo systemctl restart dca-bot trend-bot allocator`. DCA kauft wegen W2 nicht sofort, der Trend-Bot hält weiter die Dry-Run-Position. Danach muss „Code-Version“ überall den neuen Hash zeigen.
+13. Vermerk unter „Deploy-Stand“ und hier als eigener Absatz zur Bereinigung. Die Trend-Prozedur vom 07.10. bleibt pausiert, bis Elias sie freigibt.
+
+**Ergebnis zu den Ticker-Ausreißern** (Elias, 16.10.2026, Skript von Hand auf dem Homeserver). Die echten Käufe der Stufen 4 und 5 vom 09.10.2026 (05:17:43 und 05:17:44 UTC) ergeben aus Einsatz und Menge rechnerisch etwa 72.139 und 66.600 USDT, die Stufen 6 bis 10 etwa 82.446. Geprüft wurden alle verkauften echten Grid-Positionen im Fenster der letzten ca. 41 Tage: Kaufpreis gegen das Mainnet-Tief der Kaufstunde (öffentliche Stundenkerzen), als Ausreißer zählt ein Kauf mehr als 3 % darunter. Ergebnis: realisiert gesamt 16,82 USDT, davon 13,93 USDT aus solchen Käufen, in drei Ereignissen:
+
+| Zeitpunkt (UTC) | Stufen | Kaufpreise | Mainnet-Tief der Stunde | Gewinn (USDT) |
+|---|---|---|---|---|
+| 02.10.2026 13:30 | 8 bis 13 | 77.809 bis 79.480 | 86.466 | 6,15 |
+| 09.10.2026 05:17 | 4 und 5 | 72.139 und 66.600 | 82.225 | 3,56 |
+| 09.10.2026 07:03 | 7 bis 10 | 70.800 bis 79.902 | 82.494 | 4,23 |
+
+Die exakte Gesamtsumme ist 13,93 USDT (Skript, aus den ungerundeten Einzelwerten). Die Ereignissummen der Tabelle sind aus gerundeten Zeilen gebildet, ihre Summe von 13,94 weicht deshalb um 0,01 ab (Rundung). Es bleiben rund 2,9 USDT aus normalem Betrieb (Näherung: 16,82 minus 13,93). Die Grenze von 3 % und das Stundentief als Maßstab sind Setzungen dieser Auswertung, Käufe knapp über der Grenze sind nicht einzeln bewertet. Die Käufe der Stufen 6 bis 10 um 05:17 liegen bei 82.446 und damit über dem Mainnet-Tief der Stunde. Der Eintrag vom 06.10.2026 hat dazu einen Nachtrag.
+
+**Offen, Runde 2** (eigener Plan nach Freigabe von Runde 1): Teilfüllung beim Verkauf korrekt buchen, mit `partial_exit_*`, `dust_qty`/`close_reason` für Teilverkäufe, `partial_exit_from_stop`, dem Umzug von `open_quantity` und `record_partial_exit`.
 
 ---
 
@@ -254,6 +372,32 @@ gilt Abschnitt 7. Konfiguration, Start und Werkzeuge: README.
   nur einmal je Order und Prozesslauf). Das schließt auch das Fenster,
   das ohne jeden Netzwerkfehler durch einen Prozess-Kill zwischen Order
   und Ledger-Eintrag entstand.
+- **Kein Kauf ohne Ausführung** (seit 16.10.2026,
+  `binance_client._settle_market_response`): Auch eine reguläre Antwort
+  auf eine Market-Order wird vor dem Buchen bewertet, mit derselben
+  Regel wie in der Reconciliation. Beendet ohne Ausführung (z.B.
+  `EXPIRED` mit `executedQty` 0) → Pending-Eintrag weg,
+  `[ORDER-OHNE-AUSFUEHRUNG]` im Log, die Strategie bucht nichts und meldet
+  „nicht verbucht“. Noch aktiv, kein oder unbekannter Status → unklar,
+  Eintrag bleibt, `[ORDER-UNKLAR]`. Stop-Orders sind ausgenommen. Davor
+  buchten alle drei Bots so eine Order als Kauf mit Menge 0 zum
+  Tickerpreis (Log 16.10.2026). Ein Trend-Einstieg mit unklarem Ausgang
+  belegt den Platz bis zum nächsten Tageszyklus, weil die Reconciliation
+  erst zu Beginn des nächsten Zyklus erneut fragt. Ein Grid-Verkauf, der
+  als `EXPIRED` mit 0 endet, wird in jedem Zyklus erneut versucht (je
+  Zyklus ERROR und WARNING, Telegram einmal je Position und Prozesslauf).
+- **Ledger-Schutz** (seit 16.10.2026, `risk.require_plausible_entry`):
+  Kein Ledger nimmt einen echten Kauf oder Einstieg mit Menge ≤ 0 oder
+  Einsatz ≤ 0 an. Geprüft wird nur der neue Eintrag. Die Exception fliegt
+  vor `confirm_booked()`, der Pending-Eintrag bleibt für die
+  Reconciliation stehen.
+- **Teilfüllung einer Market-Order** (seit 16.10.2026): Beim Kauf wird die
+  ausgeführte Menge gebucht, unter dem Mindestvolumen sofort als Staub
+  geschlossen (`order_utils.is_dust`, Details in 7.2 und 7.3,
+  `realized_pnl` = −`quote_spent`, vorsichtig bewertet). Beim Verkauf
+  wird bis Runde 2 weiterhin die volle Menge gebucht, eine Teilfüllung
+  aber laut gemeldet (`[GRID-TEILFUELLUNG-UNGEBUCHT]`/
+  `[TREND-TEILFUELLUNG-UNGEBUCHT]`, direkt und beim Nachtragen).
 - **Kein zweiter Verkauf, solange der erste ungeklärt ist** (seit
   27.09.2026): Steht für eine Position noch ein Verkauf oder eine
   Stop-Order in der Pending-Datei, verkauft der Bot sie nicht erneut und
@@ -584,12 +728,22 @@ die Ergebnisse und einen wichtigen Caveat zur Preisspanne.
   Verkauf entsprechend auch keine. Die Telegram-Meldung kommt pro
   Position nur einmal je Prozesslauf (sonst im 5-Minuten-Takt), ins Log
   geht jeder Fehlschlag.
+- **Staub beim Kauf** (seit 16.10.2026): Führt die Börse einen Kauf nur
+  teilweise aus und liegt die gekaufte Menge zum Füllpreis unter dem
+  Mindestvolumen, ließe sie sich nie verkaufen. Die Position wird dann
+  sofort geschlossen: `close_reason` "dust", `dust_qty` die tatsächlich
+  erhaltene Menge, `sell_price` leer, `realized_pnl` = −`quote_spent`
+  (`[GRID-STAUB]`). Die Stufe ist danach frei, eine Sperre gibt es nicht.
+  Eine verkaufbare Teilmenge wird normal gebucht (`[GRID-KAUF]` mit
+  „Teilfüllung“). Eine Kauf-Order ohne Ausführung belegt keine Stufe mehr
+  (7.1).
 - **Telegram-Benachrichtigungen** (falls konfiguriert, siehe README Abschnitt 7):
   `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (mit realisiertem
   Gewinn/Verlust dieser Position), `[GRID-VERKAUF-FEHLGESCHLAGEN]`,
   `[GRID-VERKAUF-GESPERRT]`,
   `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`,
-  `[GRID-DOPPELVERKAUF]` (seit 27.09.2026, siehe 7.1).
+  `[GRID-DOPPELVERKAUF]` (seit 27.09.2026, siehe 7.1), seit 16.10.2026
+  außerdem `[GRID-STAUB]` und `[GRID-TEILFUELLUNG-UNGEBUCHT]`.
 - **Mengenlimit für Zyklusfehler:** Ein fehlgeschlagener Zyklus meldet
   `[GRID-FEHLER]` per Telegram nur beim ersten Auftreten seines
   Fehlertyps (Exception-Klasse). Weitere gleichartige Fehlschläge gehen
@@ -707,7 +861,8 @@ Bullenmarkt).
   `[TREND-VERKAUF-FEHLGESCHLAGEN]`, `[TREND-AUSSTIEG-GESPERRT]`, `[TREND-STOP-LOSS]`,
   `[TREND-WARNUNG]`, `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`,
   `[TREND-NOTAUS]`, `[TREND-FEHLER]`, seit 27.09.2026 außerdem
-  `[TREND-TEILFUELLUNG]` und `[TREND-DOPPELVERKAUF]`.
+  `[TREND-TEILFUELLUNG]` und `[TREND-DOPPELVERKAUF]`, seit 16.10.2026
+  `[TREND-STAUB]` auch beim Einstieg und `[TREND-TEILFUELLUNG-UNGEBUCHT]`.
 
 #### Echter, exchange-seitiger Stop-Loss
 
@@ -785,12 +940,22 @@ Börse selbst und wirkt unabhängig vom Bot-Prozess.
   hier die volle Menge, auf dem geteilten Konto aus fremdem Bestand, und
   eine beendete Order mit Teilfüllung schloss die ganze Position mit dem
   Teilerlös.
+- **Staub beim Einstieg** (seit 16.10.2026): Führt die Börse den
+  Einstieg nur teilweise aus und liegt die Menge zum Limit-Preis der
+  Stop-Order unter dem Mindestvolumen, würde die Stop-Order abgelehnt.
+  Der Trade wird dann sofort geschlossen: `exit_reason`
+  "dust_on_entry", `dust_qty` die erhaltene Menge, `realized_pnl` =
+  −`quote_spent`, keine Stop-Order, **keine** Sperre (`[TREND-STAUB]`).
+  Eine absicherbare Teilmenge wird normal gebucht und mit genau dieser
+  Menge abgesichert. Ein Einstieg ohne Ausführung belegt den Slot nicht
+  mehr (7.1).
 - **Eine einzige Regel für Order-Status:** die Bewertung, ob eine Order
   gefüllt, noch aktiv, beendet oder unlesbar ist, steht genau einmal im
   Projekt (`order_lifecycle_state()` in `pending_orders.py`) und wird
-  sowohl vom Zyklus-Check als auch vom Pending-Orders-Pfad (7.1)
-  verwendet. Vorher hatten beide eigene, leicht unterschiedliche
-  Regeln.
+  vom Zyklus-Check, vom Pending-Orders-Pfad (7.1) und seit dem
+  16.10.2026 auch von der Bewertung jeder regulären Market-Antwort
+  verwendet. Vorher hatten die ersten beiden eigene, leicht
+  unterschiedliche Regeln.
 - **Reconciliation beim Bot-Start:** bevor der erste reguläre Zyklus
   läuft, gleicht der Bot eine im Ledger offene Position gegen den
   tatsächlichen Order-Status bei Binance ab und korrigiert den Ledger
@@ -1137,7 +1302,17 @@ ersetzt und Deckung, Storno-Semantik, Mindestvolumen und Netzwerkfehler
 wie Binance behandelt. Geprüft wird eine Eigentums-Invariante pro Bot,
 unabhängig vom Codepfad (Details in 6g, „Systemcheck vom 27.09.2026“).
 Die übrigen Fakes starten weiterhin mit reichlich freiem Guthaben - neue
-Verkaufspfade gehören deshalb auch hier getestet.
+Verkaufspfade gehören deshalb auch hier getestet. Seit dem 16.10.2026
+lässt sich je Market-Order einstellen, welchen Anteil der `FakeExchange`
+ausführt (`set_liquidity`). Unter 1 endet die Order mit `EXPIRED`, bei 0
+mit ausgeführt 0, wie im Testnet am 09.10. und 11.10.2026.
+
+`test_unfilled_market_orders.py` (seit 16.10.2026) deckt Market-Orders
+ohne oder mit nur teilweiser Ausführung ab: die Bewertung im echten
+`TradingClient`, den Ledger-Schutz aller drei Ledger und die Wege durch
+alle drei Strategien auf dem geteilten Konto.
+`test_remove_unfilled_grid_positions.py` bildet für das
+Bereinigungswerkzeug die Lage auf dem Homeserver vom 16.10.2026 nach.
 
 Die ganze Suite: `python -m unittest discover -s tests -t .`
 

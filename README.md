@@ -226,7 +226,8 @@ trading-bot/
 │   ├── reset_grid_stop_loss.py    # CLI: Grid-Stop-Loss-Pause zurücksetzen
 │   ├── reset_trend_stop_loss.py   # CLI: Trend-Stop-Loss-Pause zurücksetzen
 │   ├── fix_dry_run_quote_spent.py # CLI: einmalige Korrektur verfälschter Dry-Run-Beträge
-│   └── close_dry_run_trend.py     # CLI: Dry-Run-Trend-Position im Ledger schließen
+│   ├── close_dry_run_trend.py     # CLI: Dry-Run-Trend-Position im Ledger schließen
+│   └── remove_unfilled_grid_positions.py # CLI: Grid-Positionen ohne Bestand entfernen
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -302,6 +303,14 @@ der Börse), eine Trend-Position nur ihre Stop-Order an der Börse.
   er `[ORDER-UNKLAR]` mit der clientOrderId. Nachschlagen, ob es die
   Order gibt und ob sie verbucht ist (Abschnitt 8.4):
   `python -m dca_bot.check_orders --client-order-id grid-7f3a9c2e14b84d6fa0e51c83`
+- **Kein Kauf ohne Ausführung:** Beendet die Börse eine Market-Order,
+  ohne etwas auszuführen (z.B. `EXPIRED` mit 0), bucht der Bot nichts
+  (`[ORDER-OHNE-AUSFUEHRUNG]` im Log), und kein Ledger nimmt einen echten
+  Eintrag ohne Menge oder Einsatz an. Ein nur teilweise ausgeführter Kauf
+  wird mit der echten Menge gebucht, unter dem Mindestvolumen sofort als
+  Staub geschlossen. Ein nur teilweise ausgeführter Verkauf wird bis
+  Runde 2 noch über die volle Menge gebucht, aber laut gemeldet
+  (`[…-TEILFUELLUNG-UNGEBUCHT]`).
 - **Kein zweiter Verkauf bei unklarem Ausgang:** solange ein Verkauf oder
   eine Stop-Order ungeklärt ist, verkauft der Bot dieselbe Position nicht
   erneut - auf dem geteilten Konto ginge das aus fremdem Bestand durch.
@@ -410,13 +419,14 @@ Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
   realisiertem Gewinn/Verlust dieser Position),
   `[GRID-VERKAUF-FEHLGESCHLAGEN]`, `[GRID-VERKAUF-GESPERRT]`,
   `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`,
-  `[GRID-DOPPELVERKAUF]`.
+  `[GRID-DOPPELVERKAUF]`, `[GRID-STAUB]`, `[GRID-TEILFUELLUNG-UNGEBUCHT]`.
 - **Trend-Following-Bot:** `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`,
   `[TREND-AUSSTIEG]` (mit realisiertem Gewinn/Verlust und
   Ausstiegsgrund), `[TREND-VERKAUF-FEHLGESCHLAGEN]`,
   `[TREND-AUSSTIEG-GESPERRT]`, `[TREND-STOP-LOSS]`, `[TREND-WARNUNG]`,
   `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`, `[TREND-NOTAUS]`,
-  `[TREND-FEHLER]`, `[TREND-TEILFUELLUNG]`, `[TREND-DOPPELVERKAUF]`.
+  `[TREND-FEHLER]`, `[TREND-TEILFUELLUNG]`, `[TREND-DOPPELVERKAUF]`,
+  `[TREND-STAUB]`, `[TREND-TEILFUELLUNG-UNGEBUCHT]`.
 - **Kapital-Allocator:** `[ALLOCATION-UPDATE]` (bei signifikanter
   Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
 - **Alle vier:** `[HEARTBEAT]` (Lebenszeichen, siehe Abschnitt 6).
@@ -516,13 +526,33 @@ nicht passt. Die simulierte `realized_pnl` zählt nirgends als Ergebnis.
 Hintergrund und Serverablauf: `trading-bot-projekt.md`, Log ab 29.09.2026
 (Eintrag vom 07.10.2026).
 
+### 8.6 Grid-Positionen ohne Bestand entfernen
+
+```bash
+python -m dca_bot.remove_unfilled_grid_positions                     # nur Bericht
+python -m dca_bot.remove_unfilled_grid_positions --apply --expect 11
+```
+
+Entfernt offene, echte Grid-Positionen, deren Menge **und** Einsatz genau 0
+sind - Kauf-Orders, die die Börse ohne Ausführung beendet hatte und die vor
+dem Fix vom 16.10.2026 trotzdem verbucht wurden. Jede `client_order_id`
+wird vorher bei Binance nachgeschlagen (nur lesend). Entfernt wird nur, was
+dort als beendet ohne Ausführung belegt ist, alles andere wird einzeln
+verweigert und bleibt stehen. Eine Position mit Bestand wird nie
+angefasst. **Ohne `--apply` wird nichts geschrieben.** Mit `--apply` ist
+`--expect` Pflicht (genau so viele belegte Einträge, sonst Weigerung), der
+Grid-Bot muss gestoppt sein (Prozess-Lock), und vor dem Schreiben entsteht
+eine Kopie `grid_positions.json.pre-remove-<Zeitstempel>`. Hintergrund und
+Serverablauf: `trading-bot-projekt.md`, Log ab 29.09.2026 (Eintrag vom
+16.10.2026).
+
 ## 9. Tests
 
 ```bash
 python -m unittest discover -s tests -t .
 ```
 
-919 automatische Tests (Stand 16.10.2026, alle grün).
+981 automatische Tests (Stand 16.10.2026, alle grün).
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
 (Fake-Clients mit derselben Schnittstelle wie `binance_client.py`,
@@ -548,6 +578,8 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_trend_auto_reset` | Analyse-Modus `--analyze-auto-reset` des Trend-Backtests |
 | `test_fix_dry_run_quote_spent` | Einmalige Datenkorrektur der Dry-Run-Beträge |
 | `test_close_dry_run_trend` | Schließen der Dry-Run-Trend-Position: Weigerungen, Bericht, Lock, keine Sperre, danach echter Einstieg |
+| `test_unfilled_market_orders` | Market-Orders ohne oder mit teilweiser Ausführung: Bewertung der Antwort, Ledger-Schutz, Staub beim Kauf, Meldung beim Teilverkauf |
+| `test_remove_unfilled_grid_positions` | Entfernen von Grid-Positionen ohne Bestand: Filter, Weigerungen, Bericht, Lock, Kopie, Kontrolle |
 | `test_request_timeout` | Request-Timeout des Grid-Bots |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat-Zeitstempel, Mengenlimit für Zyklusfehler |
 | `test_shared_account` | Alle Bots auf einem geteilten Konto: Teilfüllung, unklare Verkäufe, Dauerlauf mit Eigentums-Invariante |
