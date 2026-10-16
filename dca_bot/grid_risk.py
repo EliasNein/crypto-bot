@@ -100,6 +100,28 @@ class GridPosition:
         )
 
 
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def is_unfilled_position(record: dict) -> bool:
+    """
+    Offene, echte Position ohne Bestand: Menge UND Einsatz sind als Zahl
+    genau 0 (16.10.2026). Text wie "0" oder ein bool zaehlt bewusst nicht -
+    so ein Eintrag ist ein anderer Fehler und wird nicht angefasst.
+    """
+    quantity = record.get("quantity")
+    quote_spent = record.get("quote_spent")
+    return (
+        record.get("status") == "open"
+        and record.get("dry_run") is False
+        and _is_number(quantity)
+        and quantity == 0
+        and _is_number(quote_spent)
+        and quote_spent == 0
+    )
+
+
 class GridLedger:
     """
     Persistiert jede Grid-Position (offen und geschlossen) in einer
@@ -259,6 +281,34 @@ class GridLedger:
         records = self._read()
         records.append(asdict(position))
         self._write(records)
+
+    def remove_unfilled_positions(self, position_ids: set[str]) -> int:
+        """
+        Entfernt Eintraege OHNE Bestand - und nur solche (Werkzeug
+        remove_unfilled_grid_positions.py, 16.10.2026).
+
+        Ohne Bestand heisst: offen, echt (`dry_run` False), Menge und
+        Einsatz genau 0 - eine Kauf-Order, die die Boerse ohne Ausfuehrung
+        beendet hat und die vor dem Fix A1 trotzdem verbucht wurde. Zeigt
+        eine der IDs auf etwas anderes oder auf gar nichts, wird NICHTS
+        geschrieben: Diese Methode ist die letzte Sperre davor, eine
+        Position mit Bestand aus dem Ledger zu loeschen.
+
+        Atomar ueber denselben _write() wie jeder andere Schreibvorgang.
+        Gibt die Zahl der entfernten Eintraege zurueck.
+        """
+        records = self._read()
+        by_id = {r.get("id"): r for r in records}
+        for position_id in position_ids:
+            record = by_id.get(position_id)
+            if record is None or not is_unfilled_position(record):
+                raise ValueError(
+                    f"Eintrag {position_id!r} ist keine offene, echte Position "
+                    "ohne Bestand - es wird nichts entfernt."
+                )
+        kept = [r for r in records if r.get("id") not in position_ids]
+        self._write(kept)
+        return len(records) - len(kept)
 
     def record_sell(
         self,
