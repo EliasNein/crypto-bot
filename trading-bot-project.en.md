@@ -60,6 +60,11 @@
 - **Archiving the ledger files:** no acute need, only together with the dashboard app. Details: archive 6g „Vorgemerkt: langfristiges Datenwachstum“.
 - **Retroactively correcting the fill price of old ledger entries:** earmarked for the tax export. Entries from before K2 have no `clientOrderId`. Details: archive 6g „Priorität 4“.
 - **Item 15 (SQLite):** still years away at today's data volume. Details: archive 6i.
+- **Idea (Elias, 16.10.2026): capital budget as a fixed share of the account value, tested on the testnet.** Explicitly a test phase on the Binance testnet with test funds, not real money (quote currency there USDT). Instead of a fixed amount per order, the bots are assigned a fixed share of the account value (example from Elias: 30 %; at 10.000 that would be 3.000, at 11.000 correspondingly 3.300). If the account grows through monthly deposits, the bots' budget grows with it. This is to be tested for roughly half a year with simulated monthly top-ups of 1.000. This would be a new feature (today the amounts are fixed values in the `.env`), not merely raising settings. Status: only recorded, not decided, not planned, no assignment. Open:
+  - What counts as account value is open: on 16.10.2026, according to `check_orders`, the testnet account held 9.999,10 USDT and 1,00011 BTC (roughly 92.000 USDT in total; the BTC does not belong to the bots).
+  - There are no deposits on the testnet; the top-up would have to be simulated.
+  - Open beforehand are round 2 (booking a partial fill on sale, precondition 8) and the trend procedure.
+  - The returns from the testnet remain meaningless because of the ticker outliers; it would be about the mechanics.
 
 ### For evaluating the test phase
 

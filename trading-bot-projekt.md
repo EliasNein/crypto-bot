@@ -51,6 +51,11 @@
 - **Archivierung der Ledger-Dateien:** kein akuter Bedarf, nur zusammen mit der Dashboard-App. Details: Archiv 6g „Vorgemerkt: langfristiges Datenwachstum“.
 - **Füllpreis alter Ledger-Einträge rückwirkend korrigieren:** vorgemerkt für den Steuer-Export. Einträge von vor K2 haben keine `clientOrderId`. Details: Archiv 6g „Priorität 4“.
 - **Punkt 15 (SQLite):** bei der heutigen Datenmenge noch Jahre entfernt. Details: Archiv 6i.
+- **Idee (Elias, 16.10.2026): Kapitalbudget als fester Anteil am Kontowert, getestet im Testnet.** Ausdrücklich eine Testphase im Binance-Testnet mit Testguthaben, kein echtes Geld (Quote-Währung dort USDT). Den Bots wird nicht mehr ein fester Betrag pro Order zugewiesen, sondern ein fester Anteil des Kontowerts (Beispiel von Elias: 30 %, bei 10.000 wären das 3.000, bei 11.000 entsprechend 3.300). Wächst das Konto durch monatliche Einzahlungen, wächst das Budget der Bots mit. Getestet werden soll das rund ein halbes Jahr mit simulierten monatlichen Aufstockungen um 1.000. Das wäre ein neues Feature (heute sind die Beträge feste Werte in der `.env`), kein bloßes Anheben von Einstellungen. Status: nur festgehalten, nicht entschieden, nicht geplant, kein Auftrag. Offen:
+  - Was als Kontowert zählt, ist offen: Am 16.10.2026 lagen laut `check_orders` 9.999,10 USDT und 1,00011 BTC auf dem Testnet-Konto (rund 92.000 USDT insgesamt, das BTC gehört den Bots nicht).
+  - Im Testnet gibt es keine Einzahlungen, die Aufstockung müsste simuliert werden.
+  - Vorher offen sind Runde 2 (Teilfüllung beim Verkauf buchen, Vorbedingung 8) und die Trend-Prozedur.
+  - Die Erträge aus dem Testnet bleiben wegen der Ticker-Ausreißer ohne Aussage, es ginge um die Mechanik.
 
 ### Für die Auswertung der Testphase
 
