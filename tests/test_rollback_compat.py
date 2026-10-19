@@ -27,11 +27,22 @@ ausprobiert wird, ist keiner.
    check_orders-Abgleich laufen. Dabei muss das unbekannte Feld die
    Schreibvorgaenge des alten Codes ueberleben.
 
-Geprueft werden drei Staende: 10ce096 laeuft am 28.09.2026 auf beiden
-Servern, 46ca7a7 ist der Stand direkt vor dieser Runde, 980f3c3 laeuft seit
+Geprueft werden drei Staende: 6ed3bf5 laeuft am 28.09.2026 auf beiden
+Servern, f42e646 ist der Stand direkt vor dieser Runde, 5f5ebf0 laeuft seit
 dem 29.09.2026 auf dem Homeserver (Rueckweg fuer den Fix vom 16.10.2026).
-Fehlt einer davon (flacher Klon, kein git), wird der Test mit Begruendung
-uebersprungen - er ist dann ausdruecklich NICHT gelaufen.
+Die Git-Historie wurde am 19.10.2026 umgeschrieben; vorher hiessen die
+drei Staende 10ce096, 46ca7a7 und 980f3c3 (Zuordnung: trading-bot-projekt.md,
+Log 19.10.2026). Zu jedem Stand ist die Baum-ID von `dca_bot/` hinterlegt -
+sie ueberdauert jedes Umschreiben und belegt, dass genau der alte Code
+geprueft wird.
+
+Ueberspringen nur, wenn die Umgebung die alten Staende gar nicht haben
+KANN: kein git, kein eigenes Repository (ZIP-Download, `git archive`-
+Export), flacher Klon. Der Test ist dann ausdruecklich NICHT gelaufen. In
+einem vollstaendigen Klon schlaegt er dagegen fehl, wenn ein Stand fehlt,
+kein Vorfahre von HEAD ist oder einen anderen `dca_bot/`-Baum hat - etwa
+ein Hash aus der Zeit vor dem Umschreiben, der nur noch im lokalen Reflog
+ueberlebt.
 
 Seit dem 16.10.2026 enthalten die Dateien zusaetzlich die Staub-Faelle aus
 T2: eine geschlossene Grid-Position mit `dust_qty`/`close_reason` und einen
@@ -66,11 +77,18 @@ from dca_bot.trend_risk import TrendLedger, TrendStopLoss, TrendTrade
 
 REPO = Path(__file__).resolve().parent.parent
 
+# (Commit, Baum-ID von dca_bot/ in diesem Commit, Bedeutung)
 OLD_STATES = (
-    ("10ce096", "laeuft am 28.09.2026 auf VPS und Homeserver"),
-    ("46ca7a7", "Stand direkt vor der Symbolbindung"),
-    ("980f3c3", "laeuft seit 29.09.2026 auf dem Homeserver"),
+    ("6ed3bf5", "619533bf153ecbf0cdc8890ba94de049de8339bc",
+     "vor dem Umschreiben 10ce096; laeuft am 28.09.2026 auf VPS und Homeserver"),
+    ("f42e646", "f658b76a6cda2f12bd5f29815610dae05314a5b8",
+     "vor dem Umschreiben 46ca7a7; Stand direkt vor der Symbolbindung"),
+    ("5f5ebf0", "49612c423cf2ba4fbb42793f7b979727bf11e252",
+     "vor dem Umschreiben 980f3c3; laeuft seit 29.09.2026 auf dem Homeserver"),
 )
+
+SKIP = "ueberspringen"
+FAIL = "fehlschlag"
 
 
 def _flat_klines(symbol, interval, start, end):
@@ -257,7 +275,7 @@ assert abs(ap.trend_claim(Path(P["trend"]), "BTCUSDT").quantity - 0.0003) < 1e-1
 os.environ["GRID_STATE_FILE"] = P["grid"]
 os.environ["GRID_PENDING_ORDERS_FILE"] = P["pending"]
 from dca_bot import check_orders as co
-# Den Buchhaltungsabgleich gibt es erst seit W-E (194dfc7) - 10ce096 ist aelter.
+# Den Buchhaltungsabgleich gibt es erst seit W-E (383873d, vor dem Umschreiben 194dfc7) - 6ed3bf5 ist aelter.
 if hasattr(co, "check_local_bookkeeping"):
     assert co.check_local_bookkeeping("grid", "grid-open", None).ledger_field == "client_order_id"
 
@@ -337,12 +355,38 @@ def extract_old_code(commit: str, target: Path) -> None:
         zf.extractall(target)
 
 
-def old_code_available(commit: str) -> str | None:
-    """None, wenn der Stand verfuegbar ist - sonst der Grund, warum nicht."""
+def _out(result: subprocess.CompletedProcess) -> str:
+    return result.stdout.decode(errors="replace").strip()
+
+
+def old_code_available(commit: str, tree: str) -> tuple[str, str] | None:
+    """None, wenn der Stand pruefbar ist - sonst (SKIP oder FAIL, Grund).
+
+    SKIP nur, wenn die Umgebung den Stand gar nicht haben KANN. In einem
+    vollstaendigen Klon ist ein fehlender, fremder oder inhaltlich anderer
+    Stand ein Fehler in OLD_STATES und darf nicht still durchrutschen.
+    """
     if shutil.which("git") is None:
-        return "git ist nicht installiert"
+        return SKIP, "git ist nicht installiert"
+    # Eigenes Repository? Ein ZIP-Download oder `git archive`-Export hat kein
+    # .git - und laege er in einem fremden Repository, wuerde git sonst
+    # dessen Historie befragen.
+    top = _git("rev-parse", "--show-toplevel")
+    if top.returncode != 0 or not os.path.samefile(_out(top), REPO):
+        detail = top.stderr.decode(errors="replace").strip() or _out(top)
+        return SKIP, f"kein eigenes git-Repository (ZIP-Download oder git-archive-Export): {detail}"
+    if _out(_git("rev-parse", "--is-shallow-repository")) == "true":
+        return SKIP, "flacher Klon - aeltere Commits fehlen hier absichtlich"
+    # Ab hier vollstaendiger Klon: jede Abweichung ist ein Fehler.
     if _git("cat-file", "-e", f"{commit}^{{commit}}").returncode != 0:
-        return f"Commit {commit} ist in diesem Klon nicht vorhanden"
+        return FAIL, (f"Commit {commit} fehlt in einem vollstaendigen Klon - Hash aus der Zeit "
+                      "vor dem Umschreiben? Zuordnung: trading-bot-projekt.md, Log 19.10.2026")
+    if _git("merge-base", "--is-ancestor", commit, "HEAD").returncode != 0:
+        return FAIL, (f"Commit {commit} ist kein Vorfahre von HEAD - er gehoert nicht zur "
+                      "aktuellen Historie (alter Hash, nur noch im lokalen Reflog?)")
+    actual = _out(_git("rev-parse", f"{commit}:dca_bot"))
+    if actual != tree:
+        return FAIL, f"dca_bot/ in {commit} hat den Baum {actual or '(keinen)'}, erwartet {tree}"
     return None
 
 
@@ -384,10 +428,13 @@ class NewFilesPremiseTestCase(unittest.TestCase):
 
 class RollbackCompatibilityTestCase(unittest.TestCase):
     def test_old_code_reads_and_continues_on_new_files(self):
-        for commit, meaning in OLD_STATES:
+        for commit, tree, meaning in OLD_STATES:
             with self.subTest(stand=commit, bedeutung=meaning):
-                reason = old_code_available(commit)
-                if reason is not None:
+                status = old_code_available(commit, tree)
+                if status is not None:
+                    kind, reason = status
+                    if kind == FAIL:
+                        self.fail(f"Rueckweg gegen {commit} nicht pruefbar: {reason}")
                     self.skipTest(f"Rueckweg gegen {commit} NICHT geprueft: {reason}")
                 with tempfile.TemporaryDirectory() as tmp:
                     paths = write_new_format_files(Path(tmp) / "data")
