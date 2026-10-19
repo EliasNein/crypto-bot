@@ -9,28 +9,83 @@
 Three completely independent trading bots plus a controlling auxiliary
 process in the same project, all running against the **Binance Testnet
 API** – no real money is moved at any time as long as you do not enter
-real API keys:
+real API keys.
 
-- **DCA bot** (`dca_bot/main.py`): buys a fixed amount of an asset at fixed
-  intervals (dollar-cost averaging).
-- **Grid trading bot** (`dca_bot/main_grid.py`, see section 3.1): buys at
-  fixed price levels within a price range and sells each position
-  individually once the price rises one level higher.
-- **Trend-following bot** (`dca_bot/main_trend.py`, see section 3.2):
-  EMA crossover with a trend-strength filter on daily candles, long-only,
-  with a fixed stop-loss per trade. Validated by backtest across several
-  historical market phases before the first dry run (see
-  `trend_backtest.py`).
-- **Capital allocator** (`dca_bot/main_allocator.py`, see section 3.3):
-  not a trading bot of its own but a controlling auxiliary process that
-  continuously shifts capital between the DCA and trend-following bots
-  depending on the current trend strength. It never places orders itself
-  and only affects DCA/Trend after an explicit opt-in.
+> **Limits**
+> - **Testnet:** `USE_TESTNET=true` is the default. Real money only with
+>   `USE_TESTNET=false` and real API keys; every process reports this
+>   unmistakably at startup ([section 3](#3-configuration)).
+> - **Dry run by default:** no real orders without explicit opt-in
+>   (`*_BOT_ENABLE_TRADING=true`), not even on the testnet
+>   ([section 6](#6-safety-mechanisms-at-a-glance)).
+> - **No promise of returns** and no investment advice.
+
+| Component | Purpose | Entry point | Configuration |
+|---|---|---|---|
+| DCA bot | buys a fixed amount of an asset at fixed intervals (dollar-cost averaging) | `dca_bot/main.py` | [3](#3-configuration) |
+| Grid trading bot | buys at fixed price levels within a price range and sells each position individually once the price rises one level higher | `dca_bot/main_grid.py` | [3.1](#31-grid-bot) |
+| Trend-following bot | EMA crossover with a trend-strength filter on daily candles, long-only, with a fixed stop-loss per trade | `dca_bot/main_trend.py` | [3.2](#32-trend-following-bot) |
+| Capital allocator | not a trading bot of its own but a controlling auxiliary process that continuously shifts capital between the DCA and trend-following bots depending on the current trend strength; never places orders itself and only affects DCA/Trend after an explicit opt-in | `dca_bot/main_allocator.py` | [3.3](#33-capital-allocator) |
 
 All four share only the Binance/Telegram credentials in `.env` – state
 (trade history, kill switch, stop-loss) is completely separate for each
 bot, and they can run independently of each other (including at the same
-time).
+time). Before the first dry run, the trend-following bot was tested by
+backtest across several historical market phases (see
+`trend_backtest.py`), results in the project document (no evidence of
+future returns).
+
+**Tests:** 1020 automated tests (as of 19.10.2026, all passing), without
+network access and without Binance credentials ([section 9](#9-tests)).
+
+## Contents
+
+- [Quick start](#quick-start) · [Architecture](#architecture) · [Dashboard app](#dashboard-app)
+- [1. Prerequisites](#1-prerequisites)
+- [2. Installation](#2-installation)
+- [3. Configuration](#3-configuration): [3.1 Grid bot](#31-grid-bot) · [3.2 Trend-following bot](#32-trend-following-bot) · [3.3 Capital allocator](#33-capital-allocator)
+- [4. Starting](#4-starting)
+- [5. Project structure](#5-project-structure)
+- [6. Safety mechanisms at a glance](#6-safety-mechanisms-at-a-glance): [In an emergency](#in-an-emergency)
+- [7. Telegram notifications (optional)](#7-telegram-notifications-optional): [7.1](#71-setup) · [7.2](#72-which-events-are-reported) · [7.3](#73-messages-from-grid-trend-and-allocator)
+- [8. Tools](#8-tools): [8.1 Position audit](#81-position-audit-check-open-positions) · [8.2 Backtests](#82-backtests) · [8.3 Data correction](#83-one-off-data-correction-dry-run-amounts) · [8.4 Looking up orders](#84-looking-up-orders-eg-after-order-unklar) · [8.5 Close dry-run trend](#85-closing-the-dry-run-trend-position) · [8.6 Grid without holdings](#86-removing-grid-positions-without-holdings)
+- [9. Tests](#9-tests)
+- [10. Further documentation](#10-further-documentation)
+
+## Quick start
+
+Short version of sections 1–4, everything in dry run:
+
+1. Create a testnet account and generate an API key ([1](#1-prerequisites)).
+2. Create a virtual environment and install the dependencies ([2](#2-installation)).
+3. `cp .env.example .env`, enter the testnet keys, keep `*_BOT_ENABLE_TRADING`
+   at `false` ([3](#3-configuration)). For the grid bot, first adjust the
+   price bounds to the current market ([3.1](#31-grid-bot)).
+4. Check the connection: `python -m dca_bot.check_orders` – if price and
+   balance come through, the connection and API keys work
+   ([8.4](#84-looking-up-orders-eg-after-order-unklar)).
+5. Start one component, e.g. `python -m dca_bot.main`. The DCA bot then
+   only simulates each purchase and logs it ("[DRY-RUN]"). Stop with
+   `Ctrl+C` ([4](#4-starting)).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    DCA["DCA bot"] --- L1[("data/trade_ledger.json")]
+    GRID["Grid bot"] --- L2[("data/grid_positions.json")]
+    TREND["Trend-following bot"] --- L3[("data/trend_ledger.json")]
+    ALLOC["Capital allocator"] -- "writes allocation" --> L4[("data/allocator_state.json")]
+    L4 -. "reads, only after opt-in" .-> DCA
+    L4 -. "reads, only after opt-in" .-> TREND
+    DCA & GRID & TREND -- "orders (only with *_BOT_ENABLE_TRADING=true)" --> BIN["Binance (Testnet)"]
+```
+
+Four separate processes, each with its own state files (shown is the main
+file per process with its default path; there are others, e.g. the
+stop-loss latch and the pending file). Only the allocator writes the
+allocation; the DCA and trend bots read it only after an explicit opt-in
+([3.3](#33-capital-allocator)). The allocator places no orders.
 
 ## Dashboard app
 
@@ -194,6 +249,9 @@ to start from zero.
 
 ## 5. Project structure
 
+<details>
+<summary>Show project structure</summary>
+
 ```
 trading-bot/
 ├── dca_bot/
@@ -242,6 +300,8 @@ trading-bot/
 └── README.md
 ```
 
+</details>
+
 ## 6. Safety mechanisms at a glance
 
 Short version. The full description of each mechanism including its
@@ -283,7 +343,7 @@ exchange); a trend position only has its stop order on the exchange.
 - Check holdings before a bot is re-enabled or `*_BOT_ENABLE_TRADING` is
   changed: `python -m dca_bot.audit_positions` (see section 8.1).
 
-### All bots (details: 7.1)
+### All bots (Details: project document 7.1)
 
 - **Dry run by default:** no real orders without explicit opt-in
   (`*_BOT_ENABLE_TRADING=true`).
@@ -340,7 +400,7 @@ exchange); a trend position only has its stop order on the exchange.
 - **Errors per cycle** do not terminate the bot. **Heartbeat** once a day
   with the time of the last successful cycle.
 
-### Grid bot (details: 7.2)
+### Grid bot (Details: project document 7.2)
 
 - Dry-run positions are never really sold; real positions are never
   closed in simulation while trading is disabled
@@ -352,7 +412,7 @@ exchange); a trend position only has its stop order on the exchange.
 - `[GRID-FEHLER]` (grid error) is sent via Telegram only once per error
   type until a cycle has succeeded again.
 
-### Trend-following bot (details: 7.3)
+### Trend-following bot (Details: project document 7.3)
 
 - Real `STOP_LOSS_LIMIT` order on the exchange, protects the position
   even during a bot, internet or power outage; threshold derived from the
@@ -369,7 +429,7 @@ exchange); a trend position only has its stop order on the exchange.
 - If the stop order has partially sold, this is booked and only the
   remainder is sold.
 
-### Capital allocator (details: 7.4)
+### Capital allocator (Details: project document 7.4)
 
 - Never places orders itself (enforced by the code).
 - If the allocation is stale or unusable, DCA and Trend fall back to
