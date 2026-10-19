@@ -12,6 +12,9 @@ Punkte, Log ab 29.09.2026, technische Referenz (Abschnitt 7). Die
 Historie bis 28.09.2026 (Abschnitte 1-6i: Recherche, Reviews, Systemcheck,
 Symbolbindung) steht unverändert in trading-bot-projekt-archiv.md und wird
 nur bei Bedarf gelesen. Verweise wie „siehe 6g“ meinen das Archiv.
+Commit-Hashes im Archiv und in Log-Einträgen vor dem 19.10.2026 stammen
+aus der Zeit vor dem Umschreiben der Git-Historie; die Zuordnung zu den
+heutigen Hashes steht im Log 19.10.2026.
 
 Englische Übersetzungen (README.en.md, trading-bot-project.en.md) werden
 immer synchron gehalten: Jede Änderung an README.md oder
@@ -33,8 +36,9 @@ gibt es nur auf Deutsch.
   git log. ACHTUNG: Das ist nicht automatisch der Stand auf den Servern -
   deren tatsächlicher Commit-Hash steht in trading-bot-projekt.md,
   Abschnitt „Aktueller Stand und offene Punkte“, unter „Deploy-Stand“
-  (seit 16.10.2026: 76f261b auf dem Homeserver). Neue Deploys werden
-  dort vermerkt.
+  (seit 16.10.2026: 652e618 auf dem Homeserver, vor dem Umschreiben
+  76f261b; Server-HEAD seit 19.10.2026 57de9e9, nur Doku). Neue Deploys
+  werden dort vermerkt.
 - VPS: abgeschlossen seit 07.10.2026, Vertrag lief bis 12.10.2026 (gekündigt)
 - Für echtes Geld: BTCEUR (nicht USDT, im EWR nicht handelbar)
 - Kapital geplant: 150€ Grid / 150€ Allocator-Topf (DCA+Trend)
