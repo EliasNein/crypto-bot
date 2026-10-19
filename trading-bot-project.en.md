@@ -10,7 +10,7 @@
 > format; decimal commas in amounts are kept as in the original.
 
 **As of:** 19 October 2026
-**Status:** Testnet operation, no live money. The security review (K1–K5, W1–W18, infrastructure) has been complete since 16.09. The home server has in fact been running as the complete system since 16.09.2026, with all four components and active allocator opt-in for DCA and Trend. The current trading status there was verified on 25.09.2026 (see 6h). The VPS has been closed since 07.10.2026 (services stopped, access removed, contract cancelled for 12.10.), the VPS data will not be evaluated, and the formal cutover on 05.10. with a snapshot step is dropped (see log 07.10.2026). The test phase has been extended to approx. 2–3 months, i.e. until roughly mid-November to mid-December 2026. Since the review, several find-and-fix series have been completed: the improvement proposals (6i, 17.09.), the dry-run amounts (22.09.), the code review of 25.09. and the system check of 27.09. with K-A/K-B and W-A to W-G (all 6g). On 16.10. a finding from operations was added: market orders that the exchange had ended without execution were in the grid ledger as positions with quantity 0 (fix round 1, see log 16.10.2026). On 17.10. the dry-run trend position of 15.09. was closed; after that the first real trend position ran with a stop order on the exchange (see log 17.10.2026). On 18.10. a testnet outlier triggered this stop order: the position is closed as `stop_loss`, new trend entries are blocked until the manual reset (see log 18.10.2026). On 19.10. the Git history was rewritten (address unified, co-author lines removed): all commit hashes have been new since then, the code is unchanged (see log 19.10.2026). The technical reference for the current state is in section 7.
+**Status:** Testnet operation, no live money. The security review (K1–K5, W1–W18, infrastructure) has been complete since 16.09. The home server has in fact been running as the complete system since 16.09.2026, with all four components and active allocator opt-in for DCA and Trend. The current trading status there was verified on 25.09.2026 (see 6h). The VPS has been closed since 07.10.2026 (services stopped, access removed, contract cancelled for 12.10.), the VPS data will not be evaluated, and the formal cutover on 05.10. with a snapshot step is dropped (see log 07.10.2026). The test phase has been extended to approx. 2–3 months, i.e. until roughly mid-November to mid-December 2026. Since the review, several find-and-fix series have been completed: the improvement proposals (6i, 17.09.), the dry-run amounts (22.09.), the code review of 25.09. and the system check of 27.09. with K-A/K-B and W-A to W-G (all 6g). On 16.10. a finding from operations was added: market orders that the exchange had ended without execution were in the grid ledger as positions with quantity 0 (fix round 1, see log 16.10.2026). On 17.10. the dry-run trend position of 15.09. was closed; after that the first real trend position ran with a stop order on the exchange (see log 17.10.2026). On 18.10. a testnet outlier triggered this stop order: the position is closed as `stop_loss`, new trend entries are blocked until the manual reset (see log 18.10.2026). On 19.10. the Git history was rewritten (address unified, co-author lines removed): all commit hashes have been new since then, the code is unchanged (see log 19.10.2026). Round 2 was implemented on the same day: a market sale that was only partially executed is now booked with the executed quantity (precondition 8), on master, not yet deployed (see log 19.10.2026, "Round 2"). The technical reference for the current state is in section 7.
 
 ---
 
@@ -20,7 +20,7 @@
 
 ## Current status and open items
 
-*As of 19.10.2026 for deploy status, 18.10.2026 for precondition 2, trend bot and allocator (operations), the evaluation of the test phase and the earmarked item on `check_orders`, 17.10.2026 for the other preconditions and the forced disconnection (operations), 07.10.2026 for VPS and dates, other details as of 29.09.2026. Like section 7, this section describes the current state and is corrected directly. The derivation is in the archive (`trading-bot-projekt-archiv.md`) in each case; section numbers and headings are unchanged there.*
+*As of 19.10.2026 for deploy status, precondition 8, the earmarked items on `executedQty` and on the timestamps and the evaluation of partial sales, 18.10.2026 for precondition 2, trend bot and allocator (operations), the evaluation of the test phase and the earmarked item on `check_orders`, 17.10.2026 for the other preconditions and the forced disconnection (operations), 07.10.2026 for VPS and dates, other details as of 29.09.2026. Like section 7, this section describes the current state and is corrected directly. The derivation is in the archive (`trading-bot-projekt-archiv.md`) in each case; section numbers and headings are unchanged there.*
 
 ### Operations
 
@@ -34,7 +34,7 @@
 
 ### Deploy status
 
-- Deployed: `652e618` (before the rewrite `76f261b`) on the home server on 16.10.2026; server HEAD since the alignment `57de9e9`, only docs since then. Grid bot restarted at 14:32 UTC, DCA, Trend and allocator at 14:40 UTC, all four with „Code-Version: 76f261b“ (as in the log, old hash), symbol checks „passt“ (matches), holdings reconciliation OK. Compared with the previous state `5f5ebf0` (before the rewrite `980f3c3`, deployed 29.09.2026, with W-C to W-G including the addendum and the symbol binding), the tool `close_dry_run_trend` (applied on 17.10.2026) and the fix of 16.10.2026 for market orders without execution, including the tool `remove_unfilled_grid_positions` (applied on 16.10.2026), now also run there. Procedure and result: log 16.10.2026, "Cleanup and deploy". Rollback: `git checkout 5f5ebf0` and restart of the services (log 16.10.2026 still names the old hash `980f3c3` under "Rollback"). Server HEAD since the alignment on 19.10.2026 after the rewrite of the Git history (log 19.10.2026); `git diff --stat 652e618 HEAD -- dca_bot` is empty there. On master since then only docs and the rollback test (19.10.2026), no code under `dca_bot/`. „Code-Version“ in log and heartbeat is the server HEAD at process start (`dca_bot/version.py`): until the next restart the bots show `76f261b`, afterwards `57de9e9` or whatever HEAD is checked out then; the running code remains that of `652e618`. At every deploy, after the pull and before the restart: `python -m dca_bot.symbol_guard --report`.
+- Deployed: `652e618` (before the rewrite `76f261b`) on the home server on 16.10.2026; server HEAD since the alignment `57de9e9`, only docs since then. Grid bot restarted at 14:32 UTC, DCA, Trend and allocator at 14:40 UTC, all four with „Code-Version: 76f261b“ (as in the log, old hash), symbol checks „passt“ (matches), holdings reconciliation OK. Compared with the previous state `5f5ebf0` (before the rewrite `980f3c3`, deployed 29.09.2026, with W-C to W-G including the addendum and the symbol binding), the tool `close_dry_run_trend` (applied on 17.10.2026) and the fix of 16.10.2026 for market orders without execution, including the tool `remove_unfilled_grid_positions` (applied on 16.10.2026), now also run there. Procedure and result: log 16.10.2026, "Cleanup and deploy". Rollback: `git checkout 5f5ebf0` and restart of the services (log 16.10.2026 still names the old hash `980f3c3` under "Rollback"). Server HEAD since the alignment on 19.10.2026 after the rewrite of the Git history (log 19.10.2026); `git diff --stat 652e618 HEAD -- dca_bot` is empty there. On master since 19.10.2026 also round 2 (booking partial sales correctly, code commits `1eb806a` and `6da22bc`), not yet deployed. Procedure for the deploy and rollback to `652e618`: log 19.10.2026, "Round 2". „Code-Version“ in log and heartbeat is the server HEAD at process start (`dca_bot/version.py`): until the next restart the bots show `76f261b`, afterwards `57de9e9` or whatever HEAD is checked out then; the running code remains that of `652e618`. At every deploy, after the pull and before the restart: `python -m dca_bot.symbol_guard --report`.
 - From now on, deploys are recorded **here**, as `Deployed: <hash> auf Homeserver am <Datum>; Server-HEAD <hash>`. The first hash is the commit whose code is running; server HEAD is the commit checked out on the server, which moves forward with pure doc pulls. This replaces the note of 29.09.2026 in archive 6g. Details on rolling back to the old code: archive 6g „Symbolbindung“.
 
 ### Dates
@@ -52,7 +52,10 @@
 5. **"Pay fees with BNB" switched off.** Details: archive 6h.
 6. **Sub-accounts per bot:** decide deliberately before going live, not a hard precondition. If the decision is in favour, code is needed (separate keys per bot, audit across several accounts) before going live. Details: archive 6h (addendum 29.09.), 6g „Systemcheck vom 27.09.2026“.
 7. **The buy path checks the execution status:** the response to every market order is assessed against status and `executedQty` before booking, and the ledgers reject real entries without quantity or spend (A1/A3, deployed on the home server since 16.10.2026). Open: fulfilled only once it is proven on the server that an order without execution appears in the journal as `[ORDER-OHNE-AUSFUEHRUNG]` and not as a purchase. The proof in live operation arises as soon as the testnet again delivers a market order without execution. In the trend entry of 17.10.2026 the buy path assessed the status `FILLED` correctly; a case without execution has still not occurred. Details: log 16.10.2026, log 17.10.2026.
-8. **A partial fill on a sale is booked correctly (round 2):** until then, the bot books a market sale that was only partially executed over the full quantity and only reports it loudly (`[GRID-TEILFUELLUNG-UNGEBUCHT]`/`[TREND-TEILFUELLUNG-UNGEBUCHT]`). Details: log 16.10.2026.
+8. **A partial fill on a sale is booked correctly (round 2):** implemented on 19.10.2026 (`1eb806a` Grid and shared parts, `6da22bc` Trend), not yet deployed. A market sale that was only partially executed is booked with the executed quantity as a partial sale; the position stays open with the rest. A rest below the minimum notional closes the position as dust. The message `[GRID-TEILFUELLUNG-UNGEBUCHT]`/`[TREND-TEILFUELLUNG-UNGEBUCHT]` from round 1 is dropped. Open:
+   - Fulfilled only once a partial sale is proven on the server as `[GRID-TEILVERKAUF]` or `[TREND-TEILVERKAUF]` (partial sale). The proof only arises once the testnet executes a sale only partially. The trend path cannot be tested live after the deploy while the trend bot is blocked and holds no position.
+   - **Relevant for real money, not yet assessed:** after a partial sale on the internal stop-loss, the price is already below the stop threshold. The new stop order for the rest will then presumably be rejected. This is an assumption from a code comment in `trend_strategy.py`, not checked on the exchange. The rest is then without protection on the exchange until the next daily cycle, i.e. for up to 24 hours. The bot reports this immediately (`[TREND-WARNUNG] … Rest ungeschuetzt` (rest unprotected) with quantity and price).
+   Details: log 16.10.2026, log 19.10.2026 ("Round 2").
 
 ### Deliberately deferred or earmarked
 
@@ -64,10 +67,12 @@
 - **Retroactively correcting the fill price of old ledger entries:** earmarked for the tax export. Entries from before K2 have no `clientOrderId`. Details: archive 6g „Priorität 4“.
 - **Item 15 (SQLite):** still years away at today's data volume. Details: archive 6i.
 - **Verdict in `check_orders` for executed sales (earmarked on 18.10.2026):** observation, not yet implemented, a separate round with plan, test and mutation. Today every order whose ID is in the ledger counts as „verbucht - nichts zu tun“ (booked - nothing to do). The stop order is there from the moment it is placed (`stop_loss_order_id`), even while the position is open. Direction: for an executed SELL order, "booked" applies only if the entry is closed or `exit_client_order_id` matches. Otherwise the verdict reads: "executed, NOT yet booked in the ledger; the bot books it in the next cycle or at a restart; do not enter it by hand". Details: log 18.10.2026.
+- **`executedQty` versus `fills` (earmarked on 19.10.2026):** observation, no change. All booking paths read the executed quantity from `executedQty` of the order response, `fills` only for the fee. If the two differ, `executedQty` applies. There is no cross-check, neither in the previous paths nor in round 2. Details: log 19.10.2026 ("Round 2").
+- **Timestamps `sold_at`/`exit_time` (earmarked on 19.10.2026, decision D4):** they remain the booking time, also for partial sales. No time is stored for the individual parts. Switching to the exchange's time is a separate later round. Details: log 18.10.2026, log 19.10.2026 ("Round 2").
 - **Idea (Elias, 16.10.2026): capital budget as a fixed share of the account value, tested on the testnet.** Explicitly a test phase on the Binance testnet with test funds, not real money (quote currency there USDT). Instead of a fixed amount per order, the bots are assigned a fixed share of the account value (example from Elias: 30 %; at 10.000 that would be 3.000, at 11.000 correspondingly 3.300). If the account grows through monthly deposits, the bots' budget grows with it. This is to be tested for roughly half a year with simulated monthly top-ups of 1.000. This would be a new feature (today the amounts are fixed values in the `.env`), not merely raising settings. Status: only recorded, not decided, not planned, no assignment. Open:
   - What counts as account value is open: on 16.10.2026, according to `check_orders`, the testnet account held 9.999,10 USDT and 1,00011 BTC (roughly 92.000 USDT in total; the BTC does not belong to the bots).
   - There are no deposits on the testnet; the top-up would have to be simulated.
-  - Open beforehand is round 2 (booking a partial fill on sale, precondition 8). The trend procedure was carried out on 17.10.2026.
+  - Round 2 (booking a partial fill on sale, precondition 8) has been implemented since 19.10.2026, not yet deployed. The trend procedure was carried out on 17.10.2026.
   - The returns from the testnet remain meaningless because of the ticker outliers; it would be about the mechanics.
 
 ### For evaluating the test phase
@@ -76,7 +81,8 @@
 - The trend dry-run position of 15.09. has been closed as `manual_close` since 17.10.2026. Its simulated `realized_pnl` (+0,93062751) never counts as a result. The trend card of the dashboard app counts the entry as a closed trade, not as a result (analysis of 07.10.2026). Details: log 07.10.2026, log 17.10.2026.
 - There is no VPS vs. home server comparison: the VPS data will not be evaluated (decision 07.10.2026, reasons in the log). Details: archive 6g „Beobachtung zur Allocator-Wirkung“, 5a.
 - The dry-run values of the VPS grid were corrected on 22.09. The `.pre-fix` copy is no longer needed, because the VPS data will not be evaluated. Details: archive 6g „Folgefund aus K3“.
-- The position audit does not attribute dust (`dust_qty`) to any bot; it appears as a surplus. This applies to the trend bot since K-A and to dust on purchase (Grid and Trend) since 16.10.2026. Details: archive 6g „Systemcheck vom 27.09.2026“, log 16.10.2026.
+- The position audit does not attribute dust (`dust_qty`) to any bot; it appears as a surplus. This applies to the trend bot since K-A, to dust on purchase (Grid and Trend) since 16.10.2026 and to the rest after a grid partial sale (`close_reason` "dust_after_sell") since round 2. Details: archive 6g „Systemcheck vom 27.09.2026“, log 16.10.2026, log 19.10.2026.
+- **Partial sales in the dashboard app and CSV export (observation of 19.10.2026, no change in the app):** while a position is partially sold and still open, the dashboard and the "unrealised" estimate show the purchase quantity and the full spend, not the rest. The proceeds of the parts only appear under "Realisiert" (realised) at the close. The CSV export lists one SELL row per position with the time of the last part and the average price. On a close with dust, it shows the purchase quantity although only `partial_exit_qty` was sold. Both are relevant for a tax export with real money. Details: log 19.10.2026 ("Round 2").
 - **Entries without holdings in the grid ledger:** eleven open positions with quantity 0 (levels 0 to 3 since 09.10., 4 to 10 since 11.10.2026) occupied their levels until the cleanup on 16.10.2026. The grid bot did not buy there, which additionally distorts the grid result from 09.10. to 16.10. The copy `grid_positions.json.pre-remove-20261016T143039Z` on the server still contains them. A CSV export created before the cleanup lists them as BUY rows with quantity 0 and should be generated again. Details: log 16.10.2026.
 - **Ticker outliers on the testnet:** testnet profits are distorted by them and are not suitable for return estimates. A thin order book is suspected as the cause; this was not measured. Example 02.10.2026: of the realised grid result of 8,65 USDT (evaluation of 06.10.), 6,31 USDT fall on this single day, of which 6,15 USDT on six levels (8 to 13). On 02.10. they were bought between 13:30:13 and 13:30:16 UTC at 77.809 to 79.480 USDT and sold between 13:35:17 and 13:35:30 UTC at 86.928 to 86.962 USDT, 0,82 to 1,09 USDT per level, whereas normal cycles yield 0,14 to 0,21 USDT. The mainnet hourly candle of 13:00 UTC had its low at 86.465,72, the testnet candle at 75.745,57; the mainnet daily low was 83.888 (hourly candles, 18:00 UTC). All six purchase prices are below the mainnet daily low. The check of all grid trades against the mainnet hourly candles was done on 16.10.2026 (Elias, purchase price more than 3 % below the low of the purchase hour, only sold real positions, approx. 41 days): of the realised grid result of **16,82 USDT**, **13,93 USDT** come from three outlier events (02.10. 13:30 UTC, levels 8 to 13, 6,15; 09.10. 05:17 UTC, levels 4 and 5, 3,56; 09.10. 07:03 UTC, levels 7 to 10, 4,23; the rounded event sums add up to 13,94, the exact sum is 13,93), roughly 2,9 USDT from normal operation (approximation: 16,82 minus 13,93). For comparison, the status of 06.10.: 6,15 of 8,65 USDT. Details: log 16.10.2026. Statements about the strategy rest on the backtests (mainnet candles); the testnet mainly proves the technology. The real trend position of 17.10.2026 (stop order 3807835) and the stop-offset calibration also depend on the same ticker: there, an outlier could produce entries or stop-loss triggers that would not exist on the real market. On 18.10.2026 exactly that happened: an outlier triggered stop order 3807835. Details: log 06.10.2026, log 18.10.2026.
 - **Trend stop fill of 18.10.2026:** since then the trend ledger contains a real exit (`dry_run` false, `exit_reason` `stop_loss`, `realized_pnl` −1,54 USDT). It comes from a testnet outlier; the loss and the fill price are no measure of the real market. Details: log 18.10.2026.
@@ -420,6 +426,108 @@ Rewritten locally in a fresh clone, pushed and aligned on the working folder and
 - **Old commits locally:** in the working folder and on the home server the old commits are still in the reflog until git cleans them up. `git checkout 980f3c3` would still work there for the time being, but not in a fresh clone. For the rollback, `5f5ebf0` applies.
 - **GitHub:** old commits can presumably still be retrieved there via their direct hash for a while (not checked).
 
+### Round 2: booking partial sales correctly (19.10.2026)
+
+Plan, decisions and implementation on 19.10.2026, each commit approved by the operator. Code commits `1eb806a` (Grid and shared parts) and `6da22bc` (Trend), plus this docs commit. No deploy; the home server still runs `652e618`.
+
+- **Starting point:** precondition 8. If a market sale ends after executing only part of it (according to the Binance Spot API Enums with status `EXPIRED`, see log 16.10.2026), Grid and Trend booked the full quantity until round 2 and only reported `[…-TEILFUELLUNG-UNGEBUCHT]` (round 1). The unsold rest then lay on the account without a ledger entry.
+- **Decisions from the plan of 16.10.2026:**
+  - E6: grid fields following the trend pattern from K-A.
+  - The rest stays open with `open_quantity`; a rest below the minimum notional is dust.
+  - Holdings as the remaining quantity everywhere; `open_quantity` moves to `order_utils`.
+  - E8: `record_partial_exit` with the field `partial_exit_from_stop`.
+  - The reconciliation books by `executedQty`.
+  - E9: open grid positions with a partial sale block the rollback.
+- **Decisions of 19.10.2026:**
+  - D1: the trend bot protects the rest again and sells it in the next daily cycle.
+  - D2: `partial_exit_from_stop` also becomes True on the internal stop-loss.
+  - D3: `close_reason` "dust_after_sell".
+  - D4: `sold_at`/`exit_time` remain the booking time, a separate later round.
+  - D5: `check_orders` searches `partial_exit_order_ids`; V2 remains a separate round.
+  - D6: an open trend trade with a market part does not block the rollback, with a note.
+  - D7: idempotency via the orderId.
+  - D8: a rest below one stepSize on an otherwise complete sale is ignored as before.
+  - Condition on D1: a rejected stop order for the rest is reported immediately.
+- **Quantity rule** (`order_utils.sold_fully`): whether a sale closed the position is decided by the quantity, not the status. Complete means: open quantity minus `executedQty`, rounded to 12 places, is smaller than one stepSize. The executed quantity comes from `executedQty` of the response; `fills` only provide the fee.
+- **Grid** (`1eb806a`), shared function `_book_sell` for the direct path and the reconciliation, with three branches:
+  - Complete: closed, `sell_price` as the weighted gross average of all parts, `realized_pnl` as the sum of the net proceeds minus `quote_spent`.
+  - Partial: `GridLedger.record_partial_exit` (idempotent via the orderId), message `[GRID-TEILVERKAUF]`. The position stays open, occupies its level and is sold further in the next 5-minute cycle while the target is reached.
+  - Partial with a dust rest: closed immediately, `dust_qty`, `close_reason` "dust_after_sell", `[GRID-STAUB]`.
+  - `confirm_booked` runs in all three branches. Sale, coverage check, discrepancy check, startup check and `sold_this_cycle` use the open or executed quantity.
+  - The reconciliation first checks whether the orderId is already booked as a part. It then books nothing twice and reports no `[GRID-DOPPELVERKAUF]` if the position has since been closed with another order. It closes a dust rest that stayed open.
+  - `check_orders` finds booked parts via `partial_exit_order_ids` (D5); the position audit shows a grid partial sale.
+  - The round-1 message is dropped in `binance_client.place_market_sell` and in `reconcile_pending_orders`.
+- **Trend** (`6da22bc`):
+  - `open_quantity` comes from `order_utils`; `trend_risk` imports it under the same name.
+  - `record_partial_stop_fill` is now called `record_partial_exit(..., from_stop)`; the old name remains as an alias with `from_stop` True.
+  - `partial_exit_from_stop` stays True once it is True. Old entries with a partial quantity but without the field count as True, i.e. as before.
+  - Reason `stop_loss` including the latch is only forced if `partial_from_stop` applies.
+  - A market sale of the bot's own that was only partially executed is booked (`[TREND-TEILVERKAUF]`). Afterwards the rest is protected again, because the stop order was cancelled before the sale. If the rest is dust at the limit price, the position is closed with the reason per E8/D2; the latch exists only for `stop_loss`.
+  - If the new stop order is not placed, `[TREND-WARNUNG] … Rest ungeschuetzt` (rest unprotected) with quantity and price comes immediately. The existing counter `unprotected_cycles` only reports from the third cycle on and keeps running.
+  - The latch file only arises with the close of the rest. Until then, the open position occupies the trend slot.
+  - That Binance rejects the stop order on the internal stop-loss („would immediately trigger“) is an assumption from a code comment, not checked on the exchange.
+  - The reconciliation and `_settle_unclear_sell` book by the same rule. A stop order with an unresolved outcome prevents a second stop order over the rest (W-B).
+- **Finding (19.10.2026): floating-point error in the quantity rule from K-A.**
+  - Since the system check of 27.09.2026, `trend_strategy._book_stop_fill` used the unrounded rest `open_quantity − executedQty`. Output of Python 3.14.5 (Windows, 64 bit): `0.0002 - 0.00019` gives `9.999999999999999e-06`, `0.0003 - 0.00029` gives `9.999999999999972e-06`. Both are less than a stepSize of 0.00001. Rounded to 12 places, both give `1e-05`.
+  - Consequence: if a stop order filled everything except exactly one stepSize, the position counted as fully sold. The rest of one stepSize stayed unbooked and lay on the account as an unassigned surplus. Nothing was oversold in the process.
+  - Since `6da22bc` the rule runs via `sold_fully`, which rounds the rest first. Proven by the test `test_stop_fill_leaving_exactly_one_step_is_booked` and mutation N12. Noticed while building `sold_fully` in commit 1.
+  - Affected data: in the locally known ledgers (`data/`, dashboard app) there is only an old dry-run trade without a partial fill. According to the information from the server, the only real trend trade (`bd1c3457`) was fully filled (0.00018 of 0.00018, rest 0); the dry-run trade of 15.09. never had a stop order. Nothing is known to be affected. The server ledger has not been read for this.
+- **Tests:** 1020, previously 981, all passing. Counted with `python -m unittest <module> -v`, once per test method, also with subtests:
+  - `tests/test_partial_sell_grid.py`: 18, new in `1eb806a`.
+  - `tests/test_partial_sell_trend.py`: 21, new in `6da22bc`.
+  - `tests/test_rollback_compat.py`: 4 instead of 2. New are `OpenPartialGridPositionTestCase` (`1eb806a`) and `OpenPartialTrendTradeTestCase` (`6da22bc`).
+  - `tests/test_unfilled_market_orders.py`: 30 instead of 32. In `DirectMarketResponseTestCase` and in `ReconciledPartialSellTestCase`, two round-1 tests each are merged into one, which checks that the old message no longer comes.
+  - Sum: 18 + 21 + 2 − 2 = 39, i.e. 981 + 39 = 1020.
+  - Measured with the full suite in worktrees of the commits: 981 before round 2 (`57ebec3`), 998 after `1eb806a` (981 + 18 + 1 − 2), 1020 after `6da22bc` (998 + 21 + 1). In addition, each commit in a fresh clone (`git clone --no-local`) with the same numbers, nothing skipped.
+  - `test_shared_account.py` counts the remaining quantity of grid positions in the ownership invariant.
+- **Mutation probe:** 48 mutations, all detected.
+  - Grid 26 of 26. M24 (`_book_sell` without protection against execution 0) survived at first, because the quantity check in `record_partial_exit` catches the same case; the test now checks the message of the first layer.
+  - Trend 22 of 22. N21 (partial sale without orderId) had no test at first; N22 (W-B for the rest stop order) came with the lock found during implementation.
+  - The tests ran only under Windows.
+- **Rollback:** `git checkout 652e618` and restart of the services.
+  - The rollback test checks `652e618` in addition to `6ed3bf5`, `f42e646` and `5f5ebf0`, with the tree ID of `dca_bot/` (`5c110b0728ddab2293e947629b0d6930ff2ce97d`). The old code keeps closed entries with `partial_exit_*`, `dust_after_sell` and `partial_exit_from_stop` when writing.
+  - **Grid, hard rule (E9):** an open grid position with `partial_exit_qty` greater than 0 blocks the rollback. The old code sells the full `quantity` there and thereby uses another bot's holdings. This is proven by `OpenPartialGridPositionTestCase` against all four states. The check script below is mandatory before the rollback.
+  - **Trend, note (D6):** an open trend trade with a part from a market sale does not block the rollback. The old code sells only the open quantity, so there is no money risk. But it does not know `partial_exit_from_stop` and treats every partial quantity as a stop-loss part. After a rollback, such a trade closes with reason `stop_loss` and the latch, even if the part came from the signal. This is proven by `OpenPartialTrendTradeTestCase`.
+- **Procedure on the home server** (not yet carried out, approval pending):
+  1. Choose the time: not in the blocked window 23:50 to 00:30 UTC, not 06:40 to 07:00 UTC (apt restarts).
+  2. `git status` clean, `git diff --stat 652e618 HEAD -- dca_bot` is empty (the checked-out code is the deployed one). If it is not empty: stop.
+  3. `cp -a data data.bak-<date>`.
+  4. Check script, read-only. Expected: no open order questions, no open grid or trend entry with a partial sale.
+     ```bash
+     python - <<'EOF'
+     import json, os
+     from dotenv import load_dotenv
+     load_dotenv()
+     for name, var, default in (("Grid", "GRID_STATE_FILE", "data/grid_positions.json"),
+                                ("Trend", "TREND_STATE_FILE", "data/trend_ledger.json")):
+         rows = json.load(open(os.getenv(var, default), encoding="utf-8"))
+         part = [r["id"] for r in rows if r.get("status") == "open"
+                 and float(r.get("partial_exit_qty") or 0) > 0]
+         print(f"{name}: offen mit Teilverkauf: {len(part)}", part)
+     for var, default in (("DCA_PENDING_ORDERS_FILE", "data/pending_orders_dca.json"),
+                          ("GRID_PENDING_ORDERS_FILE", "data/pending_orders_grid.json"),
+                          ("TREND_PENDING_ORDERS_FILE", "data/pending_orders_trend.json")):
+         path = os.getenv(var, default)
+         orders = json.load(open(path, encoding="utf-8")).get("orders", []) if os.path.exists(path) else []
+         print(f"{path}: {len(orders)} offene Order-Fragen")
+     EOF
+     ```
+  5. `git pull`; afterwards `git diff --stat 652e618 HEAD -- dca_bot` shows exactly these 9 files (counted in the fresh clone with HEAD `6da22bc`): `dca_bot/audit_positions.py`, `dca_bot/binance_client.py`, `dca_bot/check_orders.py`, `dca_bot/grid_risk.py`, `dca_bot/grid_strategy.py`, `dca_bot/order_utils.py`, `dca_bot/pending_orders.py`, `dca_bot/trend_risk.py`, `dca_bot/trend_strategy.py`.
+  6. `python -m dca_bot.symbol_guard --report`: all four „würde starten“ (would start).
+  7. `sudo systemctl restart grid-bot`, `journalctl -u grid-bot -f`: code version, symbol check „passt“ (matches), holdings reconciliation OK, first cycle without errors.
+  8. `sudo systemctl restart dca-bot trend-bot allocator`. The trend bot stays blocked (latch since 18.10.2026) and does not enter. Its daily cycle shifts to the restart time.
+  9. Note under "Deploy status" as `Deployed: 6da22bc auf Homeserver am <Datum>; Server-HEAD <hash>` (the docs commit has the same code).
+
+  **Tests:** the tests of round 2 ran only under Windows, the lock tests never under Linux; no suite runs on the server.
+
+  **After the deploy, the trend path cannot be tested live:** the trend bot is blocked and holds no position. The changed sell path only runs after a reset (`python -m dca_bot.reset_trend_stop_loss`) and a new entry. The grid path runs immediately, but a partial sale only comes if the testnet executes a sale only partially.
+
+  **Rollback:** first the check script from step 4. If it shows „Grid: offen mit Teilverkauf“ (grid: open with partial sale) greater than 0, there is no rollback (E9): let the position close first or resolve it by hand. An open trend entry with a partial sale does not block (D6, note above). Then `git checkout 652e618` and `sudo systemctl restart grid-bot dca-bot trend-bot allocator`.
+- **Observations, no change:**
+  - `executedQty` versus `fills`: no cross-check; if they differ, `executedQty` applies, neither old nor new. Earmarked under "Deliberately deferred or earmarked".
+  - Timestamps remain the booking time (D4), also earmarked there.
+  - Dashboard and CSV show the purchase quantity for partial sales. Recorded under "For evaluating the test phase", no change to the app.
+
 ---
 
 ## 7. Technical reference (moved here from the README, 25.09.2026)
@@ -553,10 +661,20 @@ Configuration, startup and tools: README.
 - **Partial fill of a market order** (since 16.10.2026): on purchase, the
   executed quantity is booked; below the minimum volume it is closed
   immediately as dust (`order_utils.is_dust`, details in 7.2 and 7.3,
-  `realized_pnl` = −`quote_spent`, valued cautiously). On sale, the full
-  quantity is still booked until round 2, but a partial fill is reported
-  loudly (`[GRID-TEILFUELLUNG-UNGEBUCHT]`/
-  `[TREND-TEILFUELLUNG-UNGEBUCHT]`, directly and when recording).
+  `realized_pnl` = −`quote_spent`, valued cautiously). On sale (since
+  19.10.2026, round 2), the executed quantity is booked as a partial sale
+  (`partial_exit_*`, idempotent via the orderId); the position stays open
+  with the rest, and a rest below the minimum volume closes it as dust
+  (details in 7.2 and 7.3). Whether a sale closed the position is decided
+  by the quantity, not the status (`order_utils.sold_fully`: open quantity
+  minus `executedQty`, rounded to 12 places, smaller than one stepSize).
+  What is sold, protected and reconciled everywhere is the open quantity
+  (`order_utils.open_quantity` = `quantity − partial_exit_qty`);
+  `quantity` and `quote_spent` remain the values of the purchase. The
+  executed quantity comes from `executedQty` of the response, `fills` only
+  provide the fee. The reconciliation books by the same rule and does not
+  take a booked part for a double sale. Until round 2, the full quantity
+  was booked and only `[…-TEILFUELLUNG-UNGEBUCHT]` was reported.
 - **No second sale while the first is unresolved** (since 27.09.2026): if
   a sale or a stop order for a position is still in the pending file, the
   bot does not sell it again and places no further stop order. Without
@@ -900,13 +1018,32 @@ and an important caveat on the price range.
   sellable partial quantity is booked normally (`[GRID-KAUF]` with
   „Teilfüllung“). A purchase order without execution no longer occupies a
   level (7.1).
+- **Partial sale** (since 19.10.2026, round 2): if the exchange executes a
+  sale only partially, the executed quantity is booked
+  (`partial_exit_qty`, `partial_exit_quote` gross,
+  `partial_exit_proceeds` net, `partial_exit_order_ids`; atomic and
+  idempotent via the orderId, `[GRID-TEILVERKAUF]`). The position stays
+  open with the rest, its level stays occupied, and the next cycle sells
+  the rest while the target is reached. At the close, `sell_price` is the
+  quantity-weighted gross average of all parts, `realized_pnl` the sum of
+  the net proceeds minus `quote_spent`. If the rest at the fill price is
+  below the minimum volume, the position is closed immediately:
+  `close_reason` "dust_after_sell", `dust_qty` the rest, `realized_pnl` =
+  proceeds of the parts − `quote_spent` (`[GRID-STAUB]`), level free, no
+  latch. Coverage check, holdings reconciliation, startup check and the
+  quantity already sold in the cycle use the open or executed quantity. A
+  restart between partial booking and `confirm_booked()` books nothing
+  twice: the reconciliation recognises the orderId in
+  `partial_exit_order_ids` and closes a dust rest that stayed open.
 - **Telegram notifications** (if configured, see README section 7):
   `[GRID-KAUF]`/`[GRID-KAUF DRY-RUN]`, `[GRID-VERKAUF]` (with the
   realised profit/loss of this position), `[GRID-VERKAUF-FEHLGESCHLAGEN]`,
   `[GRID-VERKAUF-GESPERRT]`,
   `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`,
   `[GRID-DOPPELVERKAUF]` (since 27.09.2026, see 7.1), since 16.10.2026
-  also `[GRID-STAUB]` and `[GRID-TEILFUELLUNG-UNGEBUCHT]`.
+  also `[GRID-STAUB]` (since 19.10.2026 also after a partial sale), since
+  19.10.2026 `[GRID-TEILVERKAUF]` (partial sale).
+  `[GRID-TEILFUELLUNG-UNGEBUCHT]` (16.10. to 19.10.2026) no longer exists.
 - **Rate limit for cycle errors:** a failed cycle reports `[GRID-FEHLER]`
   via Telegram only on the first occurrence of its error type (exception
   class). Further failures of the same kind only go to the log until a
@@ -1023,7 +1160,10 @@ manual stop-loss reset it misses part of the return in a bull market).
   `[TREND-WARNUNG]`, `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`,
   `[TREND-NOTAUS]`, `[TREND-FEHLER]`, since 27.09.2026 also
   `[TREND-TEILFUELLUNG]` and `[TREND-DOPPELVERKAUF]`, since 16.10.2026
-  `[TREND-STAUB]` also on entry and `[TREND-TEILFUELLUNG-UNGEBUCHT]`.
+  `[TREND-STAUB]` also on entry, since 19.10.2026 `[TREND-TEILVERKAUF]`
+  (partial sale) and `[TREND-WARNUNG] … Rest ungeschuetzt` (rest
+  unprotected). `[TREND-TEILFUELLUNG-UNGEBUCHT]` (16.10. to 19.10.2026) no
+  longer exists.
 
 #### Real, exchange-side stop-loss
 
@@ -1087,11 +1227,15 @@ the exchange itself and works independently of the bot process.
   `partial_exit_proceeds` (net) and `partial_exit_order_ids`, atomic and
   idempotent via the orderId. `quantity` and `quote_spent` remain the
   values of the entry; what is sold, protected and reconciled is the open
-  quantity `open_quantity()` = `quantity − partial_exit_qty`.
-  `realized_pnl` contains both parts, `exit_price` is the
-  quantity-weighted average. Whether an ended order closed the position is
-  decided by the quantity (tolerance one `stepSize`), not by the status
-  `FILLED`. If the remainder is below the minimum volume, the position is
+  quantity `open_quantity()` = `quantity − partial_exit_qty` (since
+  19.10.2026 in `order_utils`). `realized_pnl` contains both parts,
+  `exit_price` is the quantity-weighted average. Whether an ended order
+  closed the position is decided by the quantity (tolerance one
+  `stepSize`, since 19.10.2026 via `order_utils.sold_fully` with the rest
+  rounded first), not by the status `FILLED`. Until 19.10.2026, a rest of
+  exactly one `stepSize` counted as sold because of floating point and
+  stayed unbooked (log 19.10.2026, "Round 2"). Such a partial fill sets
+  `partial_exit_from_stop`. If the remainder is below the minimum volume, the position is
   closed and the remainder is reported as `dust_qty` (`[TREND-STAUB]`,
   trend dust, Telegram; quantity in the base asset, value and result in
   the quote asset of the pair from `exchangeInfo` – until 28.09.2026 this
@@ -1099,6 +1243,33 @@ the exchange itself and works independently of the bot process.
   quantity, on the shared account using another bot's holdings, and an
   ended order with a partial fill closed the whole position with the
   partial proceeds.
+- **Partial sale on the bot's own market sale** (since 19.10.2026, round
+  2): if the exchange executes a signal exit or an exit via the internal
+  stop-loss only partially, the part is booked as above
+  (`record_partial_exit`, `[TREND-TEILVERKAUF]`). The position stays open
+  with the rest. Because the stop order was cancelled before the sale, the
+  bot immediately protects the rest with a new stop order (threshold as on
+  entry). The rest is sold in the next daily cycle. If the new stop order
+  is not placed, the bot reports this immediately via Telegram
+  (`[TREND-WARNUNG] … Rest ungeschuetzt` (rest unprotected) with quantity
+  and price), not only from the third unprotected cycle on. The counter
+  `unprotected_cycles` keeps running nonetheless. On the internal
+  stop-loss, the price is already below the threshold, and Binance then
+  presumably rejects the new order. This is an assumption, not checked on
+  the exchange. The rest is then without protection on the exchange until
+  the next daily cycle (precondition 8). If a stop order with an
+  unresolved outcome is still in the pending file, no second one is
+  placed (W-B). If the rest is dust at the limit price, the position is
+  closed (`dust_qty`). **Reason and latch:** `partial_exit_from_stop` is
+  True for a partial fill of the stop order and for a part from a market
+  sale with reason `stop_loss`, and then stays True. Only then does the
+  rest close with `stop_loss` and the latch, even if the exit later comes
+  from the signal. A part from a signal exit closes with `signal`, without
+  latch, and the bot may enter again afterwards. An entry with a partial
+  quantity but without the field (old entry) counts as a stop-loss part.
+  The latch file only arises with the close of the rest. The
+  reconciliation and the recheck of an unclear sale book by the same rule;
+  a booked part does not count as a double sale there.
 - **Dust on entry** (since 16.10.2026): if the exchange executes the
   entry only partially and the quantity at the limit price of the stop
   order is below the minimum volume, the stop order would be rejected.
@@ -1432,7 +1603,8 @@ pairs", with the advice to search again with `--symbol` if necessary.
 In addition, the reconciliation with the bot's own bookkeeping: is the ID
 in the bot's pending file, is it in the ledger (`client_order_id`,
 `sell_client_order_id`, `exit_client_order_id`, for the trend stop order
-`stop_loss_order_id` via the orderId)? Without arguments, the script
+`stop_loss_order_id` via the orderId, since 19.10.2026 booked partial sales
+of Grid and Trend in `partial_exit_order_ids` via the orderId)? Without arguments, the script
 shows, per symbol, the price, balance (base and quote asset from
 `exchangeInfo`) and the latest orders with clientOrderId and bot; this is
 also the connection test. It uses the audit's client
@@ -1472,7 +1644,29 @@ without or with only partial execution: the assessment in the real
 `TradingClient`, the ledger guard of all three ledgers and the paths
 through all three strategies on the shared account.
 `test_remove_unfilled_grid_positions.py` models the situation on the home
-server of 16.10.2026 for the cleanup tool.
+server of 16.10.2026 for the cleanup tool. Since round 2 (19.10.2026),
+`test_unfilled_market_orders.py` only checks on sale that the round-1
+message `[…-TEILFUELLUNG-UNGEBUCHT]` no longer comes.
+
+`test_partial_sell_grid.py` and `test_partial_sell_trend.py` (since
+19.10.2026) cover the partial sale, mostly on the shared account with the
+ownership invariant: partial sale and rest up to the close (PnL equal to
+the sum of the parts, weighted price), rest as dust, several parts in a
+row, lost response with reconciliation, restart between partial booking
+and `confirm_booked()`, no false "double sale" alarm, open quantity in
+coverage, discrepancy and startup check, plus for Trend the protection of
+the rest, the immediate message on a rejected stop order, reason and latch
+per `partial_exit_from_stop`, re-entry after a signal part and the
+quantity rule for a rest of exactly one `stepSize`. Since then
+`test_shared_account.py` counts the remaining quantity of grid positions
+in the invariant.
+
+`test_rollback_compat.py` checks the rollback to the old states with the
+commit and the tree ID of `dca_bot/` (since 19.10.2026 four states,
+including `652e618`). Two tests record the behaviour of the old code for
+open partial positions: for Grid it sells the full quantity (which is why
+such positions block the rollback), for Trend only the rest, but with
+reason `stop_loss`.
 
 The whole suite: `python -m unittest discover -s tests -t .`
 

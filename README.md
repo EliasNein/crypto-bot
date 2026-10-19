@@ -308,9 +308,11 @@ der Börse), eine Trend-Position nur ihre Stop-Order an der Börse.
   (`[ORDER-OHNE-AUSFUEHRUNG]` im Log), und kein Ledger nimmt einen echten
   Eintrag ohne Menge oder Einsatz an. Ein nur teilweise ausgeführter Kauf
   wird mit der echten Menge gebucht, unter dem Mindestvolumen sofort als
-  Staub geschlossen. Ein nur teilweise ausgeführter Verkauf wird bis
-  Runde 2 noch über die volle Menge gebucht, aber laut gemeldet
-  (`[…-TEILFUELLUNG-UNGEBUCHT]`).
+  Staub geschlossen. Ein nur teilweise ausgeführter Verkauf wird seit
+  dem 19.10.2026 mit der ausgeführten Menge als Teilverkauf gebucht
+  (`[GRID-TEILVERKAUF]`/`[TREND-TEILVERKAUF]`), die Position bleibt mit dem
+  Rest offen, ein Rest unter dem Mindestvolumen schließt sie als Staub.
+  Beim Trend wird der Rest sofort wieder mit einer Stop-Order abgesichert.
 - **Kein zweiter Verkauf bei unklarem Ausgang:** solange ein Verkauf oder
   eine Stop-Order ungeklärt ist, verkauft der Bot dieselbe Position nicht
   erneut - auf dem geteilten Konto ginge das aus fremdem Bestand durch.
@@ -419,14 +421,14 @@ Senden wird nur geloggt (siehe `dca_bot/notifier.py`).
   realisiertem Gewinn/Verlust dieser Position),
   `[GRID-VERKAUF-FEHLGESCHLAGEN]`, `[GRID-VERKAUF-GESPERRT]`,
   `[GRID-STOP-LOSS]`, `[GRID-NOTAUS]`, `[GRID-FEHLER]`,
-  `[GRID-DOPPELVERKAUF]`, `[GRID-STAUB]`, `[GRID-TEILFUELLUNG-UNGEBUCHT]`.
+  `[GRID-DOPPELVERKAUF]`, `[GRID-STAUB]`, `[GRID-TEILVERKAUF]`.
 - **Trend-Following-Bot:** `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`,
   `[TREND-AUSSTIEG]` (mit realisiertem Gewinn/Verlust und
   Ausstiegsgrund), `[TREND-VERKAUF-FEHLGESCHLAGEN]`,
   `[TREND-AUSSTIEG-GESPERRT]`, `[TREND-STOP-LOSS]`, `[TREND-WARNUNG]`,
   `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`, `[TREND-NOTAUS]`,
   `[TREND-FEHLER]`, `[TREND-TEILFUELLUNG]`, `[TREND-DOPPELVERKAUF]`,
-  `[TREND-STAUB]`, `[TREND-TEILFUELLUNG-UNGEBUCHT]`.
+  `[TREND-STAUB]`, `[TREND-TEILVERKAUF]`.
 - **Kapital-Allocator:** `[ALLOCATION-UPDATE]` (bei signifikanter
   Verschiebung), `[ALLOCATOR-NOTAUS]`, `[ALLOCATOR-FEHLER]`.
 - **Alle vier:** `[HEARTBEAT]` (Lebenszeichen, siehe Abschnitt 6).
@@ -552,7 +554,7 @@ Serverablauf: `trading-bot-projekt.md`, Log ab 29.09.2026 (Eintrag vom
 python -m unittest discover -s tests -t .
 ```
 
-981 automatische Tests (Stand 16.10.2026, alle grün).
+1020 automatische Tests (Stand 19.10.2026, alle grün).
 
 Alle Tests laufen ohne Netzwerkzugriff und ohne Binance-Zugangsdaten
 (Fake-Clients mit derselben Schnittstelle wie `binance_client.py`,
@@ -578,7 +580,9 @@ Handelsregeln inklusive Gebührenkorrektur.
 | `test_trend_auto_reset` | Analyse-Modus `--analyze-auto-reset` des Trend-Backtests |
 | `test_fix_dry_run_quote_spent` | Einmalige Datenkorrektur der Dry-Run-Beträge |
 | `test_close_dry_run_trend` | Schließen der Dry-Run-Trend-Position: Weigerungen, Bericht, Lock, keine Sperre, danach echter Einstieg |
-| `test_unfilled_market_orders` | Market-Orders ohne oder mit teilweiser Ausführung: Bewertung der Antwort, Ledger-Schutz, Staub beim Kauf, Meldung beim Teilverkauf |
+| `test_unfilled_market_orders` | Market-Orders ohne oder mit teilweiser Ausführung: Bewertung der Antwort, Ledger-Schutz, Staub beim Kauf |
+| `test_partial_sell_grid`, `test_partial_sell_trend` | Teilverkauf beim Verkauf: Buchung der ausgeführten Menge, Rest, Staub, Reconciliation, Absicherung des Trend-Rests |
+| `test_rollback_compat` | Rückweg: alter Code auf den Dateien des neuen |
 | `test_remove_unfilled_grid_positions` | Entfernen von Grid-Positionen ohne Bestand: Filter, Weigerungen, Bericht, Lock, Kopie, Kontrolle |
 | `test_request_timeout` | Request-Timeout des Grid-Bots |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat-Zeitstempel, Mengenlimit für Zyklusfehler |

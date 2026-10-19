@@ -318,9 +318,12 @@ exchange); a trend position only has its stop order on the exchange.
   nothing (`[ORDER-OHNE-AUSFUEHRUNG]` in the log), and no ledger accepts a
   real entry without quantity or spend. A purchase executed only partially
   is booked with the real quantity, and closed immediately as dust if it
-  is below the minimum volume. A sale executed only partially is still
-  booked over the full quantity until round 2, but reported loudly
-  (`[…-TEILFUELLUNG-UNGEBUCHT]`, partial fill not booked).
+  is below the minimum volume. Since 19.10.2026, a sale executed only
+  partially is booked with the executed quantity as a partial sale
+  (`[GRID-TEILVERKAUF]`/`[TREND-TEILVERKAUF]`, partial sale); the position
+  stays open with the rest, and a rest below the minimum volume closes it
+  as dust. For Trend, the rest is immediately protected again with a stop
+  order.
 - **No second sale on an unclear outcome:** as long as a sale or a stop
   order is unresolved, the bot does not sell the same position again – on
   the shared account that would go through using another bot's holdings.
@@ -430,7 +433,7 @@ or aborts a buy cycle – every error while sending is only logged (see
   `[GRID-VERKAUF-GESPERRT]` (sale blocked), `[GRID-STOP-LOSS]`,
   `[GRID-NOTAUS]` (kill switch), `[GRID-FEHLER]` (error),
   `[GRID-DOPPELVERKAUF]` (double sale), `[GRID-STAUB]` (dust),
-  `[GRID-TEILFUELLUNG-UNGEBUCHT]` (partial fill not booked).
+  `[GRID-TEILVERKAUF]` (partial sale).
 - **Trend-following bot:** `[TREND-EINSTIEG]`/`[TREND-EINSTIEG DRY-RUN]`
   (entry), `[TREND-AUSSTIEG]` (exit, with realised profit/loss and exit
   reason), `[TREND-VERKAUF-FEHLGESCHLAGEN]` (sale failed),
@@ -438,8 +441,8 @@ or aborts a buy cycle – every error while sending is only logged (see
   `[TREND-WARNUNG]` (warning), `[TREND-ABSICHERUNG-WIEDERHERGESTELLT]`
   (protection restored), `[TREND-NOTAUS]` (kill switch), `[TREND-FEHLER]`
   (error), `[TREND-TEILFUELLUNG]` (partial fill), `[TREND-DOPPELVERKAUF]`
-  (double sale), `[TREND-STAUB]` (dust), `[TREND-TEILFUELLUNG-UNGEBUCHT]`
-  (partial fill not booked).
+  (double sale), `[TREND-STAUB]` (dust), `[TREND-TEILVERKAUF]`
+  (partial sale).
 - **Capital allocator:** `[ALLOCATION-UPDATE]` (on a significant shift),
   `[ALLOCATOR-NOTAUS]` (kill switch), `[ALLOCATOR-FEHLER]` (error).
 - **All four:** `[HEARTBEAT]` (sign of life, see section 6). Across bots
@@ -565,7 +568,7 @@ Background and server procedure: `trading-bot-project.en.md`, log from
 python -m unittest discover -s tests -t .
 ```
 
-981 automated tests (as of 16.10.2026, all passing).
+1020 automated tests (as of 19.10.2026, all passing).
 
 All tests run without network access and without Binance credentials
 (fake clients with the same interface as `binance_client.py`, temporary
@@ -590,7 +593,9 @@ correction.
 | `test_trend_auto_reset` | Analysis mode `--analyze-auto-reset` of the trend backtest |
 | `test_fix_dry_run_quote_spent` | One-off data correction of the dry-run amounts |
 | `test_close_dry_run_trend` | Closing the dry-run trend position: refusals, report, lock, no latch, real entry afterwards |
-| `test_unfilled_market_orders` | Market orders without or with partial execution: assessing the response, ledger guard, dust on purchase, report on a partial sale |
+| `test_unfilled_market_orders` | Market orders without or with partial execution: assessing the response, ledger guard, dust on purchase |
+| `test_partial_sell_grid`, `test_partial_sell_trend` | Partial fill on sale: booking the executed quantity, rest, dust, reconciliation, protecting the trend rest |
+| `test_rollback_compat` | Rollback: old code on the files of the new one |
 | `test_remove_unfilled_grid_positions` | Removing grid positions without holdings: filter, refusals, report, lock, copy, verification |
 | `test_request_timeout` | Request timeout of the grid bot |
 | `test_heartbeat_last_cycle`, `test_cycle_error_notification` | Heartbeat timestamp, rate limit for cycle errors |
