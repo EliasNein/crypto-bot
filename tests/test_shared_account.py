@@ -585,10 +585,12 @@ class SharedAccountTestBase(unittest.TestCase):
         if bot_name == "dca":
             return bot._ledger.position(SYMBOL)[1]
         if bot_name == "grid":
-            # Staub beim Kauf (T2, 16.10.2026) gehoert dem Bot weiterhin -
-            # wie beim Trend-Bot (K-A), nur in einer geschlossenen Position.
+            # Staub beim Kauf (T2, 16.10.2026) und nach einem Teilverkauf
+            # (Runde 2) gehoert dem Bot weiterhin - wie beim Trend-Bot (K-A),
+            # nur in einer geschlossenen Position. Offen zaehlt die Restmenge.
             return sum(
-                float(r["quantity"]) if r["status"] == "open" else float(r.get("dust_qty") or 0.0)
+                float(r["quantity"]) - float(r.get("partial_exit_qty") or 0.0)
+                if r["status"] == "open" else float(r.get("dust_qty") or 0.0)
                 for r in bot._ledger._read()
                 if r.get("dry_run") is False
             )

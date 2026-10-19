@@ -194,10 +194,12 @@ def _summarize_dry_run(open_records: list[dict]) -> None:
 
 def _quantity_of(record: dict) -> float:
     """
-    Offene Menge eines Eintrags. Bei Trend-Trades abzueglich bereits
-    verbuchter Teilfuellungen der Stop-Order (`partial_exit_qty`, seit dem
-    Systemcheck vom 27.09.2026) - `quantity` ist dort die Menge beim
-    Einstieg. DCA- und Grid-Eintraege haben das Feld nicht.
+    Offene Menge eines Eintrags: abzueglich bereits verbuchter Teilverkaeufe
+    (`partial_exit_qty`) - bei Trend-Trades seit dem Systemcheck vom
+    27.09.2026, bei Grid-Positionen seit Runde 2 (19.10.2026). `quantity` ist
+    die Menge beim Kauf. DCA-Eintraege haben das Feld nicht. Dieselbe Regel
+    wie order_utils.open_quantity, hier aber ohne Exception bei unlesbaren
+    Werten - das Audit soll jede Datei zu Ende lesen.
     """
     try:
         quantity = float(record.get("quantity", 0.0) or 0.0)
@@ -617,6 +619,12 @@ def audit_grid(path: Path, symbol: str | None = None) -> None:
             f"{r.get('bought_at', '?')}"
         )
         print(f"{'':>5}  ID: {r.get('id', '?')}")
+        # Teilverkauf (Runde 2, 19.10.2026): `quantity` bleibt die Kaufmenge.
+        if r.get("partial_exit_qty"):
+            print(
+                f"{'':>5}  Teilverkauf: {_fmt(r.get('partial_exit_qty'), '.8f')} bereits "
+                f"verkauft, offen {_quantity_of(r):.8f}"
+            )
 
     _summarize_dry_run(open_records)
 

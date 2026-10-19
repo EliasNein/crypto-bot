@@ -36,13 +36,16 @@ from .order_utils import (
     is_dust,
     net_executed_quantity,
     net_proceeds,
+    open_quantity,
     quantize_quantity,
     received_base_quantity,
+    sold_fully,
 )
 from .pending_orders import (
     RECONCILIATION_PREFIX,
     ManualReviewRequired,
     PendingOrder,
+    executed_quantity,
     is_partial_fill,
     reconcile_pending_orders,
 )
@@ -54,6 +57,14 @@ logger = logging.getLogger("grid_bot")
 # close_reason einer Position, deren Kauf nur teilweise und unter dem
 # Mindestvolumen ausgefuehrt wurde (T2, 16.10.2026, siehe GridPosition).
 CLOSE_REASON_DUST = "dust"
+# close_reason einer Position, deren Rest nach einem Teilverkauf unter dem
+# Mindestvolumen liegt (Runde 2, 19.10.2026, Entscheidung D3).
+CLOSE_REASON_DUST_AFTER_SELL = "dust_after_sell"
+
+# Ergebnisse von _book_sell (Runde 2, 19.10.2026).
+SELL_CLOSED = "closed"
+SELL_PARTIAL = "partial"
+SELL_DUST = "dust_after_sell"
 
 
 class GridTradingStrategy:
@@ -206,6 +217,13 @@ class GridTradingStrategy:
                 if self._sell_is_pending(record):
                     continue
 
+                # Rest eines Teilverkaufs unter dem Mindestvolumen (Runde 2):
+                # jeder Verkaufsversuch kaeme als Ablehnung zurueck. Normal
+                # schliesst _book_sell ihn sofort - hier landet er nur, wenn
+                # der Prozess zwischen Teilbuchung und Abschluss gestorben ist.
+                if self._close_rest_if_dust(record, price, rules):
+                    continue
+
                 # Deckungsprüfung unmittelbar vor der Order (W11): reicht
                 # das freie Guthaben für genau diesen Verkauf? Wenn nicht,
                 # würde die Börse ablehnen - und der Fehlschlag sähe im
@@ -222,9 +240,14 @@ class GridTradingStrategy:
                 # WELCHE Position dieser Verkauf geschlossen hat. Ohne
                 # das bliebe die Position offen und der nächste Zyklus
                 # würde ein zweites Mal verkaufen.
+                #
+                # Verkauft wird die OFFENE Menge (Runde 2): nach einem
+                # Teilverkauf ist ein Teil von `quantity` schon weg, und auf
+                # dem geteilten Konto deckte das freie BTC eines anderen Bots
+                # den Fehlbetrag still ab.
                 order = self._client.place_market_sell(
                     self._config.symbol,
-                    record["quantity"],
+                    open_quantity(record),
                     context={"position_id": record["id"], "price": price},
                 )
                 if order is None and self._config.trading_enabled:
@@ -241,30 +264,45 @@ class GridTradingStrategy:
                     continue
 
                 # Der Verkauf ist durch - diese Menge steht dem nächsten
-                # Durchlauf dieser Schleife nicht mehr zur Verfügung.
-                sold_this_cycle += float(record["quantity"])
+                # Durchlauf dieser Schleife nicht mehr zur Verfügung. Seit
+                # Runde 2 die AUSGEFUEHRTE Menge, nicht die bestellte: nach
+                # einem Teilverkauf liegt der Rest noch auf dem Konto.
+                sold_this_cycle += (
+                    executed_quantity(order) if order is not None else open_quantity(record)
+                )
 
             if order is not None:
-                # Tatsaechlicher Fuellpreis statt des vorher abgefragten
-                # Tickers - siehe die Begruendung im Kaufpfad
-                # (_process_buys) und _record_reconciled_sell, das es schon
-                # immer so macht.
-                sell_price = average_fill_price(order, fallback=price)
-                # Netto, also abzüglich der in USDT abgerechneten
-                # Verkaufsgebühr - cummulativeQuoteQty ist der Bruttoerlös.
-                proceeds = net_proceeds(order, rules, fallback=record["quantity"] * price)
-            else:
-                sell_price = price
-                proceeds = record["quantity"] * price
-            realized_pnl = proceeds - record["quote_spent"]
+                outcome, sell_price, realized_pnl, sold_qty = self._book_sell(
+                    record, order, rules, price
+                )
+                # Erst mit dem Verkauf im Ledger ist die Order-Frage erledigt
+                # (W-A) - auch bei einem Teilverkauf: der ist verbucht, der
+                # Rest wird mit einer NEUEN Order verkauft.
+                self._client.confirm_booked(order.get("clientOrderId"))
+                if outcome != SELL_CLOSED:
+                    continue
+                logger.info(
+                    "Grid-Verkauf: Stufe %d, Kauf @ %.2f -> Verkauf @ %.2f, realisiert %.2f",
+                    record["level_index"],
+                    record["buy_price"],
+                    sell_price,
+                    realized_pnl,
+                )
+                send_notification(
+                    f"[GRID-VERKAUF] Stufe {record['level_index']}: {sold_qty:.8f} "
+                    f"{self._config.symbol} @ {sell_price:.2f} verkauft "
+                    f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}"
+                )
+                continue
 
-            sold_at = datetime.now(timezone.utc).isoformat()
-            sell_client_order_id = order.get("clientOrderId") if order else None
+            # Dry-Run-Position: simulierter Verkauf zum beobachteten Preis.
+            # Eine Dry-Run-Position hat nie einen Teilverkauf (kein Fill).
+            sell_price = price
+            proceeds = record["quantity"] * price
+            realized_pnl = proceeds - record["quote_spent"]
             self._ledger.record_sell(
-                record["id"], sell_price, sold_at, realized_pnl, sell_client_order_id
+                record["id"], sell_price, datetime.now(timezone.utc).isoformat(), realized_pnl, None
             )
-            # Erst mit dem Verkauf im Ledger ist die Order-Frage erledigt (W-A).
-            self._client.confirm_booked(sell_client_order_id)
             self._failed_sell_notified.discard(record["id"])
 
             logger.info(
@@ -274,12 +312,182 @@ class GridTradingStrategy:
                 sell_price,
                 realized_pnl,
             )
-            tag = "[GRID-VERKAUF]" if order is not None else "[GRID-VERKAUF DRY-RUN]"
             send_notification(
-                f"{tag} Stufe {record['level_index']}: {record['quantity']:.8f} "
+                f"[GRID-VERKAUF DRY-RUN] Stufe {record['level_index']}: {record['quantity']:.8f} "
                 f"{self._config.symbol} @ {sell_price:.2f} verkauft "
                 f"(Kauf @ {record['buy_price']:.2f}), realisiert: {realized_pnl:+.2f}"
             )
+
+    def _book_sell(
+        self,
+        record: dict,
+        order: dict,
+        rules,
+        price: float,
+        client_order_id: str | None = None,
+        prefix: str = "",
+    ) -> tuple[str, float, float, float]:
+        """
+        Verbucht einen ausgefuehrten Market-Verkauf nach seiner AUSGEFUEHRTEN
+        Menge (Runde 2, 19.10.2026) - gemeinsam fuer den direkten Pfad und die
+        Reconciliation. Bis dahin wurde jeder Verkauf ueber die volle Menge
+        als geschlossen gebucht, eine Teilfuellung meldete nur
+        [GRID-TEILFUELLUNG-UNGEBUCHT].
+
+        Drei Zweige, entschieden ueber die Menge (order_utils.sold_fully):
+
+        - Vollstaendig (Rest < stepSize): Position geschlossen. sell_price ist
+          der mengengewichtete Bruttodurchschnitt aller Teile, realized_pnl
+          die Summe der Netto-Erloese minus quote_spent.
+        - Teilweise: record_partial_exit (idempotent ueber die orderId), die
+          Position bleibt mit dem Rest offen und belegt ihre Stufe; der
+          naechste Zyklus verkauft den Rest, solange das Ziel erreicht ist.
+        - Teilweise, Rest unter dem Mindestvolumen zum Fuellpreis: sofort
+          geschlossen, Rest als dust_qty, close_reason "dust_after_sell".
+
+        Rueckgabe (Ergebnis, sell_price, realized_pnl, verkaufte Menge); die
+        drei letzten Werte sind nur bei SELL_CLOSED aussagekraeftig. Gemeldet
+        werden hier nur Teilverkauf und Staub - den Abschluss melden die
+        Aufrufer mit ihrem eigenen Text.
+
+        `executedQty` kommt aus der Order-Antwort, nicht aus `fills` - wie in
+        allen anderen Pfaden (average_fill_price, net_executed_quantity);
+        `fills` liefern nur die Gebuehr.
+        """
+        client_order_id = client_order_id or order.get("clientOrderId")
+        executed = executed_quantity(order)
+        if executed <= 0:
+            # Nach A1 (16.10.2026) nicht erreichbar: eine Order ohne
+            # Ausfuehrung kommt als None zurueck bzw. wird verworfen.
+            raise ValueError(
+                f"Verkauf {client_order_id} ohne ausgefuehrte Menge - nichts gebucht."
+            )
+        open_qty = open_quantity(record)
+        # Tatsaechlicher Fuellpreis statt des vorher abgefragten Tickers -
+        # siehe die Begruendung im Kaufpfad (_process_buys).
+        fill_price = average_fill_price(order, fallback=price)
+        gross = fill_price * executed
+        # Netto, also abzueglich der in der Quote-Waehrung abgerechneten
+        # Verkaufsgebuehr - cummulativeQuoteQty ist der Bruttoerloes.
+        proceeds = net_proceeds(order, rules, fallback=gross)
+
+        if sold_fully(open_qty, executed, rules):
+            partial_qty = float(record.get("partial_exit_qty") or 0.0)
+            sold_qty = partial_qty + executed
+            sell_price = (float(record.get("partial_exit_quote") or 0.0) + gross) / sold_qty
+            total_proceeds = proceeds + float(record.get("partial_exit_proceeds") or 0.0)
+            realized_pnl = total_proceeds - record["quote_spent"]
+            self._ledger.record_sell(
+                record["id"],
+                sell_price,
+                datetime.now(timezone.utc).isoformat(),
+                realized_pnl,
+                client_order_id,
+            )
+            self._failed_sell_notified.discard(record["id"])
+            return SELL_CLOSED, sell_price, realized_pnl, sold_qty
+
+        order_id = order.get("orderId")
+        if order_id is None:
+            raise ValueError(
+                f"Teilverkauf {client_order_id} ohne orderId - ohne sie liesse er "
+                "sich nicht idempotent verbuchen, nichts gebucht."
+            )
+        booked = self._ledger.record_partial_exit(
+            record["id"], str(order_id), executed, gross, proceeds
+        )
+        refreshed = self._ledger.position_by_id(record["id"]) or record
+        if booked:
+            self._report_partial_sell(refreshed, order, executed, fill_price, prefix)
+        if self._close_rest_if_dust(refreshed, fill_price, rules, client_order_id, prefix):
+            return SELL_DUST, 0.0, 0.0, 0.0
+        return SELL_PARTIAL, 0.0, 0.0, 0.0
+
+    def _report_partial_sell(
+        self, record: dict, order: dict, executed: float, fill_price: float, prefix: str
+    ) -> None:
+        rest = open_quantity(record)
+        logger.warning(
+            "%s[GRID-TEILVERKAUF] Stufe %s: Verkauf %s nur teilweise ausgefuehrt "
+            "(Boerse meldet %s, %.8f %s @ %.2f). Verbucht, die Position bleibt mit "
+            "%.8f offen und wird verkauft, solange das Ziel erreicht ist.",
+            prefix,
+            record.get("level_index", "?"),
+            order.get("clientOrderId"),
+            order.get("status"),
+            executed,
+            self._config.symbol,
+            fill_price,
+            rest,
+        )
+        send_notification(
+            f"{prefix}[GRID-TEILVERKAUF] Stufe {record.get('level_index', '?')}: nur "
+            f"{executed:.8f} {self._config.symbol} @ {fill_price:.2f} verkauft (Boerse "
+            f"meldet {order.get('status')}). Verbucht - der Rest ({rest:.8f}) bleibt "
+            "offen und wird verkauft, solange das Ziel erreicht ist."
+        )
+
+    def _close_rest_if_dust(
+        self,
+        record: dict,
+        price: float,
+        rules,
+        client_order_id: str | None = None,
+        prefix: str = "",
+    ) -> bool:
+        """
+        Schliesst eine teilverkaufte Position, deren Rest sich nicht mehr
+        verkaufen laesst (Runde 2, Muster wie _close_with_dust beim Trend-Bot
+        aus K-A). Ohne das kaeme jeder Verkaufsversuch am Ziel als Ablehnung
+        zurueck, Zyklus fuer Zyklus, und die Stufe bliebe belegt.
+
+        Der Rest bleibt als Staub auf dem Konto (`dust_qty`), `close_reason`
+        "dust_after_sell", sell_price der Durchschnitt der Teile,
+        realized_pnl = Erloes der Teile - quote_spent (vorsichtig bewertet:
+        der Staub hat einen Restwert unter dem Mindestvolumen). Keine Sperre.
+
+        True, wenn geschlossen wurde. Ohne verbuchten Teilverkauf nie.
+        """
+        partial_qty = float(record.get("partial_exit_qty") or 0.0)
+        if partial_qty <= 0:
+            return False
+        rest = open_quantity(record)
+        if not is_dust(rest, price, rules):
+            return False
+        sell_price = float(record.get("partial_exit_quote") or 0.0) / partial_qty
+        realized_pnl = float(record.get("partial_exit_proceeds") or 0.0) - record["quote_spent"]
+        self._ledger.record_sell(
+            record["id"],
+            sell_price,
+            datetime.now(timezone.utc).isoformat(),
+            realized_pnl,
+            client_order_id,
+            dust_qty=rest,
+            close_reason=CLOSE_REASON_DUST_AFTER_SELL,
+        )
+        self._failed_sell_notified.discard(record["id"])
+        logger.warning(
+            "%s[GRID-STAUB] Stufe %s: nach dem Teilverkauf bleiben %.8f %s (~%.2f %s), "
+            "unter dem Mindestvolumen und damit nicht verkaufbar. Position geschlossen "
+            "(dust_after_sell), der Rest bleibt als Staub auf dem Konto. Realisiert "
+            "%.2f %s, Stufe ist frei.",
+            prefix,
+            record.get("level_index", "?"),
+            rest,
+            rules.base_asset,
+            rest * price,
+            rules.quote_asset,
+            realized_pnl,
+            rules.quote_asset,
+        )
+        send_notification(
+            f"{prefix}[GRID-STAUB] Stufe {record.get('level_index', '?')}: nach dem "
+            f"Teilverkauf ({partial_qty:.8f} {self._config.symbol} @ {sell_price:.2f}) "
+            f"bleiben {rest:.8f} {rules.base_asset} (~{rest * price:.2f} "
+            f"{rules.quote_asset}) unter dem Mindestvolumen als Staub auf dem Konto. "
+            f"Position geschlossen, realisiert: {realized_pnl:+.2f}. Stufe ist frei."
+        )
+        return True
 
     def _sell_is_pending(self, record: dict) -> bool:
         """
@@ -348,8 +556,10 @@ class GridTradingStrategy:
         if snapshot is None:
             return
 
+        # Offene Menge, also nach Teilverkaeufen (Runde 2) - sonst meldete
+        # jede teilverkaufte Position eine Diskrepanz, die es nicht gibt.
         own_quantity = sum(
-            float(r.get("quantity", 0.0))
+            open_quantity(r)
             for r in open_positions
             if not r.get("dry_run", True)
         )
@@ -399,7 +609,8 @@ class GridTradingStrategy:
         if snapshot is None:
             return True
 
-        quantity = float(record["quantity"])
+        # Genau die Menge, die gleich verkauft wird (Runde 2: die offene).
+        quantity = open_quantity(record)
         remaining = BalanceSnapshot(
             free=snapshot.free - sold_this_cycle,
             locked=snapshot.locked,
@@ -468,7 +679,7 @@ class GridTradingStrategy:
         self._dry_run_block_notified.add(record["id"])
         send_notification(
             f"[GRID-VERKAUF-GESPERRT] Stufe {record.get('level_index', '?')}: "
-            f"echte Position ({record['quantity']:.8f} {self._config.symbol}) "
+            f"echte Position ({open_quantity(record):.8f} {self._config.symbol}) "
             f"hat ihr Verkaufsziel @ {price:.2f} erreicht, Trading ist aber "
             "deaktiviert. Kein Verkauf, Position bleibt offen - zum Verkaufen "
             "GRID_BOT_ENABLE_TRADING=true setzen."
@@ -797,7 +1008,7 @@ class GridTradingStrategy:
         künstlich erhöht.
         """
         quantity = sum(
-            float(r.get("quantity", 0.0))
+            open_quantity(r)
             for r in self._ledger.open_positions()
             if not r.get("dry_run", True)
         )
@@ -976,6 +1187,39 @@ class GridTradingStrategy:
                 "stattgefunden, lässt sich aber keiner Position zuordnen."
             )
 
+        symbol = pending.symbol or self._config.symbol
+
+        # Schon als Teilverkauf verbucht (Runde 2)? Dann ist nichts
+        # nachzutragen - auch wenn die Position inzwischen mit einer ANDEREN
+        # Order geschlossen wurde. Ohne diese Pruefung zuerst hielte der
+        # Zweig darunter genau das fuer einen Doppelverkauf. Gleiche Lage
+        # nach einem Neustart zwischen record_partial_exit() und
+        # confirm_booked(): Der Teil steht schon im Ledger, der
+        # Pending-Eintrag aber auch noch.
+        order_id = order.get("orderId")
+        booked_ids = {str(i) for i in (record.get("partial_exit_order_ids") or [])}
+        if order_id is not None and str(order_id) in booked_ids:
+            logger.info(
+                "%sTeilverkauf zu Order %s ist bei Position %s bereits verbucht - "
+                "nichts nachzutragen.",
+                RECONCILIATION_PREFIX,
+                pending.client_order_id,
+                position_id,
+            )
+            if record["status"] == "open":
+                # Starb der Prozess, bevor ein Staub-Rest geschlossen war,
+                # holt das der Abschluss jetzt nach - sonst bliebe die Stufe
+                # belegt, bis das Ziel wieder erreicht ist.
+                rules = self._client.get_symbol_trading_rules(symbol)
+                self._close_rest_if_dust(
+                    record,
+                    average_fill_price(order, fallback=float(pending.context.get("price", 0.0)) or 0.0),
+                    rules,
+                    pending.client_order_id,
+                    RECONCILIATION_PREFIX,
+                )
+            return
+
         if record["status"] != "open":
             if record.get("sell_client_order_id") == pending.client_order_id:
                 # Genau der Fall, für den die Idempotenz da ist: der
@@ -1005,24 +1249,21 @@ class GridTradingStrategy:
                 "(python -m dca_bot.audit_positions)."
             )
 
-        symbol = pending.symbol or self._config.symbol
         rules = self._client.get_symbol_trading_rules(symbol)
         order = self._client.get_order_with_fills(symbol, order)
 
-        sell_price = average_fill_price(
-            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
+        # Dieselben Regeln wie im direkten Pfad (Runde 2): gebucht wird nach
+        # der ausgefuehrten Menge - vollstaendig, teilweise oder mit Staub.
+        outcome, sell_price, realized_pnl, _ = self._book_sell(
+            record,
+            order,
+            rules,
+            float(pending.context.get("price", 0.0)) or 0.0,
+            client_order_id=pending.client_order_id,
+            prefix=RECONCILIATION_PREFIX,
         )
-        proceeds = net_proceeds(order, rules, fallback=record["quantity"] * sell_price)
-        realized_pnl = proceeds - record["quote_spent"]
-
-        self._ledger.record_sell(
-            record["id"],
-            sell_price,
-            datetime.now(timezone.utc).isoformat(),
-            realized_pnl,
-            pending.client_order_id,
-        )
-        self._failed_sell_notified.discard(record["id"])
+        if outcome != SELL_CLOSED:
+            return
 
         logger.warning(
             "%sGrid-Verkauf nachgetragen: Stufe %s, Kauf @ %.2f -> Verkauf "

@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -71,9 +71,26 @@ class GridPosition:
     # Menge, die als Staub auf dem Konto bleibt, `realized_pnl` =
     # -quote_spent (vorsichtig bewertet wie K-A beim Trend-Bot: der Staub
     # hat einen Restwert unter dem Mindestvolumen). Im Normalfall 0.0 bzw.
-    # None. Teilverkaeufe nutzen diese Felder erst ab Runde 2.
+    # None. Seit Runde 2 (19.10.2026) auch fuer den Rest eines Teilverkaufs,
+    # der unter dem Mindestvolumen liegt: `close_reason` "dust_after_sell",
+    # `realized_pnl` = Erloes der Teile - quote_spent.
     dust_qty: float = 0.0
     close_reason: str | None = None
+    # Teilverkaeufe (Runde 2, 19.10.2026, Muster wie TrendTrade aus K-A):
+    # Endet ein Market-Verkauf, nachdem er nur einen Teil ausgefuehrt hat,
+    # bleibt die Position mit dem Rest offen. `quantity` und `quote_spent`
+    # bleiben die Werte des Kaufs, die offene Menge liefert
+    # order_utils.open_quantity().
+    #   partial_exit_qty       verkaufte Menge
+    #   partial_exit_quote     Brutto-Erloes (cummulativeQuoteQty) - fuer
+    #                          den gewichteten sell_price
+    #   partial_exit_proceeds  Netto-Erloes nach Gebuehr - fuer realized_pnl
+    #   partial_exit_order_ids orderIds der verbuchten Verkaeufe; macht das
+    #                          Verbuchen idempotent
+    partial_exit_qty: float = 0.0
+    partial_exit_quote: float = 0.0
+    partial_exit_proceeds: float = 0.0
+    partial_exit_order_ids: list[str] = field(default_factory=list)
 
     @staticmethod
     def new(
@@ -310,6 +327,58 @@ class GridLedger:
         self._write(kept)
         return len(records) - len(kept)
 
+    def record_partial_exit(
+        self, position_id: str, order_id: str, quantity: float, quote: float, proceeds: float
+    ) -> bool:
+        """
+        Verbucht einen nur teilweise ausgefuehrten Verkauf an einer offenen
+        Position (Runde 2, 19.10.2026) - in EINEM atomaren Schreibvorgang:
+        Menge und Erloese aufaddieren, orderId eintragen. Die Position bleibt
+        offen, die Restmenge liefert order_utils.open_quantity().
+
+        Idempotent ueber die orderId (Entscheidung D7): ist sie schon
+        eingetragen, passiert nichts und es kommt False zurueck. So wird ein
+        Teilverkauf auch nach einem Neustart zwischen Ledger-Eintrag und
+        confirm_booked() nie doppelt gezaehlt.
+
+        Wirft ValueError, statt still nichts zu tun, wenn die Position fehlt,
+        nicht offen ist oder die Menge keine positive Zahl ist: der Verkauf
+        hat an der Boerse stattgefunden und darf nicht verschwinden. Der
+        Pending-Eintrag bleibt dann stehen (siehe reconcile_pending_orders).
+        """
+        if not _is_number(quantity) or not quantity > 0:
+            raise ValueError(
+                f"Teilverkauf zu Order {order_id} ohne positive Menge ({quantity!r}) - "
+                "nichts gebucht."
+            )
+        records = self._read()
+        for r in records:
+            if r["id"] != position_id:
+                continue
+            if r.get("status") != "open":
+                raise ValueError(
+                    f"Teilverkauf zu Order {order_id}: Position {position_id} ist "
+                    "nicht offen - nichts gebucht."
+                )
+            order_ids = list(r.get("partial_exit_order_ids") or [])
+            if str(order_id) in order_ids:
+                return False
+            order_ids.append(str(order_id))
+            r["partial_exit_order_ids"] = order_ids
+            r["partial_exit_qty"] = round(
+                float(r.get("partial_exit_qty") or 0.0) + quantity, 12
+            )
+            r["partial_exit_quote"] = float(r.get("partial_exit_quote") or 0.0) + quote
+            r["partial_exit_proceeds"] = (
+                float(r.get("partial_exit_proceeds") or 0.0) + proceeds
+            )
+            self._write(records)
+            return True
+        raise ValueError(
+            f"Teilverkauf zu Order {order_id}: Position {position_id} gibt es im "
+            "Grid-Ledger nicht - nichts gebucht."
+        )
+
     def record_sell(
         self,
         position_id: str,
@@ -317,6 +386,8 @@ class GridLedger:
         sold_at: str,
         realized_pnl: float,
         sell_client_order_id: str | None = None,
+        dust_qty: float = 0.0,
+        close_reason: str | None = None,
     ) -> None:
         records = self._read()
         for r in records:
@@ -326,6 +397,12 @@ class GridLedger:
                 r["sold_at"] = sold_at
                 r["realized_pnl"] = realized_pnl
                 r["sell_client_order_id"] = sell_client_order_id
+                # Nur bei einem Abschluss mit Staub (Runde 2) - ein normaler
+                # Verkauf laesst die Felder, wie sie sind.
+                if dust_qty:
+                    r["dust_qty"] = dust_qty
+                if close_reason is not None:
+                    r["close_reason"] = close_reason
                 break
         self._write(records)
 

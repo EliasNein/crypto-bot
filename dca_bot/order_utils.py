@@ -147,6 +147,47 @@ def is_dust(quantity: float, price: float, rules: SymbolTradingRules) -> bool:
     return sellable <= 0 or sellable * price < rules.min_notional
 
 
+def open_quantity(record: dict) -> float:
+    """
+    Noch offene Menge einer Position: Kaufmenge minus bereits verbuchte
+    Teilverkaeufe (`partial_exit_qty`). Gerundet, damit aus
+    0.0003 - 0.00015 nicht 0.00014999999999999999 wird und die
+    Quantisierung nach unten eine ganze stepSize verschluckt.
+
+    Ueberall dort zu verwenden, wo verkauft, abgesichert oder gegen das
+    Konto abgeglichen wird - `quantity` bleibt die Menge beim Kauf
+    (Steuer-Export, Dashboard). Stammt aus trend_risk.py (K-A, Systemcheck
+    vom 27.09.2026) und gilt seit Runde 2 (Teilverkauf, 19.10.2026) auch fuer
+    Grid-Positionen. Ein Eintrag ohne das Feld ergibt `quantity`.
+    """
+    quantity = float(record.get("quantity") or 0.0)
+    partial = float(record.get("partial_exit_qty") or 0.0)
+    return max(round(quantity - partial, 12), 0.0)
+
+
+def sold_fully(open_qty: float, executed: float, rules: SymbolTradingRules | None) -> bool:
+    """
+    Ob ein Verkauf der offenen Menge die Position geschlossen hat: der Rest
+    ist kleiner als eine stepSize (oder ohne bekannte Regeln praktisch 0).
+
+    Bewusst ueber die Menge und nicht ueber den Status "FILLED" entschieden
+    (Regel aus K-A, trend_strategy._book_stop_fill): Ein Verkauf ueber eine
+    auf die stepSize abgerundete Menge ist FILLED, obwohl ein Rest unter
+    einer stepSize im Ledger steht - und eine Market-Order, die als EXPIRED
+    endet, kann trotzdem fast alles verkauft haben. Ein solcher Rest unter
+    einer stepSize wird wie bisher nicht gebucht (Entscheidung D8 vom
+    19.10.2026).
+
+    Der Rest wird vor dem Vergleich gerundet (wie in open_quantity): ohne das
+    ergibt 0.0002 - 0.00019 in Fliesskomma 9.999999999999999e-06, also
+    "weniger als eine stepSize" - ein verkaufbarer Rest von genau einer
+    stepSize galt dann als verkauft und fehlte im Ledger.
+    """
+    step = rules.step_size if rules is not None else 0.0
+    remainder = round(open_qty - executed, 12)
+    return remainder < step or remainder <= 1e-12
+
+
 def received_base_quantity(order: dict, rules: SymbolTradingRules) -> float:
     """
     Tatsaechlich erhaltene Base-Asset-Menge eines KAUFS, ohne Rundung auf

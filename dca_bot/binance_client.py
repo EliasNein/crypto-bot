@@ -34,10 +34,8 @@ from .pending_orders import (
     PendingOrderStore,
     classify_order_status,
     executed_quantity,
-    is_partial_fill,
     lookup_command,
     new_client_order_id,
-    report_unbooked_partial_sell,
     resolve_pending_order,
 )
 
@@ -968,7 +966,11 @@ class TradingClient:
             )
             return None
 
-        order = self._place_order(
+        # Eine Teilfuellung kommt wie jeder ausgefuehrte Verkauf zurueck; die
+        # Strategien buchen seit Runde 2 (19.10.2026) die ausgefuehrte Menge
+        # selbst. Die Meldung [<BOT>-TEILFUELLUNG-UNGEBUCHT] aus Runde 1 ist
+        # damit entfallen.
+        return self._place_order(
             kind=KIND_MARKET,
             symbol=symbol,
             side="SELL",
@@ -980,14 +982,6 @@ class TradingClient:
                 newClientOrderId=client_order_id,
             ),
         )
-        # Teilfuellung beim Verkauf (Runde 1, 16.10.2026): Die Strategien
-        # buchen bis Runde 2 weiterhin die volle Menge - hier wird es
-        # wenigstens laut. Neue Ledger-Felder braucht das nicht.
-        if order is not None and is_partial_fill(order):
-            report_unbooked_partial_sell(
-                self._config.bot_name, symbol, order.get("clientOrderId"), order, quantity
-            )
-        return order
 
     def place_stop_loss_limit_sell(
         self,

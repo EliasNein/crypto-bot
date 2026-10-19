@@ -15,7 +15,11 @@ Geprueft wird hier:
   und alte Eintraege ohne Bestand blockieren das Schreiben nicht.
 - T2: Ein nur teilweise ausgefuehrter Kauf wird mit der echten Menge
   gebucht; liegt sie unter dem Mindestvolumen, als Staub geschlossen.
-- Runde 1 beim Verkauf: Teilfuellung wird laut gemeldet, gebucht wie bisher.
+- Runde 1 beim Verkauf: Teilfuellung wurde laut gemeldet und wie bisher
+  gebucht. Seit Runde 2 (19.10.2026) bucht die Strategie die ausgefuehrte
+  Menge, die Meldung entfaellt - geprueft hier, dass sie nicht mehr kommt;
+  das Buchen pruefen tests/test_partial_sell_grid.py und
+  tests/test_partial_sell_trend.py.
 
 Jede neue Pruefung hat hier mindestens einen Test, der bei ihrer Mutation
 rot wird (Mutationsprobe vom 16.10.2026, siehe trading-bot-projekt.md).
@@ -197,28 +201,30 @@ class DirectMarketResponseTestCase(TradingClientTestBase):
                 self.assertIsNotNone(order)
                 self.assertEqual(len(self._pending_ids()), 1)
 
-    def test_partial_market_sell_is_reported_loudly(self):
-        client, raw = self._make()
-        raw.response_patch = {"status": "EXPIRED", "executedQty": "0.00010000",
-                              "cummulativeQuoteQty": "7.70000000"}
-        with mock.patch("dca_bot.pending_orders.send_notification") as notify:
-            with self.assertLogs("dca_bot", level="ERROR") as logs:
-                order = client.place_market_sell("BTCUSDT", 0.0002)
-        self.assertIsNotNone(order, "gebucht wird bis Runde 2 wie bisher")
-        notify.assert_called_once()
-        self.assertIn("[DCA-TEILFUELLUNG-UNGEBUCHT]", notify.call_args.args[0])
-        self.assertIn("0.00010000 von 0.0002", notify.call_args.args[0])
-        self.assertIn("TEILFUELLUNG-UNGEBUCHT", "\n".join(logs.output))
-
-    def test_full_market_sell_is_not_reported(self):
-        client, _ = self._make()
-        with mock.patch("dca_bot.pending_orders.send_notification") as notify:
-            client.place_market_sell("BTCUSDT", 0.0002)
-        notify.assert_not_called()
+    def test_partial_market_sell_is_returned_without_the_round_1_report(self):
+        """Runde 2 (19.10.2026): Die Strategie bucht die Teilmenge selbst - der
+        Client gibt die Order zurueck, haelt den Eintrag bis confirm_booked()
+        und meldet nichts mehr als TEILFUELLUNG-UNGEBUCHT."""
+        for patch in ({"status": "EXPIRED", "executedQty": "0.00010000",
+                       "cummulativeQuoteQty": "7.70000000"}, {}):
+            with self.subTest(teilweise=bool(patch)):
+                client, raw = self._make()
+                raw.response_patch = patch
+                with mock.patch("dca_bot.pending_orders.send_notification") as notify_p, \
+                        mock.patch("dca_bot.binance_client.send_notification") as notify_c:
+                    with self.assertLogs("dca_bot", level="INFO") as logs:
+                        order = client.place_market_sell("BTCUSDT", 0.0002)
+                self.assertIsNotNone(order)
+                self.assertEqual(self._pending_ids(), [order["clientOrderId"]],
+                                 "bis confirm_booked() bleibt der Eintrag (W-A)")
+                notify_p.assert_not_called()
+                notify_c.assert_not_called()
+                self.assertNotIn("TEILFUELLUNG", "\n".join(logs.output))
 
 
 class ReconciledPartialSellTestCase(unittest.TestCase):
-    """Derselbe laute Hinweis, wenn ein Teilverkauf erst nachgetragen wird."""
+    """Auch beim Nachtragen keine Runde-1-Meldung mehr - das Buchen und Melden
+    uebernimmt seit Runde 2 die Strategie (apply_confirmed)."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -235,16 +241,14 @@ class ReconciledPartialSellTestCase(unittest.TestCase):
         apply_confirmed.assert_called_once()
         return notify
 
-    def test_partial_sell_is_reported(self):
-        notify = self._run("SELL", {"status": "EXPIRED", "executedQty": "0.0001", "origQty": "0.0002"})
-        texts = [c.args[0] for c in notify.call_args_list]
-        self.assertTrue(any("[GRID-TEILFUELLUNG-UNGEBUCHT]" in t for t in texts), texts)
-
-    def test_partial_buy_and_full_sell_are_not_reported(self):
+    def test_nothing_is_reported_as_unbooked(self):
         for side, order in (("BUY", {"status": "EXPIRED", "executedQty": "0.0001"}),
+                            ("SELL", {"status": "EXPIRED", "executedQty": "0.0001", "origQty": "0.0002"}),
                             ("SELL", {"status": "FILLED", "executedQty": "0.0002"})):
-            with self.subTest(side=side):
-                self.store = PendingOrderStore(str(Path(self._tmp.name) / f"{side}.json"), "grid")
+            with self.subTest(side=side, status=order["status"]):
+                self.store = PendingOrderStore(
+                    str(Path(self._tmp.name) / f"{side}-{order['status']}.json"), "grid"
+                )
                 notify = self._run(side, order)
                 self.assertFalse(any("TEILFUELLUNG" in c.args[0] for c in notify.call_args_list))
 
@@ -586,15 +590,19 @@ class UnfilledSellEndToEndTestCase(SharedAccountTestBase):
         self.assertEqual(grid._ledger.open_positions(), [])
         self.assert_ownership()
 
-    def test_grid_partial_sell_is_reported_and_booked_as_before(self):
-        """Runde 1: laut melden, gebucht wird (noch) die volle Menge."""
+    def test_grid_partial_sell_is_booked_with_the_executed_quantity(self):
+        """Runde 1 buchte die volle Menge und meldete nur laut. Seit Runde 2
+        bleibt die Position mit dem Rest offen - und die Eigentums-Invariante
+        haelt (Details: tests/test_partial_sell_grid.py)."""
         grid, position = self._grid_with_position()
         self.exchange.price = position["target_sell_price"] * 1.0001
         self.exchange.set_liquidity("order_market_sell", 0.5)
         grid.execute_once()
 
-        self.assertEqual(grid._ledger.open_positions(), [])
-        self.assertTrue(any("[GRID-TEILFUELLUNG-UNGEBUCHT]" in m for m in self.messages))
+        [still_open] = grid._ledger.open_positions()
+        self.assertAlmostEqual(still_open["partial_exit_qty"], position["quantity"] / 2, places=12)
+        self.assertFalse(any("TEILFUELLUNG-UNGEBUCHT" in m for m in self.messages))
+        self.assert_ownership()
 
     def test_trend_sell_without_fill_keeps_the_position_and_restores_protection(self):
         trend = self.start_trend()

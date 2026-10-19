@@ -117,6 +117,10 @@ LEDGER_CLIENT_ID_FIELDS = ("client_order_id", "sell_client_order_id", "exit_clie
 # Die Stop-Loss-Order des Trend-Bots steht im Ledger mit ihrer orderId,
 # nicht mit der clientOrderId.
 LEDGER_ORDER_ID_FIELDS = ("stop_loss_order_id",)
+# Verbuchte Teilverkaeufe stehen als Liste von orderIds im Ledger (Grid seit
+# Runde 2 vom 19.10.2026, Trend seit K-A). Ohne diese Suche hiesse ein
+# gebuchter Teilverkauf hier "fuer den Bot unsichtbar" (Entscheidung D5).
+LEDGER_ORDER_ID_LIST_FIELDS = ("partial_exit_order_ids",)
 
 EXIT_OK = 0
 EXIT_NO_CLIENT = 1
@@ -308,6 +312,10 @@ def _find_in_ledger(path: Path, client_order_id: str, order_id: str | None) -> t
         if order_id is not None:
             for field in LEDGER_ORDER_ID_FIELDS:
                 if record.get(field) is not None and str(record.get(field)) == order_id:
+                    return field, None
+            for field in LEDGER_ORDER_ID_LIST_FIELDS:
+                ids = record.get(field)
+                if isinstance(ids, list) and order_id in {str(i) for i in ids}:
                     return field, None
     return None, None
 

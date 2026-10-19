@@ -593,49 +593,6 @@ def is_partial_fill(order: dict | None) -> bool:
     )
 
 
-def report_unbooked_partial_sell(
-    bot_name: str,
-    symbol: str,
-    client_order_id: str | None,
-    order: dict,
-    requested: object = None,
-) -> None:
-    """
-    Laute Meldung, wenn ein Market-VERKAUF nur teilweise ausgefuehrt wurde
-    (16.10.2026, Runde 1).
-
-    Gebucht wird bis Runde 2 weiterhin wie bisher, also ueber die volle
-    Positionsmenge - Ledger und Konto weichen danach um den nicht
-    verkauften Rest ab. Diese Meldung ist die einzige Stelle, an der das
-    sichtbar wird; sie aendert am Ablauf nichts und braucht keine neuen
-    Ledger-Felder.
-    """
-    tag = f"[{bot_name.upper()}-TEILFUELLUNG-UNGEBUCHT]"
-    executed = order.get("executedQty", "?")
-    wanted = requested if requested is not None else order.get("origQty", "?")
-    status = order.get("status", "?")
-    logger.error(
-        "%s Market-Verkauf %s (clientOrderId %s): Boerse meldet Status %s, "
-        "ausgefuehrt %s von %s. Der Bot bucht den Verkauf wie bisher ueber die "
-        "volle Menge - der nicht verkaufte Rest liegt weiter auf dem Konto, "
-        "steht aber nicht mehr im Ledger. Bitte pruefen: python -m "
-        "dca_bot.audit_positions",
-        tag,
-        symbol,
-        client_order_id,
-        status,
-        executed,
-        wanted,
-    )
-    send_notification(
-        f"{tag} {symbol}: Market-Verkauf {client_order_id} nur teilweise "
-        f"ausgefuehrt (Status {status}, {executed} von {wanted}). Gebucht wird "
-        "wie bisher die volle Menge - der Rest liegt weiter auf dem Konto, "
-        "steht aber nicht mehr im Ledger. Bitte pruefen: "
-        "python -m dca_bot.audit_positions"
-    )
-
-
 def resolve_pending_order(client, pending: PendingOrder) -> tuple[str, dict | None]:
     """
     Fragt die Boerse, was mit `pending` tatsaechlich passiert ist, und
@@ -781,18 +738,9 @@ def reconcile_pending_orders(
                     "Bot-Log, manuelle Pruefung noetig.",
                 )
                 continue
-            # Nachgetragene Verkaeufe buchen bis Runde 2 die volle Menge -
-            # eine Teilfuellung wird wie im direkten Pfad (binance_client.
-            # place_market_sell) wenigstens laut gemeldet. Erst nach dem
-            # Nachtragen: scheitert es, kaeme die Meldung sonst jeden Zyklus.
-            if (
-                pending.side == "SELL"
-                and pending.kind == KIND_MARKET
-                and is_partial_fill(order)
-            ):
-                report_unbooked_partial_sell(
-                    store.bot_name, pending.symbol, pending.client_order_id, order
-                )
+            # Eine Teilfuellung beim Verkauf bucht apply_confirmed seit Runde 2
+            # (19.10.2026) nach der ausgefuehrten Menge und meldet sie selbst -
+            # die Meldung [<BOT>-TEILFUELLUNG-UNGEBUCHT] aus Runde 1 entfaellt.
             settled(pending.client_order_id)
             continue
 

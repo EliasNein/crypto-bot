@@ -27,11 +27,13 @@ ausprobiert wird, ist keiner.
    check_orders-Abgleich laufen. Dabei muss das unbekannte Feld die
    Schreibvorgaenge des alten Codes ueberleben.
 
-Geprueft werden drei Staende: 6ed3bf5 laeuft am 28.09.2026 auf beiden
+Geprueft werden vier Staende: 6ed3bf5 laeuft am 28.09.2026 auf beiden
 Servern, f42e646 ist der Stand direkt vor dieser Runde, 5f5ebf0 laeuft seit
-dem 29.09.2026 auf dem Homeserver (Rueckweg fuer den Fix vom 16.10.2026).
+dem 29.09.2026 auf dem Homeserver (Rueckweg fuer den Fix vom 16.10.2026),
+652e618 laeuft seit dem 16.10.2026 auf dem Homeserver (Rueckweg fuer
+Runde 2, Teilverkauf vom 19.10.2026).
 Die Git-Historie wurde am 19.10.2026 umgeschrieben; vorher hiessen die
-drei Staende 10ce096, 46ca7a7 und 980f3c3 (Zuordnung: trading-bot-projekt.md,
+Staende 10ce096, 46ca7a7, 980f3c3 und 76f261b (Zuordnung: trading-bot-projekt.md,
 Log 19.10.2026). Zu jedem Stand ist die Baum-ID von `dca_bot/` hinterlegt -
 sie ueberdauert jedes Umschreiben und belegt, dass genau der alte Code
 geprueft wird.
@@ -48,6 +50,14 @@ Seit dem 16.10.2026 enthalten die Dateien zusaetzlich die Staub-Faelle aus
 T2: eine geschlossene Grid-Position mit `dust_qty`/`close_reason` und einen
 Trend-Trade mit `exit_reason` "dust_on_entry". Der alte Code muss beide
 lesen und darf die neuen Felder beim Schreiben nicht verlieren.
+
+Seit Runde 2 (19.10.2026) zusaetzlich eine geschlossene Grid-Position mit
+Teilverkauf (`partial_exit_*`) und Staub-Rest (`close_reason`
+"dust_after_sell"). Eine OFFENE Grid-Position mit Teilverkauf dagegen kennt
+der alte Code nicht: Er verkauft die volle `quantity` und greift damit auf
+den Bestand anderer Bots zu. Solche Positionen blockieren den Rueckweg
+(Entscheidung E9); `OpenPartialGridPositionTestCase` belegt das Verhalten
+des alten Codes, damit die Pruefung vor dem Rueckweg begruendet bleibt.
 
 Ausfuehren mit:  python -m unittest tests.test_rollback_compat -v
 """
@@ -85,6 +95,8 @@ OLD_STATES = (
      "vor dem Umschreiben 46ca7a7; Stand direkt vor der Symbolbindung"),
     ("5f5ebf0", "49612c423cf2ba4fbb42793f7b979727bf11e252",
      "vor dem Umschreiben 980f3c3; laeuft seit 29.09.2026 auf dem Homeserver"),
+    ("652e618", "5c110b0728ddab2293e947629b0d6930ff2ce97d",
+     "vor dem Umschreiben 76f261b; laeuft seit 16.10.2026 auf dem Homeserver"),
 )
 
 SKIP = "ueberspringen"
@@ -139,6 +151,15 @@ def write_new_format_files(data: Path) -> dict[str, str]:
     dust.status, dust.sold_at, dust.realized_pnl = "closed", dust.bought_at, -3.85
     dust.dust_qty, dust.close_reason = 0.00005, "dust"
     grid.record_buy(dust)
+    # Teilverkauf mit Staub-Rest (Runde 2, 19.10.2026): geschlossen.
+    partial = GridPosition.new(
+        level_index=7, buy_price=78_000.0, target_sell_price=79_170.0, quantity=0.0002,
+        quote_spent=15.6, dry_run=False, client_order_id="grid-partial", symbol="BTCUSDT",
+    )
+    grid.record_buy(partial)
+    grid.record_partial_exit(partial.id, "4711", 0.00014, 11.08, 11.07)
+    grid.record_sell(partial.id, 79_142.86, datetime.now(timezone.utc).isoformat(), 11.07 - 15.6,
+                     "grid-partial-sell", dust_qty=0.00006, close_reason="dust_after_sell")
 
     trend = TrendLedger(paths["trend"])
     old_trade = TrendTrade.new(entry_price=48_000.0, quantity=0.0003, quote_spent=14.4,
@@ -297,6 +318,12 @@ dust = [r for r in GridLedger(P["grid"])._read() if r.get("client_order_id") == 
 assert len(dust) == 1 and dust[0]["status"] == "closed", "Grid-Staub nicht mehr da"
 assert dust[0]["close_reason"] == "dust" and dust[0]["dust_qty"] == 0.00005, \
     "Grid: Staub-Felder haben den Schreibvorgang des alten Codes nicht ueberlebt"
+partial = [r for r in GridLedger(P["grid"])._read() if r.get("client_order_id") == "grid-partial"]
+assert len(partial) == 1 and partial[0]["status"] == "closed", "Grid-Teilverkauf nicht mehr da"
+assert partial[0]["partial_exit_order_ids"] == ["4711"] and partial[0]["partial_exit_qty"] == 0.00014, \
+    "Grid: Teilverkaufs-Felder haben den Schreibvorgang des alten Codes nicht ueberlebt"
+assert partial[0]["close_reason"] == "dust_after_sell" and partial[0]["dust_qty"] == 0.00006, \
+    "Grid: Staub nach Teilverkauf hat den Schreibvorgang des alten Codes nicht ueberlebt"
 
 from dca_bot.trend_config import TrendConfig
 from dca_bot.trend_strategy import TrendFollowingStrategy
@@ -390,7 +417,9 @@ def old_code_available(commit: str, tree: str) -> tuple[str, str] | None:
     return None
 
 
-def run_old_code(commit: str, paths: dict[str, str], workdir: Path) -> subprocess.CompletedProcess:
+def run_old_code(
+    commit: str, paths: dict[str, str], workdir: Path, script: str | None = None
+) -> subprocess.CompletedProcess:
     extract_old_code(commit, workdir)
     env = {
         k: v for k, v in os.environ.items()
@@ -400,10 +429,68 @@ def run_old_code(commit: str, paths: dict[str, str], workdir: Path) -> subproces
     env["PYTHONPATH"] = str(workdir)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(
-        [sys.executable, "-B", "-c", OLD_CODE_SCRIPT, json.dumps(paths)],
+        [sys.executable, "-B", "-c", script or OLD_CODE_SCRIPT, json.dumps(paths)],
         cwd=workdir, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=120,
     )
+
+
+# Laeuft im ALTEN Code: eine OFFENE Grid-Position mit Teilverkauf (Runde 2).
+# Erwartet wird, dass der alte Code die volle `quantity` verkauft - genau
+# deshalb blockiert so eine Position den Rueckweg (E9).
+OPEN_PARTIAL_SCRIPT = r'''
+import json, logging, sys
+P = json.loads(sys.argv[1])
+logging.disable(logging.CRITICAL)
+from dca_bot.order_utils import SymbolTradingRules
+from dca_bot.pending_orders import PendingOrderStore
+RULES = SymbolTradingRules(symbol="BTCUSDT", tick_size=0.01, step_size=0.00001,
+                           min_notional=5.0, base_asset="BTC", quote_asset="USDT",
+                           quote_precision=8)
+
+class Fake:
+    def __init__(self, pending_file):
+        self.pending_orders = PendingOrderStore(pending_file, "grid")
+        self.sells = []
+    def get_current_price(self, s): return 76000.0
+    def get_symbol_trading_rules(self, s): return RULES
+    def get_asset_balance(self, a): return (1000.0, 0.0)
+    def get_open_orders(self, s): return []
+    def get_order_by_client_id(self, s, c): return ("not_found", None)
+    def place_market_buy(self, s, amount, context=None): return None
+    def place_market_sell(self, s, qty, context=None):
+        self.sells.append(qty)
+        return {"clientOrderId": "alt-1", "status": "FILLED", "executedQty": str(qty),
+                "cummulativeQuoteQty": str(qty * 76000.0), "fills": []}
+    def confirm_booked(self, cid):
+        if cid: self.pending_orders.remove(cid)
+
+from dca_bot.grid_config import GridConfig
+from dca_bot.grid_strategy import GridTradingStrategy
+cfg = GridConfig(api_key="k", api_secret="s", symbol="BTCUSDT", lower_limit=70000.0,
+                 upper_limit=90000.0, grid_spacing_pct=1.5, amount_per_level=15.0,
+                 trading_enabled=True, kill_switch_file=P["stop"], state_file=P["grid"],
+                 stop_loss_state_file=P["tmp"] + "/grid_sl.json",
+                 pending_orders_file=P["tmp"] + "/p_grid.json", bot_name="grid")
+client = Fake(cfg.pending_orders_file)
+GridTradingStrategy(cfg, client).execute_once()
+print("VERKAUFT", json.dumps(client.sells))
+'''
+
+
+def write_open_partial_grid_file(data: Path) -> dict[str, str]:
+    """Ein Grid-Ledger mit einer OFFENEN Position, die schon zur Haelfte verkauft ist."""
+    data.mkdir(parents=True, exist_ok=True)
+    paths = {"grid": str(data / "grid_positions.json"), "tmp": str(data),
+             "stop": str(data / "STOP_UNUSED")}
+    grid = GridLedger(paths["grid"])
+    position = GridPosition.new(
+        level_index=3, buy_price=74_000.0, target_sell_price=75_110.0, quantity=0.0002,
+        quote_spent=14.8, dry_run=False, client_order_id="grid-open", symbol="BTCUSDT",
+    )
+    grid.record_buy(position)
+    grid.record_partial_exit(position.id, "4712", 0.0001, 7.5, 7.49)
+    return paths
 
 
 class NewFilesPremiseTestCase(unittest.TestCase):
@@ -417,6 +504,8 @@ class NewFilesPremiseTestCase(unittest.TestCase):
             alloc = json.loads(Path(paths["alloc"]).read_text(encoding="utf-8"))
             self.assertTrue(all(r["symbol"] == "BTCUSDT" for r in grid))
             self.assertTrue(any(r.get("close_reason") == "dust" for r in grid))
+            self.assertTrue(any(r.get("close_reason") == "dust_after_sell"
+                                and r.get("partial_exit_order_ids") == ["4711"] for r in grid))
             self.assertTrue(any(r.get("exit_reason") == "dust_on_entry" for r in trend))
             self.assertTrue(all(r["symbol"] == "BTCUSDT" for r in trend))
             self.assertEqual(alloc["symbol"], "BTCUSDT")
@@ -445,6 +534,33 @@ class RollbackCompatibilityTestCase(unittest.TestCase):
                     f"{result.stdout}\n{result.stderr[-3000:]}",
                 )
                 self.assertIn("ALLES OK", result.stdout)
+
+
+class OpenPartialGridPositionTestCase(unittest.TestCase):
+    """
+    Belegt, warum eine offene Grid-Position mit Teilverkauf den Rueckweg
+    blockiert (E9): Der alte Code kennt `partial_exit_qty` nicht und verkauft
+    die volle `quantity` - auf dem geteilten Konto aus dem Bestand anderer
+    Bots. Faellt dieser Test, weil der alte Code die Restmenge verkauft,
+    stimmt die Begruendung der Pruefung vor dem Rueckweg nicht mehr.
+    """
+
+    def test_old_code_would_sell_the_full_quantity(self):
+        for commit, tree, meaning in OLD_STATES:
+            with self.subTest(stand=commit, bedeutung=meaning):
+                status = old_code_available(commit, tree)
+                if status is not None:
+                    kind, reason = status
+                    if kind == FAIL:
+                        self.fail(f"Rueckweg gegen {commit} nicht pruefbar: {reason}")
+                    self.skipTest(f"Rueckweg gegen {commit} NICHT geprueft: {reason}")
+                with tempfile.TemporaryDirectory() as tmp:
+                    paths = write_open_partial_grid_file(Path(tmp) / "data")
+                    result = run_old_code(commit, paths, Path(tmp) / "alt", OPEN_PARTIAL_SCRIPT)
+                self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr[-3000:]}")
+                line = [x for x in result.stdout.splitlines() if x.startswith("VERKAUFT")][-1]
+                self.assertEqual(json.loads(line.split(" ", 1)[1]), [0.0002],
+                                 "alter Code verkauft die volle Kaufmenge, nicht den Rest 0.0001")
 
 
 if __name__ == "__main__":
