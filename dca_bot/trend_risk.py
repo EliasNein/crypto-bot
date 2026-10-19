@@ -21,6 +21,9 @@ from pathlib import Path
 
 from .risk import LedgerUnreadable, require_plausible_entry
 from .notifier import send_notification
+# Seit Runde 2 (19.10.2026) in order_utils, weil Grid-Positionen sie ebenfalls
+# brauchen - hier unter demselben Namen weiter importierbar.
+from .order_utils import open_quantity  # noqa: F401
 
 logger = logging.getLogger("trend_bot")
 
@@ -91,9 +94,10 @@ class TrendTrade:
     # Ausstieg verbucht wurden (Systemcheck vom 27.09.2026, K-A). Eine
     # Stop-Order kann teilweise fuellen und danach storniert werden oder
     # ablaufen - dann ist ein Teil der Position an der Boerse schon
-    # verkauft. `quantity` und `quote_spent` bleiben bewusst die Werte des
-    # Einstiegs (Steuer-Export, Dashboard); die noch offene Menge liefert
-    # `open_quantity()` unten.
+    # verkauft. Seit Runde 2 (19.10.2026) landet hier auch ein nur teilweise
+    # ausgefuehrter eigener Market-Verkauf. `quantity` und `quote_spent`
+    # bleiben bewusst die Werte des Einstiegs (Steuer-Export, Dashboard); die
+    # noch offene Menge liefert order_utils.open_quantity().
     #   partial_exit_qty       verkaufte Menge
     #   partial_exit_quote     Brutto-Erloes (cummulativeQuoteQty) - fuer
     #                          den gewichteten exit_price
@@ -104,6 +108,15 @@ class TrendTrade:
     partial_exit_quote: float = 0.0
     partial_exit_proceeds: float = 0.0
     partial_exit_order_ids: list[str] = field(default_factory=list)
+    # Ob unter den Teilen ein Stop-Loss-Ereignis war (Runde 2, 19.10.2026,
+    # E8/D2): True bei einer Teilfuellung der Stop-Order UND bei einem nur
+    # teilweise ausgefuehrten Market-Verkauf mit Grund "stop_loss". Einmal
+    # True bleibt True. Nur dann erzwingt trend_strategy beim Abschluss den
+    # Grund stop_loss samt Sperre. None = kein Teil oder Altbestand von vor
+    # Runde 2 - Altbestand MIT Teilmenge gilt als True (siehe
+    # partial_from_stop), damals konnte eine Teilmenge nur von der Stop-Order
+    # kommen.
+    partial_exit_from_stop: bool | None = None
     # Rest unter dem Mindestvolumen, der nach einer Teilfuellung nicht mehr
     # verkaufbar war und beim Schliessen als Staub auf dem Konto blieb
     # (K-A, Entscheidung 3). 0.0 im Normalfall.
@@ -138,19 +151,21 @@ class TrendTrade:
         )
 
 
-def open_quantity(trade: dict) -> float:
+def partial_from_stop(trade: dict) -> bool:
     """
-    Noch offene Menge einer Position: Einstiegsmenge minus bereits
-    verbuchte Teilfuellungen der Stop-Order (K-A). Gerundet, damit aus
-    0.0003 - 0.00015 nicht 0.00014999999999999999 wird und die
-    Quantisierung nach unten eine ganze stepSize verschluckt.
+    Ob die verbuchten Teile einer Position ein Stop-Loss-Ereignis enthalten
+    (Runde 2, 19.10.2026, E8/D2) - dann schliesst der Rest mit Grund
+    stop_loss und setzt die Sperre, auch wenn der Ausstieg vom Signal kommt.
 
-    Ueberall dort zu verwenden, wo verkauft, abgesichert oder gegen das
-    Konto abgeglichen wird - `quantity` ist die Menge beim Einstieg.
+    Ohne verbuchte Teilmenge nie. Mit Teilmenge entscheidet das Feld
+    `partial_exit_from_stop`; fehlt es (Altbestand von vor Runde 2), gilt
+    True - damals konnte eine Teilmenge nur von der Stop-Order stammen, und
+    genau so hat sich der Bot bisher verhalten.
     """
-    quantity = float(trade.get("quantity") or 0.0)
-    partial = float(trade.get("partial_exit_qty") or 0.0)
-    return max(round(quantity - partial, 12), 0.0)
+    if not float(trade.get("partial_exit_qty") or 0.0) > 0:
+        return False
+    flag = trade.get("partial_exit_from_stop")
+    return True if flag is None else bool(flag)
 
 
 class TrendLedger:
@@ -362,18 +377,34 @@ class TrendLedger:
                 break
         self._write(records)
 
-    def record_partial_stop_fill(
-        self, trade_id: str, order_id: str, quantity: float, quote: float, proceeds: float
+    def record_partial_exit(
+        self,
+        trade_id: str,
+        order_id: str,
+        quantity: float,
+        quote: float,
+        proceeds: float,
+        from_stop: bool,
     ) -> bool:
         """
-        Verbucht die Teilfuellung einer beendeten (stornierten oder
-        abgelaufenen) Stop-Order an einer offenen Position (K-A) - in EINEM
+        Verbucht einen Teilverkauf an einer offenen Position - in EINEM
         atomaren Schreibvorgang: Mengen und Erloese aufaddieren, orderId
-        eintragen, Stop-Order-Zuordnung loesen (die Order ist beendet).
+        eintragen, Stop-Order-Zuordnung loesen. Zwei Quellen:
+
+        - die Teilfuellung einer beendeten (stornierten oder abgelaufenen)
+          Stop-Order (K-A, `from_stop` True) - die Order ist beendet;
+        - seit Runde 2 (19.10.2026) ein nur teilweise ausgefuehrter
+          Market-Verkauf - die Stop-Order war dafuer schon storniert.
+          `from_stop` ist True, wenn der Verkauf den Grund "stop_loss" hatte
+          (Entscheidung D2), sonst False.
+
+        `partial_exit_from_stop` ist "klebend": einmal True bleibt True, und
+        ein Altbestand mit Teilmenge ohne das Feld zaehlt als True (siehe
+        partial_from_stop).
 
         Idempotent ueber die orderId: ist sie schon eingetragen, passiert
-        nichts und es kommt False zurueck. So wird eine Teilfuellung auch
-        nach einem Absturz zwischen zwei Schritten nie doppelt gezaehlt.
+        nichts und es kommt False zurueck. So wird ein Teil auch nach einem
+        Absturz zwischen zwei Schritten nie doppelt gezaehlt.
         """
         records = self._read()
         for r in records:
@@ -382,6 +413,7 @@ class TrendLedger:
             order_ids = list(r.get("partial_exit_order_ids") or [])
             if str(order_id) in order_ids:
                 return False
+            r["partial_exit_from_stop"] = bool(from_stop) or partial_from_stop(r)
             order_ids.append(str(order_id))
             r["partial_exit_order_ids"] = order_ids
             r["partial_exit_qty"] = round(
@@ -396,6 +428,12 @@ class TrendLedger:
             self._write(records)
             return True
         return False
+
+    def record_partial_stop_fill(
+        self, trade_id: str, order_id: str, quantity: float, quote: float, proceeds: float
+    ) -> bool:
+        """Alter Name (K-A) - eine Teilfuellung der Stop-Order, also `from_stop` True."""
+        return self.record_partial_exit(trade_id, order_id, quantity, quote, proceeds, from_stop=True)
 
     def record_exit(
         self,

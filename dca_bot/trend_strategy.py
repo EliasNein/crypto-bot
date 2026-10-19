@@ -41,6 +41,7 @@ from .order_utils import (
     net_proceeds,
     quantize_quantity,
     received_base_quantity,
+    sold_fully,
 )
 from .pending_orders import (
     KIND_MARKET,
@@ -63,7 +64,13 @@ from .pending_orders import (
 from .risk import KillSwitch
 from .startup_checks import report_ledger_vs_account
 from .trend_config import TrendConfig
-from .trend_risk import TrendLedger, TrendStopLoss, TrendTrade, open_quantity
+from .trend_risk import (
+    TrendLedger,
+    TrendStopLoss,
+    TrendTrade,
+    open_quantity,
+    partial_from_stop,
+)
 from .trend_signals import TrendSignalGenerator, decide_action, is_stop_loss_hit
 
 logger = logging.getLogger("trend_bot")
@@ -485,7 +492,8 @@ class TrendFollowingStrategy:
           verkauft, ist die Position geschlossen: _close_from_filled_stop_order,
           Rückgabe "already_closed".
         - Sonst war es eine Teilfüllung: Menge und Erlös kommen an die
-          Position (record_partial_stop_fill, idempotent über die orderId),
+          Position (record_partial_exit mit from_stop, idempotent über die
+          orderId),
           die Stop-Zuordnung wird gelöst, Rückgabe "partial". Der Aufrufer
           verkauft danach den Rest.
 
@@ -509,11 +517,12 @@ class TrendFollowingStrategy:
                     log_prefix,
                     type(exc).__name__,
                 )
-        step_size = rules.step_size if rules is not None else 0.0
-
         executed = executed_quantity(order)
-        remainder = open_quantity(open_trade) - executed
-        if remainder < step_size or remainder <= 1e-12:
+        # Seit Runde 2 ueber order_utils.sold_fully (19.10.2026): bis dahin
+        # stand hier der ungerundete Rest. 0.0002 - 0.00019 ergibt in
+        # Fliesskomma 9.999999999999999e-06 - ein Rest von genau einer
+        # stepSize galt damit als verkauft und blieb unverbucht auf dem Konto.
+        if sold_fully(open_quantity(open_trade), executed, rules):
             self._close_from_filled_stop_order(open_trade, order, log_prefix=log_prefix)
             return "already_closed"
 
@@ -536,8 +545,8 @@ class TrendFollowingStrategy:
             )
 
         limit_price = open_trade.get("stop_limit_price")
-        booked = self._ledger.record_partial_stop_fill(
-            open_trade["id"], order_id, executed, gross, proceeds
+        booked = self._ledger.record_partial_exit(
+            open_trade["id"], order_id, executed, gross, proceeds, from_stop=True
         )
         if not booked:
             logger.info(
@@ -552,6 +561,7 @@ class TrendFollowingStrategy:
             "partial_exit_quote",
             "partial_exit_proceeds",
             "partial_exit_order_ids",
+            "partial_exit_from_stop",
             "stop_loss_order_id",
             "stop_limit_price",
         ):
@@ -619,7 +629,12 @@ class TrendFollowingStrategy:
         return is_dust(quantity, price, rules)
 
     def _close_with_dust(
-        self, open_trade: dict, price: float, rules, log_prefix: str = ""
+        self,
+        open_trade: dict,
+        price: float,
+        rules,
+        log_prefix: str = "",
+        reason: str = "stop_loss",
     ) -> None:
         """
         Schließt eine Position, deren Rest nach einer Teilfüllung nicht mehr
@@ -630,8 +645,11 @@ class TrendFollowingStrategy:
 
         Der Rest bleibt als Staub auf dem Konto und steht als `dust_qty` im
         Ledger; gemeldet wird er per Log und Telegram. Der Erlös ist allein
-        der der Teilfüllung(en). Ausstiegsgrund stop_loss mit Latch - es
-        hat ein Stop-Loss-Ereignis stattgefunden.
+        der der Teilfüllung(en). Ausstiegsgrund ist `reason`, die Sperre
+        greift nur bei "stop_loss". Bis Runde 2 (19.10.2026) stand hier fest
+        stop_loss mit Sperre - eine Teilmenge konnte damals nur von der
+        Stop-Order kommen. Seit Runde 2 kann sie auch von einem nur teilweise
+        ausgefuehrten Market-Verkauf mit Grund "signal" stammen.
 
         Menge und Wert des Rests werden in Base- und Quote-Asset des Paars
         aus exchangeInfo (`rules`) angegeben - bis zur Symbolbindung vom
@@ -648,7 +666,7 @@ class TrendFollowingStrategy:
             open_trade["id"],
             exit_price,
             datetime.now(timezone.utc).isoformat(),
-            "stop_loss",
+            reason,
             realized_pnl,
             None,
             dust_qty=dust,
@@ -667,17 +685,19 @@ class TrendFollowingStrategy:
             realized_pnl,
             rules.quote_asset,
         )
+        reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
         send_notification(
-            f"{log_prefix}[TREND-AUSSTIEG] (Stop-Loss, Teilfüllung): "
+            f"{log_prefix}[TREND-AUSSTIEG] ({reason_label}, Teilfüllung): "
             f"{partial_qty:.8f} {self._config.symbol} @ {exit_price:.2f} verkauft, "
             f"realisiert: {realized_pnl:+.2f} {rules.quote_asset}. Rest {dust:.8f} "
             f"{rules.base_asset} (~{dust * price:.2f} {rules.quote_asset}) liegt unter "
             "dem Mindestvolumen und bleibt als Staub auf dem Konto."
         )
-        loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
-        self._stop_loss.pause(
-            self._config.symbol, open_trade["entry_price"], exit_price, loss_pct
-        )
+        if reason == "stop_loss":
+            loss_pct = (1 - exit_price / open_trade["entry_price"]) * 100
+            self._stop_loss.pause(
+                self._config.symbol, open_trade["entry_price"], exit_price, loss_pct
+            )
 
     def _reset_uncertain_cycles(self, open_trade: dict) -> None:
         if open_trade.get("uncertain_cycles", 0) != 0:
@@ -800,14 +820,17 @@ class TrendFollowingStrategy:
         if outcome == "uncertain":
             return  # nichts tun, naechster Zyklus prueft erneut
 
-        # Hat die Stop-Order schon teilweise verkauft (K-A), ist ein
+        # Hat die Stop-Order schon teilweise verkauft (K-A) oder ein
+        # frueherer Market-Verkauf mit Grund stop_loss (Runde 2, D2), ist ein
         # Stop-Loss-Ereignis eingetreten - auch wenn dieser Ausstieg vom
         # Signal kam. Grund und Latch folgen dem, wie bei einer komplett
-        # gefuellten Stop-Order (Entscheidung 1 vom 27.09.2026).
-        if float(open_trade.get("partial_exit_qty") or 0.0) > 0:
+        # gefuellten Stop-Order (Entscheidung 1 vom 27.09.2026). Ein Teil aus
+        # einem Market-Verkauf mit Grund "signal" erzwingt das nicht (E8).
+        if partial_from_stop(open_trade):
             reason = "stop_loss"
+        if float(open_trade.get("partial_exit_qty") or 0.0) > 0:
             if self._remainder_is_dust(open_quantity(open_trade), price, rules):
-                self._close_with_dust(open_trade, price, rules)
+                self._close_with_dust(open_trade, price, rules, reason=reason)
                 return
         sell_quantity = open_quantity(open_trade)
 
@@ -862,6 +885,22 @@ class TrendFollowingStrategy:
                 self._handle_failed_real_sell(open_trade, price)
                 return
 
+            # Nur teilweise ausgefuehrt (Runde 2, 19.10.2026)? Dann den Teil
+            # verbuchen, die Order-Frage schliessen und den Rest wieder
+            # absichern - die Stop-Order ist oben schon storniert worden.
+            # Verkauft wird der Rest im naechsten Tageszyklus (Entscheidung
+            # D1). Entschieden wird ueber die Menge (order_utils.sold_fully),
+            # nicht ueber den Status.
+            if order is not None and not sold_fully(
+                sell_quantity, executed_quantity(order), rules
+            ):
+                self._book_market_partial(open_trade, order, rules, reason, price)
+                self._client.confirm_booked(order.get("clientOrderId"))
+                self._protect_rest_after_partial(
+                    open_trade, average_fill_price(order, fallback=price), reason
+                )
+                return
+
         if order is not None:
             # Tatsaechlicher Fuellpreis statt des vorher abgefragten
             # Tickers - siehe _open_position; _record_reconciled_exit macht
@@ -909,6 +948,185 @@ class TrendFollowingStrategy:
             self._stop_loss.pause(
                 self._config.symbol, open_trade["entry_price"], exit_price, loss_pct
             )
+
+    def _book_market_partial(
+        self,
+        open_trade: dict,
+        order: dict,
+        rules,
+        reason: str,
+        price: float,
+        log_prefix: str = "",
+    ) -> bool:
+        """
+        Verbucht einen nur teilweise ausgefuehrten eigenen Market-Verkauf
+        (Runde 2, 19.10.2026) - gemeinsam fuer den direkten Pfad
+        (_close_position) und die Reconciliation (_record_reconciled_exit).
+
+        Gebucht wird die AUSGEFUEHRTE Menge (`executedQty` aus der Antwort,
+        `fills` nur fuer die Gebuehr) mit Brutto- und Netto-Erloes ueber
+        record_partial_exit, idempotent ueber die orderId. `from_stop` ist
+        True, wenn der Verkauf den Grund "stop_loss" hatte (Entscheidung D2) -
+        dann schliesst der Rest spaeter mit stop_loss und Sperre, auch wenn
+        sich der Kurs bis dahin erholt hat. Der `open_trade`-Dict wird aus dem
+        Ledger nachgezogen. Die Position bleibt offen; die Absicherung des
+        Rests uebernimmt der Aufrufer (_protect_rest_after_partial).
+        """
+        executed = executed_quantity(order)
+        fill_price = average_fill_price(order, fallback=price)
+        gross = fill_price * executed
+        proceeds = net_proceeds(order, rules, fallback=gross)
+        order_id = order.get("orderId")
+        if order_id is None:
+            raise ValueError(
+                f"Teilverkauf {order.get('clientOrderId')} ohne orderId - ohne sie "
+                "liesse er sich nicht idempotent verbuchen, nichts gebucht."
+            )
+        booked = self._ledger.record_partial_exit(
+            open_trade["id"],
+            str(order_id),
+            executed,
+            gross,
+            proceeds,
+            from_stop=(reason == "stop_loss"),
+        )
+        open_trade.update(self._ledger.trade_by_id(open_trade["id"]) or {})
+        if booked:
+            reason_label = "Stop-Loss" if reason == "stop_loss" else "Signal-Umkehr"
+            rest = open_quantity(open_trade)
+            logger.warning(
+                "%s[TREND-TEILVERKAUF] Ausstieg (%s) nur teilweise ausgefuehrt: "
+                "Boerse meldet %s, %.8f %s @ %.2f verkauft. Verbucht, die Position "
+                "bleibt mit %.8f offen; der Rest wird im naechsten Tageszyklus "
+                "verkauft.",
+                log_prefix,
+                reason_label,
+                order.get("status"),
+                executed,
+                self._config.symbol,
+                fill_price,
+                rest,
+            )
+            send_notification(
+                f"{log_prefix}[TREND-TEILVERKAUF] {self._config.symbol} ({reason_label}): "
+                f"nur {executed:.8f} @ {fill_price:.2f} verkauft (Boerse meldet "
+                f"{order.get('status')}). Verbucht - der Rest ({rest:.8f}) bleibt "
+                "offen und wird im naechsten Tageszyklus verkauft."
+            )
+        return booked
+
+    def _protect_rest_after_partial(
+        self, open_trade: dict, price: float, reason: str, log_prefix: str = ""
+    ) -> None:
+        """
+        Sichert den Rest nach einem Teilverkauf wieder ab (Runde 2,
+        Entscheidung D1): Die Stop-Order war vor dem Verkauf storniert, der
+        Rest liegt ungeschuetzt auf dem Konto, und der Trend-Bot verkauft ihn
+        erst im naechsten Tageszyklus.
+
+        - Rest unter dem Mindestvolumen zum Limit-Preis der neuen Stop-Order
+          (dieselbe Regel wie in _ensure_stop_loss_protection, K-A): Binance
+          wuerde auch die Stop-Order ablehnen - Position als Staub schliessen,
+          Grund stop_loss nur nach einem Stop-Loss-Ereignis (E8/D2).
+        - Sonst neue Stop-Order ueber den Rest, Schwelle wie beim Einstieg.
+        - Wird sie nicht platziert, kommt SOFORT eine Telegram-Meldung "Rest
+          ungeschuetzt" mit Menge und Preis (Auflage zu D1) - nicht erst ab
+          dem dritten ungeschuetzten Zyklus wie in
+          _ensure_stop_loss_protection. Der Zaehler unprotected_cycles laeuft
+          trotzdem mit, der naechste Tageszyklus versucht es erneut.
+
+        Beim internen Stop-Loss liegt der Kurs schon unter der Stop-Schwelle.
+        Dass Binance die neue Stop-Order dann ablehnt ("would immediately
+        trigger"), ist eine ANNAHME aus dem Kommentar in execute_once (vor
+        _ensure_stop_loss_protection) und nicht an der Boerse geprueft. Der
+        Code behandelt beide Ausgaenge.
+        """
+        rules = self._client.get_symbol_trading_rules(self._config.symbol)
+        rest = open_quantity(open_trade)
+        stop_price = open_trade["entry_price"] * (1 - self._config.stop_loss_pct / 100)
+        limit_price = stop_price * (1 - self._config.stop_limit_offset_pct / 100)
+
+        if self._remainder_is_dust(rest, limit_price, rules):
+            close_reason = "stop_loss" if partial_from_stop(open_trade) else reason
+            self._close_with_dust(open_trade, price, rules, log_prefix, reason=close_reason)
+            return
+
+        # Sperre wie in _ensure_stop_loss_protection (W-B): Steht fuer diesen
+        # Trade schon eine Stop-Order mit ungeklaertem Ausgang in der
+        # Pending-Datei, kann sie an der Boerse liegen - eine zweite ueber
+        # denselben Rest waere aus fremdem Bestand gedeckt. Erreichbar nur aus
+        # der Reconciliation; im direkten Pfad bricht _close_position bei
+        # offenen Order-Fragen vorher ab. Der Market-Verkauf, dessen Teil hier
+        # gerade gebucht wurde, zaehlt nicht mit.
+        def unclear_stops() -> list[str]:
+            return [
+                p.client_order_id
+                for p in self._pending_sells(open_trade)
+                if p.kind == KIND_STOP_LOSS_LIMIT
+            ]
+
+        unclear = unclear_stops()
+        stop_order = None
+        if not unclear:
+            stop_order = self._client.place_stop_loss_limit_sell(
+                self._config.symbol,
+                rest,
+                stop_price,
+                limit_price,
+                context={"trade_id": open_trade["id"], "limit_price": limit_price},
+            )
+        if stop_order is not None:
+            order_id = str(stop_order["orderId"])
+            self._ledger.set_stop_loss_order(open_trade["id"], order_id, limit_price)
+            self._client.confirm_booked(stop_order.get("clientOrderId"))
+            open_trade["stop_loss_order_id"] = order_id
+            open_trade["stop_limit_price"] = limit_price
+            logger.info(
+                "%s[TREND-TEILVERKAUF] Rest %.8f %s mit neuer Stop-Loss-Order %s "
+                "abgesichert (Stop %.2f, Limit %.2f).",
+                log_prefix,
+                rest,
+                rules.base_asset,
+                order_id,
+                stop_price,
+                limit_price,
+            )
+            return
+
+        # Steht die (fruehere oder eben versuchte) Stop-Order als Order-Frage
+        # in der Pending-Datei, ist ihr Ausgang unklar - dann kann sie an der
+        # Boerse liegen ([ORDER-UNKLAR] kam vom Client). Sonst wurde sie
+        # abgelehnt.
+        unclear = unclear_stops()
+        state = (
+            f"Ausgang der Stop-Order {', '.join(unclear)} ungeklaert"
+            if unclear
+            else "neue Stop-Order nicht platziert"
+        )
+        logger.error(
+            "%s[TREND-WARNUNG] Rest ungeschuetzt: %.8f %s nach dem Teilverkauf "
+            "(Preis ~%.2f), %s (Stop %.2f). Verkauf des Rests im naechsten "
+            "Tageszyklus; bis dahin nur software-intern abgesichert, und das wird "
+            "nur einmal am Tag geprueft.",
+            log_prefix,
+            rest,
+            rules.base_asset,
+            price,
+            state,
+            stop_price,
+        )
+        send_notification(
+            f"{log_prefix}[TREND-WARNUNG] {self._config.symbol}: Rest ungeschuetzt - "
+            f"{rest:.8f} {rules.base_asset} nach Teilverkauf @ {price:.2f}, {state} "
+            f"(Stop {stop_price:.2f}). Verkauf des Rests im naechsten Tageszyklus, bis "
+            "dahin keine Absicherung an der Boerse. Bitte pruefen."
+        )
+        self._count_unprotected_cycle(
+            open_trade,
+            int(open_trade.get("unprotected_cycles") or 0),
+            log_prefix,
+            cause="die Stop-Order fuer den Rest nach dem Teilverkauf wurde nicht platziert",
+        )
 
     def _sell_is_covered(self, open_trade: dict) -> bool:
         """
@@ -1051,6 +1269,11 @@ class TrendFollowingStrategy:
             for pending in remaining:
                 state, order = resolve_pending_order(self._client, pending)
                 if state == ORDER_CONFIRMED:
+                    # Auch ein nur teilweise ausgefuehrter Verkauf (Runde 2):
+                    # _record_reconciled_exit verbucht den Teil und sichert
+                    # den Rest sofort wieder ab - bzw. meldet eine abgelehnte
+                    # Stop-Order sofort. Fuer den Aufrufer ist der Fall damit
+                    # erledigt, er darf keine zweite Absicherung platzieren.
                     self._record_reconciled_exit(pending, order)
                     store.remove(pending.client_order_id)
                     return True
@@ -1314,7 +1537,10 @@ class TrendFollowingStrategy:
             rules = self._client.get_symbol_trading_rules(self._config.symbol)
             if self._remainder_is_dust(open_quantity(open_trade), limit_price, rules):
                 price = self._client.get_current_price(self._config.symbol)
-                self._close_with_dust(open_trade, price, rules, log_prefix)
+                # Grund nach E8/D2: stop_loss nur nach einem Stop-Loss-
+                # Ereignis, sonst stammt der Teil aus einem Signal-Ausstieg.
+                reason = "stop_loss" if partial_from_stop(open_trade) else "signal"
+                self._close_with_dust(open_trade, price, rules, log_prefix, reason=reason)
                 return
 
         stop_order = self._client.place_stop_loss_limit_sell(
@@ -1995,6 +2221,35 @@ class TrendFollowingStrategy:
                 "stattgefunden, lässt sich aber keiner Position zuordnen."
             )
 
+        symbol = pending.symbol or self._config.symbol
+        reason = str(pending.context.get("reason", "signal"))
+        context_price = float(pending.context.get("price", 0.0)) or 0.0
+
+        # Schon als Teilverkauf verbucht (Runde 2, 19.10.2026)? Dann ist
+        # nichts nachzutragen - auch wenn der Trade inzwischen mit einer
+        # ANDEREN Order geschlossen wurde; ohne diese Pruefung zuerst hielte
+        # der Zweig darunter genau das fuer einen Doppelverkauf. Starb der
+        # Prozess nach dem Verbuchen, aber vor der Absicherung des Rests,
+        # wird die jetzt nachgeholt.
+        order_id = order.get("orderId")
+        booked_ids = {str(i) for i in (open_trade.get("partial_exit_order_ids") or [])}
+        if order_id is not None and str(order_id) in booked_ids:
+            logger.info(
+                "%sTeilverkauf zu Order %s ist bei Trade %s bereits verbucht - "
+                "nichts nachzutragen.",
+                RECONCILIATION_PREFIX,
+                pending.client_order_id,
+                trade_id,
+            )
+            if open_trade["status"] == "open" and not open_trade.get("stop_loss_order_id"):
+                self._protect_rest_after_partial(
+                    open_trade,
+                    average_fill_price(order, fallback=context_price),
+                    reason,
+                    RECONCILIATION_PREFIX,
+                )
+            return
+
         if open_trade["status"] != "open":
             if open_trade.get("exit_client_order_id") == pending.client_order_id:
                 logger.info(
@@ -2019,15 +2274,25 @@ class TrendFollowingStrategy:
                 "(python -m dca_bot.audit_positions)."
             )
 
-        symbol = pending.symbol or self._config.symbol
-        reason = str(pending.context.get("reason", "signal"))
-
         rules = self._client.get_symbol_trading_rules(symbol)
         order = self._client.get_order_with_fills(symbol, order)
 
-        exit_price = average_fill_price(
-            order, fallback=float(pending.context.get("price", 0.0)) or 0.0
-        )
+        # Dieselbe Regel wie im direkten Pfad (Runde 2): nur teilweise
+        # ausgefuehrt -> Teil verbuchen, Rest sofort wieder absichern (oder
+        # eine abgelehnte Stop-Order sofort melden), Position bleibt offen.
+        if not sold_fully(open_quantity(open_trade), executed_quantity(order), rules):
+            self._book_market_partial(
+                open_trade, order, rules, reason, context_price, RECONCILIATION_PREFIX
+            )
+            self._protect_rest_after_partial(
+                open_trade,
+                average_fill_price(order, fallback=context_price),
+                reason,
+                RECONCILIATION_PREFIX,
+            )
+            return
+
+        exit_price = average_fill_price(order, fallback=context_price)
         sold_qty = open_quantity(open_trade)
         proceeds = net_proceeds(order, rules, fallback=sold_qty * exit_price)
         exit_price, proceeds = self._with_partial_fill(

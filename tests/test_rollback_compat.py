@@ -173,6 +173,13 @@ def write_new_format_files(data: Path) -> dict[str, str]:
     dust_trade.exit_reason, dust_trade.realized_pnl = "dust_on_entry", -3.0
     dust_trade.dust_qty = 0.00006
     trend.record_entry(dust_trade)
+    # Teilverkauf per Market-Order mit Grund "signal" (Runde 2): geschlossen.
+    partial_trade = TrendTrade.new(entry_price=49_000.0, quantity=0.0003, quote_spent=14.7,
+                                   dry_run=False, client_order_id="trend-partial", symbol="BTCUSDT")
+    trend.record_entry(partial_trade)
+    trend.record_partial_exit(partial_trade.id, "4713", 0.00015, 7.5, 7.49, from_stop=False)
+    trend.record_exit(partial_trade.id, 50_000.0, datetime.now(timezone.utc).isoformat(),
+                      "signal", 0.3, "trend-partial-exit")
     open_trade = TrendTrade.new(entry_price=50_000.0, quantity=0.0003, quote_spent=15.0,
                                 dry_run=False, client_order_id="trend-open", symbol="BTCUSDT")
     trend.record_entry(open_trade)
@@ -344,6 +351,10 @@ assert exited["symbol"] == "BTCUSDT", "Trend: Feld symbol verloren"
 dust_trades = [t for t in TrendLedger(P["trend"])._read() if t.get("client_order_id") == "trend-dust"]
 assert len(dust_trades) == 1 and dust_trades[0]["exit_reason"] == "dust_on_entry", \
     "Trend: Staub-Trade verloren"
+partial_trades = [t for t in TrendLedger(P["trend"])._read() if t.get("client_order_id") == "trend-partial"]
+assert len(partial_trades) == 1 and partial_trades[0]["partial_exit_from_stop"] is False \
+    and partial_trades[0]["partial_exit_order_ids"] == ["4713"], \
+    "Trend: Teilverkaufs-Felder haben den Schreibvorgang des alten Codes nicht ueberlebt"
 
 from dca_bot.config import Config
 from dca_bot.strategy import DCAStrategy
@@ -493,6 +504,74 @@ def write_open_partial_grid_file(data: Path) -> dict[str, str]:
     return paths
 
 
+# Laeuft im ALTEN Code: ein OFFENER Trend-Trade mit einem Teil aus einem
+# Market-Verkauf mit Grund "signal" (Runde 2, partial_exit_from_stop False).
+# Der interne Stop-Loss loest aus; ausgegeben werden verkaufte Mengen und
+# Ausstiegsgrund.
+OPEN_PARTIAL_TREND_SCRIPT = r'''
+import json, logging, sys
+P = json.loads(sys.argv[1])
+logging.disable(logging.CRITICAL)
+from unittest import mock
+from dca_bot.order_utils import SymbolTradingRules
+from dca_bot.pending_orders import PendingOrderStore
+RULES = SymbolTradingRules(symbol="BTCUSDT", tick_size=0.01, step_size=0.00001,
+                           min_notional=5.0, base_asset="BTC", quote_asset="USDT",
+                           quote_precision=8)
+
+class Fake:
+    def __init__(self, pending_file):
+        self.pending_orders = PendingOrderStore(pending_file, "trend")
+        self.price, self.sells = 44000.0, []
+    def get_current_price(self, s): return self.price
+    def get_symbol_trading_rules(self, s): return RULES
+    def get_asset_balance(self, a): return (1000.0, 0.0)
+    def get_open_orders(self, s): return []
+    def get_order_by_client_id(self, s, c): return ("not_found", None)
+    def get_order_with_fills(self, s, o): return o
+    def get_order_status(self, s, oid): return None
+    def cancel_order(self, s, oid): return None
+    def place_market_buy(self, s, amount, context=None): return None
+    def place_market_sell(self, s, qty, context=None):
+        self.sells.append(qty)
+        return {"clientOrderId": "alt-1", "orderId": 1, "status": "FILLED",
+                "executedQty": str(qty), "cummulativeQuoteQty": str(qty * self.price), "fills": []}
+    def place_stop_loss_limit_sell(self, *a, **k): return None
+    def confirm_booked(self, cid):
+        if cid: self.pending_orders.remove(cid)
+
+from dca_bot.trend_config import TrendConfig
+from dca_bot.trend_risk import TrendLedger
+from dca_bot.trend_strategy import TrendFollowingStrategy
+cfg = TrendConfig(api_key="k", api_secret="s", symbol="BTCUSDT", trading_enabled=True,
+                  kill_switch_file=P["stop"], state_file=P["trend"],
+                  stop_loss_state_file=P["tmp"] + "/trend_sl.json",
+                  pending_orders_file=P["tmp"] + "/p_trend.json", bot_name="trend")
+client = Fake(cfg.pending_orders_file)
+strategy = TrendFollowingStrategy(cfg, client)
+strategy._seeded = True
+with mock.patch("dca_bot.trend_strategy.send_notification"):
+    strategy.execute_once()
+trade = TrendLedger(P["trend"])._read()[0]
+print("ERGEBNIS", json.dumps({"sells": client.sells, "status": trade["status"],
+                              "reason": trade.get("exit_reason")}))
+'''
+
+
+def write_open_partial_trend_file(data: Path) -> dict[str, str]:
+    """Ein Trend-Ledger mit einem OFFENEN Trade, der zur Haelfte per Market-Verkauf
+    (Grund "signal") verkauft ist und noch keine neue Stop-Order hat."""
+    data.mkdir(parents=True, exist_ok=True)
+    paths = {"trend": str(data / "trend_ledger.json"), "tmp": str(data),
+             "stop": str(data / "STOP_UNUSED")}
+    trend = TrendLedger(paths["trend"])
+    trade = TrendTrade.new(entry_price=50_000.0, quantity=0.0003, quote_spent=15.0,
+                           dry_run=False, client_order_id="trend-open", symbol="BTCUSDT")
+    trend.record_entry(trade)
+    trend.record_partial_exit(trade.id, "4714", 0.00015, 7.5, 7.49, from_stop=False)
+    return paths
+
+
 class NewFilesPremiseTestCase(unittest.TestCase):
     """Praemisse: Die Dateien, die der alte Code lesen soll, tragen das neue Feld wirklich."""
 
@@ -507,6 +586,8 @@ class NewFilesPremiseTestCase(unittest.TestCase):
             self.assertTrue(any(r.get("close_reason") == "dust_after_sell"
                                 and r.get("partial_exit_order_ids") == ["4711"] for r in grid))
             self.assertTrue(any(r.get("exit_reason") == "dust_on_entry" for r in trend))
+            self.assertTrue(any(r.get("partial_exit_from_stop") is False
+                                and r.get("partial_exit_order_ids") == ["4713"] for r in trend))
             self.assertTrue(all(r["symbol"] == "BTCUSDT" for r in trend))
             self.assertEqual(alloc["symbol"], "BTCUSDT")
             for latch in ("dca_sl", "grid_sl", "trend_sl"):
@@ -561,6 +642,36 @@ class OpenPartialGridPositionTestCase(unittest.TestCase):
                 line = [x for x in result.stdout.splitlines() if x.startswith("VERKAUFT")][-1]
                 self.assertEqual(json.loads(line.split(" ", 1)[1]), [0.0002],
                                  "alter Code verkauft die volle Kaufmenge, nicht den Rest 0.0001")
+
+
+class OpenPartialTrendTradeTestCase(unittest.TestCase):
+    """
+    Belegt den Hinweis zu Entscheidung D6: Ein offener Trend-Trade mit einem
+    Teil aus einem Market-Verkauf blockiert den Rueckweg nicht. Der alte Code
+    verkauft nur die offene Menge (open_quantity gibt es dort seit K-A), kennt
+    aber `partial_exit_from_stop` nicht und behandelt jede Teilmenge als
+    Stop-Loss-Teil - nach einem Rueckweg schliesst so ein Trade also mit
+    Grund stop_loss und Sperre, auch wenn der Teil vom Signal kam.
+    """
+
+    def test_old_code_sells_only_the_rest(self):
+        for commit, tree, meaning in OLD_STATES:
+            with self.subTest(stand=commit, bedeutung=meaning):
+                status = old_code_available(commit, tree)
+                if status is not None:
+                    kind, reason = status
+                    if kind == FAIL:
+                        self.fail(f"Rueckweg gegen {commit} nicht pruefbar: {reason}")
+                    self.skipTest(f"Rueckweg gegen {commit} NICHT geprueft: {reason}")
+                with tempfile.TemporaryDirectory() as tmp:
+                    paths = write_open_partial_trend_file(Path(tmp) / "data")
+                    result = run_old_code(commit, paths, Path(tmp) / "alt", OPEN_PARTIAL_TREND_SCRIPT)
+                self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr[-3000:]}")
+                line = [x for x in result.stdout.splitlines() if x.startswith("ERGEBNIS")][-1]
+                outcome = json.loads(line.split(" ", 1)[1])
+                self.assertEqual(outcome["sells"], [0.00015], outcome)
+                self.assertEqual(outcome["status"], "closed", outcome)
+                self.assertEqual(outcome["reason"], "stop_loss", outcome)
 
 
 if __name__ == "__main__":
