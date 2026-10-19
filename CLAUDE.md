@@ -36,8 +36,8 @@ gibt es nur auf Deutsch.
   git log. ACHTUNG: Das ist nicht automatisch der Stand auf den Servern -
   deren tatsächlicher Commit-Hash steht in trading-bot-projekt.md,
   Abschnitt „Aktueller Stand und offene Punkte“, unter „Deploy-Stand“
-  (seit 16.10.2026: 652e618 auf dem Homeserver, vor dem Umschreiben
-  76f261b; Server-HEAD seit 19.10.2026 57de9e9, nur Doku). Neue Deploys
+  (seit 19.10.2026: 6da22bc auf dem Homeserver, Runde 2; Server-HEAD
+  91fbc08, nur Doku obendrauf; Rückweg 652e618). Neue Deploys
   werden dort vermerkt.
 - VPS: abgeschlossen seit 07.10.2026, Vertrag lief bis 12.10.2026 (gekündigt)
 - Für echtes Geld: BTCEUR (nicht USDT, im EWR nicht handelbar)
